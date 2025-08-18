@@ -1,0 +1,60 @@
+services:
+  backend:
+    build:
+      context: ./rust-backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://easm:easm@db:5432/easm # Optional; will auto-map to psycopg async driver
+      - OPENSEARCH_URL=http://opensearch:9200 # Optional
+      - CERTSPOTTER_API_TOKEN=${CERTSPOTTER_API_TOKEN}
+      - VIRUSTOTAL_API_KEY=${VIRUSTOTAL_API_KEY}
+      - SHODAN_API_KEY=${SHODAN_API_KEY}
+    depends_on:
+      - db
+      - opensearch
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      - NEXT_PUBLIC_API_BASE=http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: easm
+      POSTGRES_USER: easm
+      POSTGRES_DB: easm
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  opensearch:
+    image: opensearchproject/opensearch:2.14.0
+    environment:
+      - discovery.type=single-node
+      - plugins.ml_commons.only_run_on_ml_nodes=false
+      - bootstrap.memory_lock=true
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-ChangeThisPassword123!}
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+volumes:
+  pgdata:

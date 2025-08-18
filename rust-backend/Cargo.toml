@@ -1,0 +1,104 @@
+[package]
+name = "rust-backend"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rust-backend"
+path = "src/main.rs"
+
+[lib]
+name = "rust_backend"
+path = "src/lib.rs"
+
+[dependencies]
+# Web framework and async runtime
+axum = { version = "0.7", features = ["macros", "multipart"] }
+tokio = { version = "1.0", features = ["full"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
+hyper = { version = "1.0", features = ["full"] }
+
+# Database (PostgreSQL only)
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "migrate"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HTTP client for external APIs
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+
+# Configuration management
+config = "0.14"
+dotenvy = "0.15"
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Date and time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID generation
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Async traits
+async-trait = "0.1"
+
+# Network utilities
+trust-dns-resolver = "0.23"
+ipnet = "2.9"
+
+# TLS and crypto
+rustls = "0.22"
+rustls-pemfile = "2.0"
+tokio-rustls = "0.25"
+webpki-roots = "0.26"
+x509-parser = "0.16"
+
+# HTML parsing and regex
+regex = "1.10"
+html-escape = "0.2"
+url = "2.5"
+
+# Rate limiting and concurrency
+governor = "0.6"
+futures = "0.3"
+
+# Validation
+validator = { version = "0.18", features = ["derive"] }
+
+# URL encoding
+urlencoding = "2.1"
+
+# File handling
+mime = "0.3"
+mime_guess = "2.0"
+
+# Environment and CLI (for development)
+clap = { version = "4.0", features = ["derive"] }
+
+# Search indexing
+elasticsearch = "8.5.0-alpha.1"
+
+[dev-dependencies]
+# Testing
+tokio-test = "0.4"
+tempfile = "3.8"
+wiremock = "0.6"
+hyper = { version = "1.0", features = ["full"] }
+futures = "0.3"
+
+# Performance testing and benchmarking
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+tokio-metrics = "0.3"
+memory-stats = "1.1"
+
+# Load testing
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+serde_yaml = "0.9"

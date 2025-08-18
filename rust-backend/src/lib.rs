@@ -1,0 +1,149 @@
+use std::sync::Arc;
+use crate::{
+    config::Settings,
+    database::DatabasePool,
+    repositories::{ScanRepository, FindingRepository, AssetRepository, EvidenceRepository, SeedRepository},
+    services::{ScanService, DiscoveryService, TaskManager, DriftService, DriftServiceImpl, SearchService, ElasticsearchService, MetricsService},
+    services::external::{ExternalServicesManager, DnsResolver, HttpAnalyzer},
+};
+
+pub mod config;
+pub mod database;
+pub mod error;
+pub mod handlers;
+pub mod middleware;
+pub mod models;
+pub mod repositories;
+pub mod services;
+pub mod utils;
+
+/// Shared application state containing all dependencies
+#[derive(Clone)]
+pub struct AppState {
+    pub config: Arc<Settings>,
+    pub settings: Settings, // For compatibility with handlers
+    pub db_pool: DatabasePool,
+    pub scan_service: Arc<ScanService>,
+    pub discovery_service: Arc<DiscoveryService>,
+    pub drift_service: Arc<dyn DriftService + Send + Sync>,
+    pub search_service: Option<Arc<dyn SearchService + Send + Sync>>,
+    pub metrics_service: Arc<MetricsService>,
+    pub scan_repository: Arc<dyn ScanRepository + Send + Sync>,
+    pub finding_repository: Arc<dyn FindingRepository + Send + Sync>,
+    pub asset_repository: Arc<dyn AssetRepository + Send + Sync>,
+    pub evidence_repository: Arc<dyn EvidenceRepository + Send + Sync>,
+    pub seed_repository: Arc<dyn SeedRepository + Send + Sync>,
+    // Add convenience accessors for handlers
+    pub scan_repo: Arc<dyn ScanRepository + Send + Sync>,
+    pub finding_repo: Arc<dyn FindingRepository + Send + Sync>,
+}
+
+impl AppState {
+    /// Create new application state with dependency injection
+    pub async fn new(config: Settings) -> Result<Self, crate::error::ApiError> {
+        let db_pool = crate::database::create_connection_pool(&config.database_url).await?;
+        Self::new_with_pool(config, db_pool).await
+    }
+    
+    /// Create new application state with existing database pool
+    pub async fn new_with_pool(config: Settings, db_pool: DatabasePool) -> Result<Self, crate::error::ApiError> {
+        let config_arc = Arc::new(config.clone());
+        
+        // Create repositories
+        let scan_repository: Arc<dyn ScanRepository + Send + Sync> = Arc::new(
+            crate::repositories::SqlxScanRepository::new(db_pool.clone())
+        );
+        let finding_repository: Arc<dyn FindingRepository + Send + Sync> = Arc::new(
+            crate::repositories::SqlxFindingRepository::new(db_pool.clone())
+        );
+        let asset_repository: Arc<dyn AssetRepository + Send + Sync> = Arc::new(
+            crate::repositories::SqlxAssetRepository::new(db_pool.clone())
+        );
+        let evidence_repository: Arc<dyn EvidenceRepository + Send + Sync> = Arc::new(
+            crate::repositories::SqlxEvidenceRepository::new(db_pool.clone())
+        );
+        let seed_repository: Arc<dyn SeedRepository + Send + Sync> = Arc::new(
+            crate::repositories::SqlxSeedRepository::new(db_pool.clone())
+        );
+        
+        // Create external services and utilities
+        let external_services = Arc::new(ExternalServicesManager::new(config_arc.clone())?);
+        let dns_resolver = Arc::new(DnsResolver::new().await?);
+        let http_analyzer = Arc::new(HttpAnalyzer::new()?);
+        let task_manager = Arc::new(TaskManager::new(config_arc.clone()));
+        
+        // Create services with dependency injection
+        let scan_service = Arc::new(ScanService::new(
+            scan_repository.clone(),
+            finding_repository.clone(),
+            asset_repository.clone(),
+            external_services.clone(),
+            dns_resolver.clone(),
+            http_analyzer.clone(),
+            http_analyzer.clone(), // TlsAnalyzer is an alias for HttpAnalyzer
+            task_manager.clone(),
+            config_arc.clone(),
+        ));
+        
+        let discovery_service = Arc::new(DiscoveryService::new(
+            asset_repository.clone(),
+            seed_repository.clone(),
+            external_services.clone(),
+            dns_resolver.clone(),
+            http_analyzer.clone(),
+            task_manager.clone(),
+            config_arc.clone(),
+        ));
+        
+        // Create drift service
+        let drift_service: Arc<dyn DriftService + Send + Sync> = Arc::new(
+            DriftServiceImpl::new(
+                finding_repository.clone(),
+                scan_repository.clone(),
+            )
+        );
+        
+        // Create search service (optional, only if Elasticsearch is configured)
+        let search_service = if config_arc.elasticsearch_url.is_some() {
+            match ElasticsearchService::new(config_arc.clone()) {
+                Ok(service) => {
+                    let service: Arc<dyn SearchService + Send + Sync> = Arc::new(service);
+                    // Initialize indices on startup
+                    if let Err(e) = service.initialize_indices().await {
+                        tracing::warn!("Failed to initialize search indices: {}", e);
+                    }
+                    Some(service)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to create search service: {}", e);
+                    None
+                }
+            }
+        } else {
+            tracing::info!("Elasticsearch not configured, search service disabled");
+            None
+        };
+        
+        // Create metrics service
+        let metrics_service = Arc::new(MetricsService::new());
+        
+        Ok(Self {
+            config: config_arc,
+            settings: config,
+            db_pool,
+            scan_service,
+            discovery_service,
+            drift_service,
+            search_service,
+            metrics_service,
+            scan_repository: scan_repository.clone(),
+            finding_repository: finding_repository.clone(),
+            asset_repository,
+            evidence_repository,
+            seed_repository,
+            // Add convenience accessors for handlers
+            scan_repo: scan_repository,
+            finding_repo: finding_repository,
+        })
+    }
+}

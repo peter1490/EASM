@@ -1,0 +1,32 @@
+use axum::{
+    extract::State,
+    response::Json,
+};
+use serde_json::{json, Value};
+use crate::{
+    error::ApiError,
+    AppState,
+};
+
+pub async fn run_discovery(
+    State(app_state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    app_state.discovery_service.run_discovery().await?;
+    
+    // For API compatibility with the Python backend, return numeric fields
+    Ok(Json(json!({
+        "discovered_assets": 0,
+        "scheduled_scans": 0
+    })))
+}
+
+pub async fn discovery_status(
+    State(app_state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    let status = app_state.discovery_service.get_discovery_status().await;
+    
+    // API compatibility: return { "running": bool }
+    Ok(Json(json!({
+        "running": status.is_running
+    })))
+}

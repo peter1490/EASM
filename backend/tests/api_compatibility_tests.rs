@@ -7,7 +7,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 mod common;
-use common::*;
+use common::{extract_body, create_test_app};
 
 /// Test suite comparing Rust and Python API responses for compatibility
 /// This ensures the Rust backend maintains 100% API compatibility with the Python backend

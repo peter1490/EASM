@@ -181,7 +181,6 @@ impl CertSpotterClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{matchers::{method, query_param}, Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
     async fn test_certspotter_client_creation() {

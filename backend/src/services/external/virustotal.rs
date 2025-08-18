@@ -234,7 +234,6 @@ impl VirusTotalClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{matchers::{method, header}, Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
     async fn test_virustotal_client_creation() {

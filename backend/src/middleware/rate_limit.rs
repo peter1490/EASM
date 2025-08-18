@@ -176,11 +176,9 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
         middleware,
-        response::Response,
         routing::get,
         Router,
     };
-    use std::time::Duration;
     use tower::ServiceExt;
 
     async fn test_handler() -> &'static str {

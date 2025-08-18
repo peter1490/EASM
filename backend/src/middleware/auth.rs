@@ -91,7 +91,7 @@ mod tests {
     use super::*;
     use axum::{
         body::Body,
-        http::{Request, HeaderValue},
+        http::Request,
         middleware,
         routing::get,
         Router,

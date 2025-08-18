@@ -109,7 +109,7 @@ impl Settings {
     }
     
     /// Create new settings instance with optional .env file loading
-    pub fn new_with_env_file(load_env_file: bool) -> Result<Self, ConfigError> {
+    pub fn new_with_env_file(_load_env_file: bool) -> Result<Self, ConfigError> {
         // Serialize settings construction to avoid cross-test environment races
         // Tests frequently mutate process env; locking ensures consistent reads
         static SETTINGS_BUILD_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
@@ -119,7 +119,7 @@ impl Settings {
         // Load .env file if it exists and requested (skip during tests for determinism)
         #[cfg(not(test))]
         {
-            if load_env_file {
+            if _load_env_file {
                 dotenvy::dotenv().ok();
             }
         }
@@ -191,7 +191,7 @@ impl Settings {
         // Load .env as a configuration source instead of mutating process environment (skip in tests)
         #[cfg(not(test))]
         {
-            if load_env_file {
+            if _load_env_file {
                 builder = builder.add_source(config::File::with_name(".env").required(false));
             }
         }

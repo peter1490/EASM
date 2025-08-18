@@ -7,7 +7,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 mod common;
-use common::*;
+use common::{extract_body, create_test_app, is_valid_datetime_string, is_valid_uuid_string};
 
 /// End-to-end integration tests with real database operations
 /// These tests verify complete workflows work correctly

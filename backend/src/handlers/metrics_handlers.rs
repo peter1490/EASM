@@ -77,7 +77,6 @@ pub async fn get_health_metrics(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
     use crate::services::MetricsService;
 
@@ -109,6 +108,6 @@ mod tests {
         
         assert_eq!(report.endpoints.len(), 1);
         assert_eq!(report.overall.total_requests, 2);
-        assert!(report.system.uptime_seconds >= 0);
+        assert!(report.system.uptime_seconds > 0 || report.system.uptime_seconds == 0);
     }
 }

@@ -483,7 +483,7 @@ impl SearchService for ElasticsearchService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{AssetType, ScanStatus};
+    use crate::models::AssetType;
     use chrono::Utc;
     use serde_json::json;
 

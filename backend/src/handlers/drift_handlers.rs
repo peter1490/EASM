@@ -113,19 +113,4 @@ pub async fn get_drift_findings(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{
-        body::Body,
-        extract::State,
-        http::{Request, StatusCode},
-    };
-    use serde_json::json;
-    use std::sync::Arc;
-    use tower::ServiceExt;
-    use uuid::Uuid;
-
-    // Mock implementations would go here for testing
-    // For brevity, I'll skip the full test implementation
-    // but in a real scenario, we'd test the handlers with mock services
-}
+mod tests {}

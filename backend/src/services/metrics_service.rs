@@ -236,7 +236,6 @@ impl Default for MetricsService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
 
     #[test]
     fn test_metrics_service_creation() {
@@ -281,7 +280,7 @@ mod tests {
         let report = service.generate_report();
         assert_eq!(report.endpoints.len(), 1);
         assert_eq!(report.overall.total_requests, 1);
-        assert!(report.system.uptime_seconds >= 0);
+        assert!(report.system.uptime_seconds > 0 || report.system.uptime_seconds == 0);
     }
 
     #[test]

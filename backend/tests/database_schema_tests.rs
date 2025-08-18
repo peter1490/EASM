@@ -1,8 +1,6 @@
 use sqlx::{Row, PgPool};
 use std::collections::HashMap;
 
-mod common;
-use common::*;
 
 /// Test suite validating database schema compatibility between Rust and Python backends
 /// This ensures the Rust backend can work with existing Python backend databases

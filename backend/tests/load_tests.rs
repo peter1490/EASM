@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    http::{Request, StatusCode},
+    http::{Request},
 };
 use rust_backend::{config::Settings, database::create_connection_pool, AppState};
 use serde_json::json;
@@ -17,7 +17,7 @@ struct LoadTestConfig {
     concurrent_users: usize,
     requests_per_user: usize,
     ramp_up_duration: Duration,
-    test_duration: Duration,
+    _test_duration: Duration,
 }
 
 impl Default for LoadTestConfig {
@@ -26,7 +26,7 @@ impl Default for LoadTestConfig {
             concurrent_users: 10,
             requests_per_user: 50,
             ramp_up_duration: Duration::from_secs(10),
-            test_duration: Duration::from_secs(60),
+            _test_duration: Duration::from_secs(60),
         }
     }
 }
@@ -110,7 +110,7 @@ async fn test_mixed_workload_load() {
     let config = LoadTestConfig {
         concurrent_users: 25,
         requests_per_user: 30,
-        test_duration: Duration::from_secs(90),
+        _test_duration: Duration::from_secs(90),
         ..Default::default()
     };
     
@@ -136,7 +136,7 @@ async fn test_discovery_load() {
     let config = LoadTestConfig {
         concurrent_users: 5, // Lower concurrency for discovery operations
         requests_per_user: 10,
-        test_duration: Duration::from_secs(120),
+        _test_duration: Duration::from_secs(120),
         ..Default::default()
     };
     
@@ -574,7 +574,7 @@ async fn create_test_schema(pool: &rust_backend::database::DatabasePool) {
 }
 
 fn create_test_router(app_state: AppState) -> axum::Router {
-    use axum::routing::{get, post, delete};
+    use axum::routing::{get, post};
     use rust_backend::handlers;
     
     axum::Router::new()

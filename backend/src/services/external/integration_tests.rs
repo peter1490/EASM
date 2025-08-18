@@ -1,5 +1,4 @@
 use crate::config::Settings;
-use crate::error::ApiError;
 use super::{ExternalServicesManager, CrtShClient, ShodanClient, VirusTotalClient, CertSpotterClient};
 use std::sync::Arc;
 use wiremock::{matchers::{method, query_param, header}, Mock, MockServer, ResponseTemplate};

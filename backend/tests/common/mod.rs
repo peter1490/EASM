@@ -1,6 +1,5 @@
 use axum::Router;
 use rust_backend::{AppState, config};
-use tempfile::TempDir;
 
 /// Create a test application instance with in-memory database
 pub async fn create_test_app() -> Router {
@@ -82,58 +81,15 @@ pub fn create_test_router(app_state: AppState) -> Router {
         .with_state(app_state)
 }
 
-/// Helper to create test database with schema
-pub async fn create_test_database() -> String {
-    // Deprecated: tests should use DATABASE_URL to a PostgreSQL instance
-    std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests")
-}
+// Removed deprecated/unused helper constructors to reduce warnings
 
-/// Helper to create test scan data
-pub fn create_test_scan_data() -> serde_json::Value {
-    serde_json::json!({
-        "target": "example.com",
-        "note": "Test scan",
-        "options": {
-            "enumerate_subdomains": true,
-            "resolve_dns": true,
-            "reverse_dns": true,
-            "scan_common_ports": true,
-            "http_probe": true,
-            "tls_info": true,
-            "common_ports": [80, 443, 22],
-            "max_hosts": 1000
-        }
-    })
-}
-
-/// Helper to create test seed data
-pub fn create_test_seed_data() -> serde_json::Value {
-    serde_json::json!({
-        "seed_type": "domain",
-        "value": "example.com",
-        "note": "Test seed"
-    })
-}
-
-/// Helper to create test asset data
-pub fn create_test_asset_data() -> serde_json::Value {
-    serde_json::json!({
-        "asset_type": "domain",
-        "identifier": "example.com",
-        "confidence": 0.8,
-        "sources": ["crt.sh", "dns"],
-        "metadata": {
-            "organization": "Example Corp",
-            "country": "US"
-        }
-    })
-}
-
+#[allow(dead_code)] // Used in end_to_end_tests.rs
 /// Helper to validate datetime string format
 pub fn is_valid_datetime_string(datetime_str: &str) -> bool {
     chrono::DateTime::parse_from_rfc3339(datetime_str).is_ok()
 }
 
+#[allow(dead_code)] 
 /// Helper to validate UUID string format
 pub fn is_valid_uuid_string(uuid_str: &str) -> bool {
     uuid::Uuid::parse_str(uuid_str).is_ok()

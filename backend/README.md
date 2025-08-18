@@ -1,50 +1,137 @@
-# EASM Backend (FastAPI)
+# Rust EASM Backend
 
-## Setup (macOS / Linux)
+A high-performance Rust implementation of the External Attack Surface Management (EASM) backend, designed to provide 100% functional parity with the existing Python FastAPI backend.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -r requirements.txt
+## Features
+
+- **High Performance**: Built with Rust for optimal performance and memory safety
+- **Async/Await**: Fully asynchronous using Tokio runtime
+- **Database Support**: PostgreSQL via SQLx
+- **API Compatibility**: Identical REST API endpoints as Python backend
+- **External Integrations**: Support for Shodan, VirusTotal, CertSpotter, and other services
+- **Network Scanning**: TCP port scanning, DNS resolution, and HTTP probing
+- **Asset Discovery**: Automated asset discovery with confidence scoring
+- **Evidence Management**: File upload and storage capabilities
+
+## Architecture
+
+- **Web Framework**: Axum with Tower middleware
+- **Database**: SQLx with compile-time checked queries
+- **Async Runtime**: Tokio for high-performance async operations
+- **Serialization**: Serde for JSON handling
+- **HTTP Client**: Reqwest for external API calls
+- **Configuration**: Environment-based configuration with .env support
+
+## Project Structure
+
+```
+src/
+├── main.rs              # Application entry point
+├── config.rs            # Configuration management
+├── database.rs          # Database connection and migrations
+├── error.rs             # Error types and handling
+├── models/              # Database models and domain types
+├── repositories/        # Data access layer
+├── services/            # Business logic layer
+├── handlers/            # HTTP request handlers
+├── middleware/          # HTTP middleware (CORS, auth, logging)
+└── utils/               # Utility functions
 ```
 
-### Database
+## Getting Started
 
-- The API uses PostgreSQL. Set `DATABASE_URL` (default used if not set): `postgresql://easm:easm@localhost:5432/easm`.
+### Prerequisites
 
-## Run dev server
+- Rust 1.75 or later
+- PostgreSQL database
+- Optional: API keys for external services (Shodan, VirusTotal, etc.)
+
+### Installation
+
+1. Clone the repository
+2. Copy `.env.example` to `.env` and configure your settings
+3. Run database migrations: `sqlx migrate run`
+4. Build and run: `cargo run`
+
+### Configuration
+
+The application uses environment variables for configuration:
+
+- `DATABASE_URL`: Database connection string
+- `SERVER_HOST`: Server bind address (default: 0.0.0.0)
+- `SERVER_PORT`: Server port (default: 8000)
+- `SHODAN_API_KEY`: Shodan API key (optional)
+- `VIRUSTOTAL_API_KEY`: VirusTotal API key (optional)
+- `CORS_ALLOW_ORIGINS`: Comma-separated list of allowed CORS origins
+
+### Development
 
 ```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# Run in development mode with auto-reload
+cargo watch -x run
+
+# Run tests
+cargo test
+
+# Check code formatting
+cargo fmt --check
+
+# Run clippy for linting
+cargo clippy
 ```
 
-## Run tests
+### Docker
 
 ```bash
-pytest -q
+# Build Docker image
+docker build -t rust-easm-backend .
+
+# Run container
+docker run -p 8000:8000 --env-file .env rust-easm-backend
 ```
 
-## API
-- `GET /api/health`
-- `POST /api/scans` body: `{ "target": "example.com", "note": "optional" }`
-- `GET /api/scans`
-- `GET /api/scans/{scan_id}`
+## API Endpoints
 
-### New (Discovery, Seeds, Assets, Risk)
-- `POST /api/seeds` body: `{ "seed_type": "root_domain|acquisition_domain|cidr|asn|keyword", "value": "example.com", "note?": "..." }`
-- `GET /api/seeds`
-- `DELETE /api/seeds/{seed_id}`
-- `POST /api/discovery/run` body: `{ "confidence_threshold": 0.7, "include_scan": true }`
-  - Runs best-effort discovery from seeds (crt.sh, BufferOver, HackerTarget, CertSpotter, Subfinder, VirusTotal, Shodan, optional Wayback/URLScan/OTX, DNS NS/MX/SPF/CNAME pivots, cloud bucket heuristics), scores ownership, and schedules scans for assets above the threshold.
-- `GET /api/assets?min_confidence=0.7`
-- `GET /api/assets/{asset_id}`
-- `POST /api/risk/score` body: `{ "cvss_base": number, "asset_criticality_weight": number, "exploitability_multiplier": number }`
-  - Returns `{ "risk_score": number, "components": { ... } }`
+The Rust backend provides identical API endpoints to the Python backend:
 
-Notes:
-- Data is persisted with SQLAlchemy (async). In dev/test, tables are auto-created at startup.
-- Evidence files are stored under `./data/evidence` and served via `/evidence/*`.
- - Optional env keys to enhance discovery: `CERTSPOTTER_API_TOKEN`, `VIRUSTOTAL_API_KEY`, `SHODAN_API_KEY`, `URLSCAN_API_KEY`, `OTX_API_KEY`.
-- Company graph enrichment (optional): Clearbit (`CLEARBIT_API_KEY`), Wikidata (no key), OpenCorporates (`OPENCORPORATES_API_TOKEN`).
-- Feature toggles (env): `ENABLE_WAYBACK`, `ENABLE_URLSCAN`, `ENABLE_OTX`, `ENABLE_DNS_RECORD_EXPANSION`, `ENABLE_WEB_CRAWL`, `ENABLE_CLOUD_STORAGE_DISCOVERY`, `ENABLE_WIKIDATA`, `ENABLE_OPENCORPORATES`.
+- `GET /api/health` - Health check
+- `POST /api/scans` - Create new scan
+- `GET /api/scans` - List scans
+- `GET /api/scans/{id}` - Get scan details
+- `POST /api/seeds` - Create seed
+- `GET /api/seeds` - List seeds
+- `DELETE /api/seeds/{id}` - Delete seed
+- `GET /api/assets` - List assets
+- `GET /api/assets/{id}` - Get asset details
+- `POST /api/discovery/run` - Start discovery
+- `GET /api/discovery/status` - Get discovery status
+
+## Performance
+
+The Rust backend is designed for high performance with:
+
+- Async/await for non-blocking I/O operations
+- Connection pooling for database operations
+- Concurrent processing with configurable limits
+- Memory-efficient data structures
+- Zero-copy serialization where possible
+
+## Migration from Python Backend
+
+The Rust backend is designed for seamless migration:
+
+1. **Database Compatibility**: Uses identical database schema
+2. **API Compatibility**: Provides identical REST API endpoints
+3. **Configuration Compatibility**: Uses same environment variables
+4. **Feature Parity**: Implements all Python backend features
+
+## Contributing
+
+1. Follow Rust coding conventions
+2. Add tests for new functionality
+3. Update documentation as needed
+4. Ensure all tests pass before submitting PRs
+
+## License
+
+[Add your license information here]

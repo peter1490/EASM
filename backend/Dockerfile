@@ -1,22 +1,43 @@
-# syntax=docker/dockerfile:1
+# Build stage
+FROM rust:1.84 AS builder
 
-FROM python:3.13-slim AS base
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
 WORKDIR /app
 
-# System deps
-RUN apt-get update -y && apt-get install -y --no-install-recommends \
-    build-essential curl ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+# Copy manifests
+COPY Cargo.toml Cargo.lock ./
 
-# Python deps
-COPY backend/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -U pip && \
-    pip install --no-cache-dir -r /app/requirements.txt
+# Copy source code
+COPY src ./src
+COPY benches ./benches
+COPY migrations ./migrations
 
-# App code
-COPY backend/app /app/app
+# Build the application
+RUN cargo update -p base64ct --precise 1.7.1 && cargo build --release
 
+# Runtime stage
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the binary from builder stage
+COPY --from=builder /app/target/release/rust-backend /app/rust-backend
+
+# Create evidence directory
+RUN mkdir -p /app/evidence
+
+# Expose port
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Set environment variables
+ENV RUST_LOG=info
+ENV SERVER_HOST=0.0.0.0
+ENV SERVER_PORT=8000
+
+# Run the binary
+CMD ["./rust-backend"]

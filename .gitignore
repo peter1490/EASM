@@ -37,7 +37,7 @@ next-env.d.ts
 
 # Rust
 /target/
-Cargo.lock
+# Note: Cargo.lock is committed for binary projects
 
 # IDE
 .vscode/

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -244,12 +244,12 @@ impl DiscoveryService {
     async fn process_seed(&self, seed: &Seed) -> Result<DiscoveryResult, ApiError> {
         tracing::info!("Processing seed: {} ({})", seed.value, seed.seed_type);
         
-        let timeout_duration = Duration::from_secs_f64(self.settings.subdomain_enum_timeout * 2.0);
+        let timeout_duration = Duration::from_secs_f64(self.settings.subdomain_enum_timeout * 1440.0); // 1440 = 24 hours
         
         let result = timeout(timeout_duration, async {
             match seed.seed_type {
-                SeedType::Domain => self.discover_from_domain(&seed.value).await,
-                SeedType::Organization => self.discover_from_organization(&seed.value).await,
+                SeedType::Domain => self.discover_from_domain_recursive(&seed.value).await,
+                SeedType::Organization => self.discover_from_organization_recursive(&seed.value).await,
                 SeedType::Asn => self.discover_from_asn(&seed.value).await,
                 SeedType::Cidr => self.discover_from_cidr(&seed.value).await,
                 SeedType::Keyword => self.discover_from_keyword(&seed.value).await,
@@ -260,12 +260,13 @@ impl DiscoveryService {
             Ok(discovery_result) => {
                 match discovery_result {
                     Ok(result) => {
+                        // Asset creation is now handled in the discovery_from_domain function
                         // Store discovered assets
-                        for asset in &result.assets {
+                        /* for asset in &result.assets {
                             if let Err(e) = self.asset_repo.create_or_merge(asset).await {
                                 tracing::warn!("Failed to store asset {}: {}", asset.identifier, e);
                             }
-                        }
+                        } */
                         
                         Ok(result)
                     }
@@ -279,6 +280,217 @@ impl DiscoveryService {
                 )))
             }
         }
+    }
+
+    /// Recursively discover assets starting from a domain by pivoting on certificate organizations
+    async fn discover_from_domain_recursive(&self, root_domain: &str) -> Result<DiscoveryResult, ApiError> {
+        let mut all_assets: Vec<AssetCreate> = Vec::new();
+        let mut all_confidence: HashMap<String, f64> = HashMap::new();
+        let mut all_sources: HashMap<String, Vec<String>> = HashMap::new();
+
+        let mut visited_domains: HashSet<String> = HashSet::new();
+        let mut visited_orgs: HashSet<String> = HashSet::new();
+
+        let mut domain_queue: VecDeque<String> = VecDeque::new();
+        let mut org_queue: VecDeque<String> = VecDeque::new();
+        domain_queue.push_back(root_domain.to_string());
+
+        loop {
+            if let Some(domain_value) = domain_queue.pop_front() {
+                if !visited_domains.insert(domain_value.clone()) { continue; }
+
+                // Discover from domain
+                let result = self.discover_from_domain(&domain_value).await?;
+                
+                // Save assets to db
+                for asset in &result.assets {
+                    match self.asset_repo.create_or_merge(asset).await {
+                        Ok(_) => {
+                            tracing::debug!("Successfully stored {:?} asset: {}", asset.asset_type, asset.identifier);
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to store asset {}: {}", asset.identifier, e);
+                        }
+                    }
+                }
+
+                // Merge assets
+                for asset in &result.assets {
+                    all_assets.push(asset.clone());
+                }
+                for (k, v) in result.confidence_scores {
+                    match all_confidence.get_mut(&k) {
+                        Some(existing) => { if v > *existing { *existing = v; } }
+                        None => { all_confidence.insert(k, v); }
+                    }
+                }
+                for (k, mut v) in result.sources {
+                    all_sources.entry(k).and_modify(|existing| {
+                        for src in &v { if !existing.contains(src) { existing.push(src.clone()); } }
+                    }).or_insert_with(|| { v.sort(); v.dedup(); v });
+                }
+
+                // Extract new organizations from produced certificate assets
+                for asset in &all_assets {
+                    if asset.asset_type == AssetType::Certificate {
+                        if let Some(org) = asset.metadata.get("organization").and_then(|v| v.as_str()) {
+                            let org_trimmed = org.trim();
+                            if !org_trimmed.is_empty() && !visited_orgs.contains(org_trimmed) && !org_queue.contains(&org_trimmed.to_string()) {
+                                org_queue.push_back(org_trimmed.to_string());
+                            }
+                        }
+                    }
+                }
+            } else if let Some(org_value) = org_queue.pop_front() {
+                // Organization pivot
+                if !visited_orgs.insert(org_value.clone()) { continue; }
+
+                // TO DO: add feature to allow skipping organizations
+                if org_value.to_uppercase().contains("SALE") || org_value.to_uppercase().contains("FORCE") {
+                    tracing::info!("Skipping organization: {}", org_value);
+                    continue;
+                }
+
+                let result = self.discover_from_organization(&org_value).await?;
+
+                // Merge
+                for asset in &result.assets {
+                    // Queue newly found domains for further exploration
+                    if asset.asset_type == AssetType::Domain {
+                        let domain = asset.identifier.clone();
+                        let mut top_domain = String::new();
+
+                        // extract top domain and add to queue
+                        let parts: Vec<&str> = domain.split('.').collect();
+
+                        if parts.len() >= 2 {
+                            top_domain.push_str(format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]).as_str());
+                        }else{
+                            top_domain.push_str(domain.as_str());
+                        }
+                        
+                        if !visited_domains.contains(&top_domain) && !domain_queue.contains(&top_domain) {
+                            tracing::debug!("New Top domain found: {}", top_domain);
+                            domain_queue.push_back(top_domain);
+                        }
+                    }
+                    all_assets.push(asset.clone());
+                }
+                for (k, v) in result.confidence_scores {
+                    match all_confidence.get_mut(&k) {
+                        Some(existing) => { if v > *existing { *existing = v; } }
+                        None => { all_confidence.insert(k, v); }
+                    }
+                }
+                for (k, mut v) in result.sources {
+                    all_sources.entry(k).and_modify(|existing| {
+                        for src in &v { if !existing.contains(src) { existing.push(src.clone()); } }
+                    }).or_insert_with(|| { v.sort(); v.dedup(); v });
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok(DiscoveryResult {
+            assets: all_assets,
+            confidence_scores: all_confidence,
+            sources: all_sources,
+        })
+    }
+
+    /// Recursively discover assets starting from an organization by pivoting to domains then back to organizations
+    async fn discover_from_organization_recursive(&self, root_org: &str) -> Result<DiscoveryResult, ApiError> {
+        let mut all_assets: Vec<AssetCreate> = Vec::new();
+        let mut all_confidence: HashMap<String, f64> = HashMap::new();
+        let mut all_sources: HashMap<String, Vec<String>> = HashMap::new();
+
+        let mut visited_domains: HashSet<String> = HashSet::new();
+        let mut visited_orgs: HashSet<String> = HashSet::new();
+
+        let mut domain_queue: VecDeque<String> = VecDeque::new();
+        let mut org_queue: VecDeque<String> = VecDeque::new();
+        org_queue.push_back(root_org.to_string());
+
+        loop {
+            if let Some(domain_value) = domain_queue.pop_front() {
+                if !visited_domains.insert(domain_value.clone()) { continue; }
+
+                let result = self.discover_from_domain(&domain_value).await?;
+
+                for asset in &result.assets { all_assets.push(asset.clone()); }
+                for (k, v) in result.confidence_scores {
+                    match all_confidence.get_mut(&k) {
+                        Some(existing) => { if v > *existing { *existing = v; } }
+                        None => { all_confidence.insert(k, v); }
+                    }
+                }
+                for (k, mut v) in result.sources {
+                    all_sources.entry(k).and_modify(|existing| {
+                        for src in &v { if !existing.contains(src) { existing.push(src.clone()); } }
+                    }).or_insert_with(|| { v.sort(); v.dedup(); v });
+                }
+
+                // Discover new organizations from certificate assets
+                for asset in &all_assets {
+                    if asset.asset_type == AssetType::Certificate {
+                        if let Some(org) = asset.metadata.get("organization").and_then(|v| v.as_str()) {
+                            let org_trimmed = org.trim();
+                            if !org_trimmed.is_empty() && !visited_orgs.contains(org_trimmed) && !org_queue.contains(&org_trimmed.to_string()) {
+                                org_queue.push_back(org_trimmed.to_string());
+                            }
+                        }
+                    }
+                }
+            } else if let Some(org_value) = org_queue.pop_front() {
+                if !visited_orgs.insert(org_value.clone()) { continue; }
+
+                // TO DO: add feature to allow skipping organizations
+                if org_value.to_uppercase().contains("SALE") || org_value.to_uppercase().contains("FORCE") {
+                    tracing::info!("Skipping organization: {}", org_value);
+                    continue;
+                }
+
+                let result = self.discover_from_organization(&org_value).await?;
+
+                for asset in &result.assets {
+                    if asset.asset_type == AssetType::Domain {
+                        let domain = asset.identifier.clone();
+                        let mut top_domain = String::new();
+
+                        // extract top domain and add to queue
+                        let parts: Vec<&str> = domain.split('.').collect();
+
+                        if parts.len() >= 2 {
+                            top_domain.push_str(format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]).as_str());
+                        }else{
+                            top_domain.push_str(domain.as_str());
+                        }
+                        
+                        if !visited_domains.contains(&top_domain) && !domain_queue.contains(&top_domain) {
+                            tracing::debug!("New Top domain found: {}", top_domain);
+                            domain_queue.push_back(top_domain);
+                        }
+                    }
+                    all_assets.push(asset.clone());
+                }
+                for (k, v) in result.confidence_scores {
+                    match all_confidence.get_mut(&k) {
+                        Some(existing) => { if v > *existing { *existing = v; } }
+                        None => { all_confidence.insert(k, v); }
+                    }
+                }
+                for (k, mut v) in result.sources {
+                    all_sources.entry(k).and_modify(|existing| {
+                        for src in &v { if !existing.contains(src) { existing.push(src.clone()); } }
+                    }).or_insert_with(|| { v.sort(); v.dedup(); v });
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok(DiscoveryResult { assets: all_assets, confidence_scores: all_confidence, sources: all_sources })
     }
 
     /// Discover assets from a domain seed

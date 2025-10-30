@@ -1,24 +1,24 @@
 services:
   backend:
     build:
-      context: ./rust-backend
+      context: ./backend
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
     environment:
       - DATABASE_URL=postgresql://easm:easm@db:5432/easm # Optional; will auto-map to psycopg async driver
       - OPENSEARCH_URL=http://opensearch:9200 # Optional
-      - CERTSPOTTER_API_TOKEN=${CERTSPOTTER_API_TOKEN}
+      #- CERTSPOTTER_API_TOKEN=${CERTSPOTTER_API_TOKEN}
       - VIRUSTOTAL_API_KEY=${VIRUSTOTAL_API_KEY}
-      - SHODAN_API_KEY=${SHODAN_API_KEY}
+      #- SHODAN_API_KEY=${SHODAN_API_KEY}
     depends_on:
       - db
       - opensearch
 
   frontend:
     build:
-      context: .
-      dockerfile: frontend/Dockerfile
+      context: ./frontend
+      dockerfile: Dockerfile
     environment:
       - NEXT_PUBLIC_API_BASE=http://localhost:8000
     ports:

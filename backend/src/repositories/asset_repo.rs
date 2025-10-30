@@ -3,7 +3,7 @@ use uuid::Uuid;
 use crate::{
     database::DatabasePool,
     error::ApiError,
-    models::{Asset, AssetCreate, AssetType, Seed, SeedCreate, SeedType},
+    models::{Asset, AssetRow, AssetCreate, AssetType, Seed, SeedCreate, SeedType},
 };
 
 #[async_trait]
@@ -40,7 +40,7 @@ impl AssetRepository for SqlxAssetRepository {
         let now = chrono::Utc::now();
         
         // Try to find existing asset with same type and identifier
-        let existing = sqlx::query_as::<_, Asset>(
+        let existing = sqlx::query_as::<_, AssetRow>(
             r#"
             SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
             FROM assets
@@ -50,7 +50,8 @@ impl AssetRepository for SqlxAssetRepository {
         .bind(&asset.asset_type)
         .bind(&asset.identifier)
         .fetch_optional(&self.pool)
-        .await?;
+        .await?
+        .map(Asset::from);
 
         match existing {
             Some(existing_asset) => {
@@ -80,7 +81,7 @@ impl AssetRepository for SqlxAssetRepository {
                 }
 
                 // Update the existing asset
-                let result = sqlx::query_as::<_, Asset>(
+                let row = sqlx::query_as::<_, AssetRow>(
                     r#"
                     UPDATE assets
                     SET confidence = $1, sources = $2, metadata = $3, updated_at = $4
@@ -96,12 +97,12 @@ impl AssetRepository for SqlxAssetRepository {
                 .fetch_one(&self.pool)
                 .await?;
 
-                Ok(result)
+                Ok(Asset::from(row))
             }
             None => {
                 // Create new asset
                 let id = Uuid::new_v4();
-                let result = sqlx::query_as::<_, Asset>(
+                let row = sqlx::query_as::<_, AssetRow>(
                     r#"
                     INSERT INTO assets (id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -119,15 +120,15 @@ impl AssetRepository for SqlxAssetRepository {
                 .fetch_one(&self.pool)
                 .await?;
 
-                Ok(result)
+                Ok(Asset::from(row))
             }
         }
     }
 
     async fn list(&self, confidence_threshold: Option<f64>) -> Result<Vec<Asset>, ApiError> {
-        let results = match confidence_threshold {
+        let rows = match confidence_threshold {
             Some(threshold) => {
-                sqlx::query_as::<_, Asset>(
+                sqlx::query_as::<_, AssetRow>(
                     r#"
                     SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
                     FROM assets
@@ -140,7 +141,7 @@ impl AssetRepository for SqlxAssetRepository {
                 .await?
             }
             None => {
-                sqlx::query_as::<_, Asset>(
+                sqlx::query_as::<_, AssetRow>(
                     r#"
                     SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
                     FROM assets
@@ -152,11 +153,11 @@ impl AssetRepository for SqlxAssetRepository {
             }
         };
 
-        Ok(results)
+        Ok(rows.into_iter().map(Asset::from).collect())
     }
 
     async fn get_by_id(&self, id: &Uuid) -> Result<Option<Asset>, ApiError> {
-        let result = sqlx::query_as::<_, Asset>(
+        let result = sqlx::query_as::<_, AssetRow>(
             r#"
             SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
             FROM assets
@@ -165,15 +166,16 @@ impl AssetRepository for SqlxAssetRepository {
         )
         .bind(id)
         .fetch_optional(&self.pool)
-        .await?;
+        .await?
+        .map(Asset::from);
 
         Ok(result)
     }
 
     async fn list_by_type(&self, asset_type: AssetType, confidence_threshold: Option<f64>) -> Result<Vec<Asset>, ApiError> {
-        let results = match confidence_threshold {
+        let rows = match confidence_threshold {
             Some(threshold) => {
-                sqlx::query_as::<_, Asset>(
+                sqlx::query_as::<_, AssetRow>(
                     r#"
                     SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
                     FROM assets
@@ -187,7 +189,7 @@ impl AssetRepository for SqlxAssetRepository {
                 .await?
             }
             None => {
-                sqlx::query_as::<_, Asset>(
+                sqlx::query_as::<_, AssetRow>(
                     r#"
                     SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
                     FROM assets
@@ -201,11 +203,11 @@ impl AssetRepository for SqlxAssetRepository {
             }
         };
 
-        Ok(results)
+        Ok(rows.into_iter().map(Asset::from).collect())
     }
 
     async fn get_by_identifier(&self, asset_type: AssetType, identifier: &str) -> Result<Option<Asset>, ApiError> {
-        let result = sqlx::query_as::<_, Asset>(
+        let result = sqlx::query_as::<_, AssetRow>(
             r#"
             SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
             FROM assets
@@ -215,7 +217,8 @@ impl AssetRepository for SqlxAssetRepository {
         .bind(asset_type)
         .bind(identifier)
         .fetch_optional(&self.pool)
-        .await?;
+        .await?
+        .map(Asset::from);
 
         Ok(result)
     }

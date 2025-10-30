@@ -49,26 +49,28 @@ src/
 ### Installation
 
 1. Clone the repository
-2. Copy `.env.example` to `.env` and configure your settings
-3. Run database migrations: `sqlx migrate run`
+2. Copy `../example.env` to `../.env` and configure your settings
+3. Database migrations run automatically on startup
 4. Build and run: `cargo run`
 
 ### Configuration
 
-The application uses environment variables for configuration:
+The application uses environment variables for configuration. See `../example.env` for all available options:
 
-- `DATABASE_URL`: Database connection string
-- `SERVER_HOST`: Server bind address (default: 0.0.0.0)
-- `SERVER_PORT`: Server port (default: 8000)
-- `SHODAN_API_KEY`: Shodan API key (optional)
+- `DATABASE_URL`: PostgreSQL connection string (required)
+- `OPENSEARCH_URL`: OpenSearch URL (optional)
 - `VIRUSTOTAL_API_KEY`: VirusTotal API key (optional)
+- `SHODAN_API_KEY`: Shodan API key (optional)
+- `CERTSPOTTER_API_TOKEN`: CertSpotter API token (optional)
 - `CORS_ALLOW_ORIGINS`: Comma-separated list of allowed CORS origins
+- `LOG_LEVEL`: Logging level (default: INFO)
+- `LOG_FORMAT`: Log format - json or plain (default: json)
 
 ### Development
 
 ```bash
-# Run in development mode with auto-reload
-cargo watch -x run
+# Run in development mode
+cargo run
 
 # Run tests
 cargo test
@@ -78,6 +80,10 @@ cargo fmt --check
 
 # Run clippy for linting
 cargo clippy
+
+# Optional: Install cargo-watch for auto-reload
+# cargo install cargo-watch
+# cargo watch -x run
 ```
 
 ### Docker

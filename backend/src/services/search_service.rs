@@ -501,6 +501,9 @@ mod tests {
             metadata: json!({"organization": "Example Corp"}),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            last_scan_id: None,
+            last_scan_status: None,
+            last_scanned_at: None,
         }
     }
 

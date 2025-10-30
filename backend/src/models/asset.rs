@@ -38,7 +38,7 @@ impl std::fmt::Display for SeedType {
     }
 }
 
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {
     pub id: Uuid,
     pub asset_type: AssetType,
@@ -50,6 +50,43 @@ pub struct Asset {
     pub metadata: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    // Optional fields for frontend compatibility (not in DB yet)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_scan_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_scan_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_scanned_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct AssetRow {
+    pub id: Uuid,
+    pub asset_type: AssetType,
+    pub identifier: String,
+    pub confidence: f64,
+    pub sources: Value,
+    pub metadata: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<AssetRow> for Asset {
+    fn from(row: AssetRow) -> Self {
+        Self {
+            id: row.id,
+            asset_type: row.asset_type,
+            identifier: row.identifier,
+            confidence: row.confidence,
+            sources: row.sources,
+            metadata: row.metadata,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            last_scan_id: None,
+            last_scan_status: None,
+            last_scanned_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

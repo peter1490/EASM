@@ -167,7 +167,7 @@ impl Settings {
             // Discovery Settings defaults
             .set_default("max_cidr_hosts", 4096u32)?
             .set_default("max_discovery_depth", 3u32)?
-            .set_default("subdomain_enum_timeout", 120.0)?
+            .set_default("subdomain_enum_timeout", 60.0)?
             .set_default("enable_wayback", true)?
             .set_default("enable_urlscan", false)?
             .set_default("enable_otx", false)?

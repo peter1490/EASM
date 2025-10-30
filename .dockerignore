@@ -1,0 +1,17 @@
+# VCS
+.git
+
+# Node and Next.js artifacts
+frontend/node_modules
+frontend/.next
+frontend/out
+frontend/.turbo
+frontend/dist
+frontend/build
+
+# Rust build artifacts
+backend/target
+
+# OS/editor cruft
+**/.DS_Store
+**/*.log

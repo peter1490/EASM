@@ -121,7 +121,7 @@ impl CrtShClient {
 
     /// Internal method to query crt.sh API
     async fn search_crt_sh(&self, query: &str) -> Result<Vec<String>, ApiError> {
-        let url = format!("https://crt.sh/?q={}&output=json", urlencoding::encode(query));
+        let url = format!("https://crt.sh/?Identity={}&output=json", urlencoding::encode(query));
         
         tracing::debug!("Querying crt.sh: {}", url);
         

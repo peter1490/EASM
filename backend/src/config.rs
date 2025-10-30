@@ -37,8 +37,7 @@ pub struct Settings {
     // Database
     pub database_url: String,
     
-    // OpenSearch/Elasticsearch
-    pub opensearch_url: Option<String>,
+    // Elasticsearch
     pub elasticsearch_url: Option<String>,
     pub elasticsearch_asset_index: Option<String>,
     pub elasticsearch_finding_index: Option<String>,
@@ -127,7 +126,6 @@ impl Settings {
         let mut builder = config::Config::builder()
             // Database defaults
             .set_default("database_url", "postgresql://easm:easm@localhost:5432/easm")?
-            .set_default("opensearch_url", None::<String>)?
             .set_default("elasticsearch_url", None::<String>)?
             .set_default("elasticsearch_asset_index", None::<String>)?
             .set_default("elasticsearch_finding_index", None::<String>)?
@@ -211,7 +209,6 @@ impl Settings {
 
         // String overrides (UPPERCASE only, special-case database_url to also consider lowercase for tests)
         if let Some(v) = read_env("DATABASE_URL").or_else(|| std::env::var("database_url").ok()) { builder = builder.set_override("database_url", v)?; }
-        if let Some(v) = read_env("OPENSEARCH_URL") { builder = builder.set_override("opensearch_url", v)?; }
         if let Some(v) = read_env("ELASTICSEARCH_URL") { builder = builder.set_override("elasticsearch_url", v)?; }
         if let Some(v) = read_env("ELASTICSEARCH_ASSET_INDEX") { builder = builder.set_override("elasticsearch_asset_index", v)?; }
         if let Some(v) = read_env("ELASTICSEARCH_FINDING_INDEX") { builder = builder.set_override("elasticsearch_finding_index", v)?; }

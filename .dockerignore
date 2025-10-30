@@ -1,17 +1,46 @@
-# VCS
+# Git
 .git
+.gitignore
+.gitattributes
 
-# Node and Next.js artifacts
-frontend/node_modules
-frontend/.next
-frontend/out
-frontend/.turbo
-frontend/dist
-frontend/build
+# Documentation
+*.md
+!DEPLOYMENT.md
 
-# Rust build artifacts
-backend/target
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-# OS/editor cruft
-**/.DS_Store
-**/*.log
+# Environment
+.env
+.env.*
+
+# Build artifacts
+target/
+node_modules/
+.next/
+
+# Data
+data/
+
+# Docker
+docker-compose*.yml
+Dockerfile*
+.dockerignore
+
+# Scripts
+*.sh
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp

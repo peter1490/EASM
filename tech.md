@@ -36,7 +36,7 @@ Build a cloud-native, scalable EASM platform that continuously discovers, invent
 - **Backend API**: REST + GraphQL hybrid; Go/Rust for high-concurrency or Python FastAPI for rapid prototyping; Auth via OIDC/SAML.
 - **Worker layer**: Kubernetes jobs (or serverless) for discovery pipelines, fingerprinting, active scanners, and enrichment; message queue (Kafka/RabbitMQ) for orchestration.
 - **Data store**:
-  - Search & indexing: Elasticsearch / OpenSearch for fast search and full-text findings.
+  - Search & indexing: Elasticsearch for fast search and full-text findings.
   - Primary DB: PostgreSQL for canonical asset metadata and relationships.
   - Long-term object store: local filesystem directory for raw scan artifacts, pcap, screenshots.
   - Time-series/metrics: Prometheus for internal metrics.
@@ -222,7 +222,7 @@ audit_log (
 
 ### 19. Tech stack recommendations (concrete)
 - Backend: Go or Rust.
-- DB: PostgreSQL + OpenSearch.
+- DB: PostgreSQL + Elasticsearch.
 - Queue: Kafka (high scale) or RabbitMQ (simpler).
 - Orchestration: Kubernetes (EKS/GKE/AKS).
 - Scanners: masscan, nmap, headless Chrome (Puppeteer), OWASP ZAP for DAST.

@@ -7,7 +7,6 @@ All‑in‑one EASM security tool with a high-performance Rust backend and a Nex
 - **High Performance**: Rust backend for optimal performance and memory safety
 - **Async Architecture**: Fully asynchronous using Tokio runtime
 - **PostgreSQL Database**: Robust data persistence with SQLx
-- **OpenSearch Integration**: Fast search and indexing capabilities
 - **External Integrations**: Support for Shodan, VirusTotal, CertSpotter, and more
 - **Asset Discovery**: Automated discovery with confidence scoring
 - **Evidence Management**: File upload and storage capabilities
@@ -20,7 +19,6 @@ All‑in‑one EASM security tool with a high-performance Rust backend and a Nex
 - Rust 1.75 or later
 - PostgreSQL 16
 - Node.js 20 or later
-- Optional: OpenSearch for enhanced search capabilities
 
 ### Backend:
 
@@ -44,17 +42,71 @@ npm run dev
 
 Open `http://localhost:3000`.
 
-## Docker
+## Docker Deployment
 
+EASM supports both development and production environments with Docker Compose.
+
+### Quick Start
+
+**Development Environment** (with hot-reload):
 ```bash
-docker compose up --build
+# Using Makefile (recommended)
+make dev
+
+# Or using helper script
+./deploy-dev.sh
+
+# Or using docker compose directly
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
+
+**Production Environment** (optimized builds):
+```bash
+# Using Makefile (recommended)
+make prod
+
+# Or using helper script
+./deploy-prod.sh
+
+# Or using docker compose directly
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
+```
+
+### Services
 
 This will start:
 - Backend API: `http://localhost:8000`
 - Frontend: `http://localhost:3000`
-- PostgreSQL: `localhost:5432`
-- OpenSearch: `http://localhost:9200`
+- PostgreSQL: `localhost:5432` (dev) / internal only (prod)
+
+### Environment Configuration
+
+1. Copy the example environment file:
+   ```bash
+   cp example.env .env
+   ```
+
+2. Set the environment mode in `.env`:
+   ```bash
+   ENVIRONMENT=development  # or 'production'
+   ```
+
+3. Configure your API keys and other settings in `.env`
+
+### Common Commands
+
+```bash
+make help           # Show all available commands
+make dev            # Start development environment
+make prod           # Start production environment
+make stop           # Stop all services
+make logs           # View logs from all services
+make ps             # Show service status
+make health         # Check health of all services
+make clean          # Remove all containers and volumes
+```
+
+For detailed deployment instructions, troubleshooting, and advanced configuration, see [DEPLOYMENT.md](./DEPLOYMENT.md).
 
 ## Tests
 
@@ -70,7 +122,6 @@ Configuration is managed through environment variables. See `example.env` for al
 Key variables:
 - `DATABASE_URL`: PostgreSQL connection string
 - `VIRUSTOTAL_API_KEY`: VirusTotal API key (optional)
-- `OPENSEARCH_URL`: OpenSearch URL (optional)
 - `CORS_ALLOW_ORIGINS`: Comma-separated list of allowed origins
 
 ## API Endpoints

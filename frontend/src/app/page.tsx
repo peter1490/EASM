@@ -1,8 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useState } from "react";
 import { createScan, listScans, type Scan, type ScanOptions } from "@/app/api";
+import Button from "@/components/ui/Button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
+import Badge from "@/components/ui/Badge";
+import Input from "@/components/ui/Input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/Table";
+import EmptyState from "@/components/ui/EmptyState";
+import LoadingSpinner from "@/components/ui/LoadingSpinner";
+import Header from "@/components/Header";
 
 type OptionKey = keyof Required<Pick<ScanOptions,
   | "enumerate_subdomains"
@@ -27,8 +35,10 @@ export default function Dashboard() {
   const [target, setTarget] = useState("");
   const [note, setNote] = useState("");
   const [opts, setOpts] = useState<ScanOptions>({});
-  const [isPending, startTransition] = useTransition();
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   async function refresh() {
     try {
@@ -36,136 +46,265 @@ export default function Dashboard() {
       setScans(data);
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setLoading(false);
     }
   }
 
   useEffect(() => {
     refresh();
-    const id = setInterval(refresh, 1500);
+    const id = setInterval(refresh, 2000);
     return () => clearInterval(id);
   }, []);
 
-  function onCreate() {
+  async function onCreate() {
     if (!target.trim()) return;
     setError(null);
-    startTransition(async () => {
-      try {
-        await createScan(target.trim(), note.trim() || undefined, opts);
-        setTarget("");
-        setNote("");
-        await refresh();
-      } catch (err) {
-        setError((err as Error).message);
-      }
-    });
+    setCreating(true);
+    try {
+      await createScan(target.trim(), note.trim() || undefined, opts);
+      setTarget("");
+      setNote("");
+      await refresh();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setCreating(false);
+    }
   }
 
+  const stats = {
+    total: scans.length,
+    completed: scans.filter(s => s.status === "completed").length,
+    running: scans.filter(s => s.status !== "completed" && s.status !== "failed").length,
+    findings: scans.reduce((acc, s) => acc + (s.findings_count ?? s.findings?.length ?? 0), 0),
+  };
+
+  const recentScans = scans.slice(0, 5);
+
   return (
-    <div className="min-h-screen p-6 sm:p-10 bg-background text-foreground">
-      <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">EASM Dashboard</h1>
-        <div className="flex items-center gap-3 text-sm">
-          <Link href="/seeds" className="underline">Seeds</Link>
-          <Link href="/assets" className="underline">Assets</Link>
-        </div>
+    <div className="space-y-8 animate-fade-in">
+      <Header 
+        title="Dashboard" 
+        description="Monitor and manage your attack surface scans"
+      />
+
+      {/* Stats Cards */}
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
+        <Card>
+          <CardHeader className="pb-3">
+            <CardDescription>Total Scans</CardDescription>
+            <CardTitle className="text-3xl">{stats.total}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-xs text-muted-foreground">
+              All scan operations
+            </div>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardHeader className="pb-3">
+            <CardDescription>Completed</CardDescription>
+            <CardTitle className="text-3xl text-success">{stats.completed}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-xs text-muted-foreground">
+              Successfully finished
+            </div>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardHeader className="pb-3">
+            <CardDescription>Active Scans</CardDescription>
+            <CardTitle className="text-3xl text-warning">{stats.running}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-xs text-muted-foreground">
+              Currently scanning
+            </div>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardHeader className="pb-3">
+            <CardDescription>Total Findings</CardDescription>
+            <CardTitle className="text-3xl text-info">{stats.findings}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-xs text-muted-foreground">
+              Discovered vulnerabilities
+            </div>
+          </CardContent>
+        </Card>
       </div>
 
-      <div className="mb-4 grid gap-3 sm:grid-cols-[1fr_1fr_auto] items-end">
-        <label className="grid gap-1">
-          <span className="text-sm text-foreground/70">Target</span>
-          <input
-            className="h-10 rounded-md border border-foreground/15 bg-background px-3 outline-none focus:ring-2 focus:ring-foreground/20"
-            placeholder="example.com or 1.2.3.4 or 10.0.0.0/24"
-            value={target}
-            onChange={(e) => setTarget(e.target.value)}
-          />
-        </label>
-        <label className="grid gap-1">
-          <span className="text-sm text-foreground/70">Note</span>
-          <input
-            className="h-10 rounded-md border border-foreground/15 bg-background px-3 outline-none focus:ring-2 focus:ring-foreground/20"
-            placeholder="optional"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-          />
-        </label>
-        <button
-          onClick={onCreate}
-          disabled={isPending || !target.trim()}
-          className="h-10 rounded-md bg-foreground text-background px-4 disabled:opacity-50"
-        >
-          {isPending ? "Queuing…" : "Start scan"}
-        </button>
-      </div>
+      {/* Create New Scan */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Create New Scan</CardTitle>
+          <CardDescription>
+            Start a new security scan for a domain, IP address, or CIDR range
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 md:grid-cols-2">
+            <Input
+              label="Target"
+              placeholder="example.com, 1.2.3.4, or 10.0.0.0/24"
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && onCreate()}
+            />
+            <Input
+              label="Note (optional)"
+              placeholder="Add a description for this scan"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && onCreate()}
+            />
+          </div>
 
-      <div className="mb-8 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 text-sm">
-        {OPTION_ENTRIES.map(([key, label]) => {
-          const current = (opts as Record<string, unknown>)[key];
-          const checked = typeof current === "boolean" ? current : true;
-          return (
-            <label key={key} className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={checked}
-                onChange={(e) => setOpts((o) => ({ ...o, [key]: e.target.checked }))}
-              />
-              {label}
-            </label>
-          );
-        })}
-      </div>
-
-      {error && (
-        <div className="mb-6 text-sm text-red-500">{error}</div>
-      )}
-
-      <div className="overflow-auto">
-        <table className="w-full text-sm border-collapse">
-          <thead>
-            <tr className="text-left border-b border-foreground/10">
-              <th className="py-2 pr-4">Created</th>
-              <th className="py-2 pr-4">Target</th>
-              <th className="py-2 pr-4">Status</th>
-              <th className="py-2 pr-4">Findings</th>
-            </tr>
-          </thead>
-          <tbody>
-            {scans.map((s) => (
-              <tr key={s.id} className="border-b border-foreground/5 hover:bg-foreground/5">
-                <td className="py-2 pr-4">
-                  <Link href={`/scan/${s.id}`}>{new Date(s.created_at).toLocaleString()}</Link>
-                </td>
-                <td className="py-2 pr-4 font-medium">
-                  <Link href={`/scan/${s.id}`}>{s.target}</Link>
-                </td>
-                <td className="py-2 pr-4">
-                  <Link href={`/scan/${s.id}`} className="inline-block">
-                    <span
-                      className={`inline-flex items-center rounded px-2 py-0.5 text-xs ${
-                        s.status === "completed"
-                          ? "bg-green-500/15 text-green-600"
-                          : "bg-amber-500/15 text-amber-600"
-                      }`}
-                    >
-                      {s.status}
-                    </span>
-                  </Link>
-                </td>
-                <td className="py-2 pr-4">
-                  <Link href={`/scan/${s.id}`}>{(s.findings_count ?? s.findings?.length ?? 0)}</Link>
-                </td>
-              </tr>
-            ))}
-            {scans.length === 0 && (
-              <tr>
-                <td colSpan={4} className="py-6 text-foreground/60">
-                  No scans yet. Create one above.
-                </td>
-              </tr>
+          <div>
+            <button
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              className="text-sm text-primary hover:underline mb-3"
+            >
+              {showAdvanced ? "Hide" : "Show"} Advanced Options
+            </button>
+            
+            {showAdvanced && (
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3 p-4 bg-muted rounded-lg">
+                {OPTION_ENTRIES.map(([key, label]) => {
+                  const current = (opts as Record<string, unknown>)[key];
+                  const checked = typeof current === "boolean" ? current : true;
+                  return (
+                    <label key={key} className="flex items-center gap-2 text-sm cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => setOpts((o) => ({ ...o, [key]: e.target.checked }))}
+                        className="h-4 w-4 rounded border-border text-primary focus:ring-2 focus:ring-ring"
+                      />
+                      <span>{label}</span>
+                    </label>
+                  );
+                })}
+              </div>
             )}
-          </tbody>
-        </table>
-      </div>
+          </div>
+
+          {error && (
+            <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
+              {error}
+            </div>
+          )}
+
+          <div className="flex gap-3">
+            <Button
+              onClick={onCreate}
+              disabled={!target.trim()}
+              loading={creating}
+              size="lg"
+            >
+              Start Scan
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setTarget("");
+                setNote("");
+                setOpts({});
+                setError(null);
+              }}
+              disabled={creating}
+            >
+              Clear
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Recent Scans */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle>Recent Scans</CardTitle>
+              <CardDescription>
+                Latest scan operations and their status
+              </CardDescription>
+            </div>
+            <Link href="/assets">
+              <Button variant="outline" size="sm">View All Assets →</Button>
+            </Link>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <div className="py-12">
+              <LoadingSpinner size="lg" />
+            </div>
+          ) : scans.length === 0 ? (
+            <EmptyState
+              icon="🔍"
+              title="No scans yet"
+              description="Create your first scan above to start discovering your attack surface"
+            />
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Target</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Findings</TableHead>
+                  <TableHead>Created</TableHead>
+                  <TableHead className="text-right">Action</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {recentScans.map((scan) => (
+                  <TableRow key={scan.id}>
+                    <TableCell className="font-medium font-mono">
+                      {scan.target}
+                    </TableCell>
+                    <TableCell>
+                      <Badge 
+                        variant={
+                          scan.status === "completed" ? "success" : 
+                          scan.status === "failed" ? "error" : 
+                          "warning"
+                        }
+                      >
+                        {scan.status}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">
+                          {scan.findings_count ?? scan.findings?.length ?? 0}
+                        </span>
+                        <span className="text-xs text-muted-foreground">findings</span>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {new Date(scan.created_at).toLocaleString()}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Link href={`/scan/${scan.id}`}>
+                        <Button variant="ghost" size="sm">
+                          View Details →
+                        </Button>
+                      </Link>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

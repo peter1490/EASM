@@ -7,10 +7,6 @@
   - [x] Add CRUD repositories
   - [ ] Implement transactional boundaries
 
-- [ ] Introduce OpenSearch
-  - [x] Index `assets`, `findings`, and `evidence` for fast search
-  - [x] Sync writes from PostgreSQL
-
 - [ ] Evidence storage (local filesystem)
   - [x] Use local filesystem directory (e.g., `./data/evidence`)
   - [x] Serve artifacts via API (streaming) and static route
@@ -150,7 +146,7 @@
 ### CI/CD and infrastructure
 - [ ] CI pipeline: lint, typecheck, tests, build, image scan, SBOM, dependency audit
 - [ ] Deployments: Helm charts; canary/blue‑green for workers and API
-- [ ] Terraform: VPCs, NAT, EKS/GKE/AKS, S3, RDS, OpenSearch, Redis/Queue
+- [ ] Terraform: VPCs, NAT, EKS/GKE/AKS, S3, RDS, Redis/Queue
 - [ ] Cost monitoring: budgets/alerts for S3, egress, CPU
 
 ### Documentation and policy

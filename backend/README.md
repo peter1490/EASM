@@ -58,7 +58,6 @@ src/
 The application uses environment variables for configuration. See `../example.env` for all available options:
 
 - `DATABASE_URL`: PostgreSQL connection string (required)
-- `OPENSEARCH_URL`: OpenSearch URL (optional)
 - `VIRUSTOTAL_API_KEY`: VirusTotal API key (optional)
 - `SHODAN_API_KEY`: Shodan API key (optional)
 - `CERTSPOTTER_API_TOKEN`: CertSpotter API token (optional)

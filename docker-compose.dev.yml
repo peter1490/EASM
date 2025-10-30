@@ -1,0 +1,60 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        ENVIRONMENT: development
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://easm:easm@db:5432/easm
+      - VIRUSTOTAL_API_KEY=${VIRUSTOTAL_API_KEY}
+      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-http://localhost:3000}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-100}
+      - RATE_LIMIT_WINDOW_SECONDS=${RATE_LIMIT_WINDOW_SECONDS:-60}
+      - API_KEYS=${API_KEYS:-dev-key-change-me-in-production}
+    volumes:
+      # Mount source code for development hot-reload (dev only, overridden in prod)
+      - ./backend:/app
+      # Exclude target directory to prevent overwriting compiled binaries
+      - /app/target
+    depends_on:
+      - db
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        ENVIRONMENT: development
+    environment:
+      - NEXT_PUBLIC_API_BASE=http://localhost:8000
+      - NODE_ENV=development
+    ports:
+      - "3000:3000"
+    volumes:
+      # Mount source code for development hot-reload (dev only, overridden in prod)
+      - ./frontend:/app
+      # Exclude node_modules and .next to use container-built versions with correct platform binaries
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: easm
+      POSTGRES_USER: easm
+      POSTGRES_DB: easm
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

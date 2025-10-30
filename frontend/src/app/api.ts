@@ -9,6 +9,14 @@ export type ScanOptions = {
   max_hosts?: number;
 };
 
+export type Finding = {
+  id: string;
+  scan_id: string;
+  finding_type: string;
+  data: Record<string, unknown>;
+  created_at: string;
+};
+
 export type Scan = {
   id: string;
   target: string;
@@ -17,14 +25,7 @@ export type Scan = {
   created_at: string;
   updated_at: string;
   findings_count?: number;
-  findings: Array<{
-    id: string;
-    scan_id: string;
-    category: string;
-    title: string;
-    severity: string;
-    data: Record<string, unknown>;
-  }>;
+  findings: Finding[];
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";

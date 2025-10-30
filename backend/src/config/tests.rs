@@ -13,7 +13,7 @@ mod tests {
         // List of all config-related environment variables that might interfere
         // Include both uppercase and lowercase versions since config crate might be case-insensitive
         let all_config_vars = vec![
-            "DATABASE_URL", "database_url", "OPENSEARCH_URL", "CERTSPOTTER_API_TOKEN", "VIRUSTOTAL_API_KEY",
+            "DATABASE_URL", "database_url", "CERTSPOTTER_API_TOKEN", "VIRUSTOTAL_API_KEY",
             "SHODAN_API_KEY", "URLSCAN_API_KEY", "OTX_API_KEY", "CLEARBIT_API_KEY",
             "OPENCORPORATES_API_TOKEN", "CORS_ALLOW_ORIGINS", "API_KEY_HEADER", "API_KEYS",
             "LOG_LEVEL", "LOG_FORMAT", "SQL_LOG_LEVEL", "MAX_EVIDENCE_BYTES",
@@ -67,7 +67,6 @@ mod tests {
         
         // Test database defaults (should be the default value, not from environment)
         assert_eq!(settings.database_url, "postgresql://easm:easm@localhost:5432/easm");
-        assert_eq!(settings.opensearch_url, None);
         
         // Test API key defaults
         assert_eq!(settings.certspotter_api_token, None);

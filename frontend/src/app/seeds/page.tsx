@@ -1,26 +1,35 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
-import Link from "next/link";
+import { useEffect, useState } from "react";
 import { createSeed, deleteSeed, listSeeds, runDiscovery, getDiscoveryStatus, type Seed, type SeedType } from "@/app/api";
+import Button from "@/components/ui/Button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
+import Badge from "@/components/ui/Badge";
+import Input from "@/components/ui/Input";
+import Select from "@/components/ui/Select";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/Table";
+import EmptyState from "@/components/ui/EmptyState";
+import LoadingSpinner from "@/components/ui/LoadingSpinner";
+import Header from "@/components/Header";
 
-const SEED_TYPES: Array<{ value: SeedType; label: string }> = [
-  { value: "root_domain", label: "Root domain" },
-  { value: "acquisition_domain", label: "Acquisition domain" },
-  { value: "cidr", label: "CIDR" },
-  { value: "asn", label: "ASN" },
-  { value: "keyword", label: "Keyword" },
-  { value: "organization", label: "Organization" },
+const SEED_TYPES: Array<{ value: SeedType; label: string; icon: string; description: string }> = [
+  { value: "root_domain", label: "Root Domain", icon: "🌐", description: "e.g., example.com" },
+  { value: "acquisition_domain", label: "Acquisition Domain", icon: "🏢", description: "Domain from acquisition" },
+  { value: "cidr", label: "CIDR Range", icon: "📡", description: "e.g., 10.0.0.0/24" },
+  { value: "asn", label: "ASN", icon: "🔢", description: "e.g., AS12345" },
+  { value: "keyword", label: "Keyword", icon: "🔑", description: "Search keyword" },
+  { value: "organization", label: "Organization", icon: "🏛️", description: "Company name" },
 ];
 
 export default function SeedsPage() {
   const [seeds, setSeeds] = useState<Seed[]>([]);
+  const [loading, setLoading] = useState(true);
   const [seedType, setSeedType] = useState<SeedType>("root_domain");
   const [value, setValue] = useState("");
   const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [isPending, startTransition] = useTransition();
-  const [discovering, startDiscovery] = useTransition();
+  const [adding, setAdding] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
   const [discoveryRunning, setDiscoveryRunning] = useState(false);
   const [confidence, setConfidence] = useState(0.7);
 
@@ -28,8 +37,10 @@ export default function SeedsPage() {
     try {
       const data = await listSeeds();
       setSeeds(data);
+      setLoading(false);
     } catch (e) {
       setError((e as Error).message);
+      setLoading(false);
     }
   }
 
@@ -44,180 +55,294 @@ export default function SeedsPage() {
         const s = await getDiscoveryStatus();
         setDiscoveryRunning(s.running);
       } catch {
-        // ignore; keep prior state
+        // ignore
       }
-      timer = setTimeout(poll, 1500);
+      timer = setTimeout(poll, 2000);
     }
     poll();
     return () => { if (timer) clearTimeout(timer); };
   }, []);
 
-  function onAdd() {
+  async function onAdd() {
     if (!value.trim()) return;
     setError(null);
-    startTransition(async () => {
-      try {
-        await createSeed({ seed_type: seedType, value: value.trim(), note: note.trim() || undefined });
-        setValue("");
-        setNote("");
-        await refresh();
-      } catch (e) {
-        setError((e as Error).message);
-      }
-    });
+    setAdding(true);
+    try {
+      await createSeed({ seed_type: seedType, value: value.trim(), note: note.trim() || undefined });
+      setValue("");
+      setNote("");
+      await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setAdding(false);
+    }
   }
 
-  function onDelete(id: string) {
-    startTransition(async () => {
-      try {
-        await deleteSeed(id);
-        await refresh();
-      } catch (e) {
-        setError((e as Error).message);
-      }
-    });
+  async function onDelete(id: string) {
+    try {
+      await deleteSeed(id);
+      await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
   }
 
-  function onRunDiscovery() {
+  async function onRunDiscovery() {
     setError(null);
     if (discoveryRunning) {
       setError("Discovery already running");
       return;
     }
-    startDiscovery(async () => {
-      try {
-        await runDiscovery({ confidence_threshold: confidence, include_scan: true });
-        setDiscoveryRunning(true);
-      } catch (e) {
-        setError((e as Error).message);
-      }
-    });
+    setDiscovering(true);
+    try {
+      await runDiscovery({ confidence_threshold: confidence, include_scan: true });
+      setDiscoveryRunning(true);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setDiscovering(false);
+    }
   }
 
+  const stats = {
+    total: seeds.length,
+    byType: SEED_TYPES.map(type => ({
+      ...type,
+      count: seeds.filter(s => s.seed_type === type.value).length,
+    })),
+  };
+
+  const selectedType = SEED_TYPES.find(t => t.value === seedType);
+
   return (
-    <div className="min-h-screen p-6 sm:p-10 bg-background text-foreground">
-      <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Seeds</h1>
-        <Link href="/" className="text-sm underline">Back</Link>
+    <div className="space-y-8 animate-fade-in">
+      <Header 
+        title="Seed Management" 
+        description="Configure discovery seeds to find your attack surface"
+      />
+
+      {/* Discovery Status */}
+      {discoveryRunning && (
+        <Card className="border-warning bg-warning/5">
+          <CardContent className="py-4">
+            <div className="flex items-center gap-3">
+              <LoadingSpinner size="sm" />
+              <div>
+                <div className="font-medium text-warning">Discovery in Progress</div>
+                <div className="text-sm text-muted-foreground">
+                  Enumerating subdomains and discovering new assets
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Stats */}
+      <div className="grid gap-6 md:grid-cols-3 lg:grid-cols-6">
+        <Card>
+          <CardHeader className="pb-3">
+            <CardDescription>Total Seeds</CardDescription>
+            <CardTitle className="text-2xl">{stats.total}</CardTitle>
+          </CardHeader>
+        </Card>
+        {stats.byType.filter(t => t.count > 0).slice(0, 5).map((type) => (
+          <Card key={type.value}>
+            <CardHeader className="pb-3">
+              <CardDescription className="flex items-center gap-1">
+                <span>{type.icon}</span>
+                <span>{type.label}</span>
+              </CardDescription>
+              <CardTitle className="text-2xl">{type.count}</CardTitle>
+            </CardHeader>
+          </Card>
+        ))}
       </div>
 
-      {error && <div className="mb-4 text-sm text-red-500">{error}</div>}
+      {/* Add New Seed */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Add New Seed</CardTitle>
+          <CardDescription>
+            Seeds are starting points for asset discovery
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 md:grid-cols-3">
+            <Select
+              label="Seed Type"
+              value={seedType}
+              onChange={(e) => setSeedType(e.target.value as SeedType)}
+            >
+              {SEED_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.icon} {t.label}
+                </option>
+              ))}
+            </Select>
+            <Input
+              label="Value"
+              placeholder={selectedType?.description || "Enter value"}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && onAdd()}
+            />
+            <Input
+              label="Note (optional)"
+              placeholder="Add a description"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && onAdd()}
+            />
+          </div>
 
-      <div className="mb-6 grid gap-3 sm:grid-cols-[auto_1fr_1fr_auto] items-end">
-        <label className="grid gap-1">
-          <span className="text-sm text-foreground/70">Type</span>
-          <select
-            className="h-10 rounded-md border border-foreground/15 bg-background px-3"
-            value={seedType}
-            onChange={(e) => setSeedType(e.target.value as SeedType)}
-          >
-            {SEED_TYPES.map((t) => (
-              <option key={t.value} value={t.value}>{t.label}</option>
-            ))}
-          </select>
-        </label>
-        <label className="grid gap-1">
-          <span className="text-sm text-foreground/70">Value</span>
-          <input
-            className="h-10 rounded-md border border-foreground/15 bg-background px-3"
-            placeholder={seedType === "cidr" ? "10.0.0.0/24" : seedType === "asn" ? "AS12345" : "example.com or keyword"}
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-          />
-        </label>
-        <label className="grid gap-1">
-          <span className="text-sm text-foreground/70">Note</span>
-          <input
-            className="h-10 rounded-md border border-foreground/15 bg-background px-3"
-            placeholder="optional"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-          />
-        </label>
-        <button
-          onClick={onAdd}
-          disabled={isPending || !value.trim()}
-          className="h-10 rounded-md bg-foreground text-background px-4 disabled:opacity-50"
-        >
-          {isPending ? "Adding…" : "Add seed"}
-        </button>
-      </div>
+          {error && (
+            <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
+              {error}
+            </div>
+          )}
 
-      <div className="mb-6 flex items-center gap-3">
-        <button
-          onClick={onRunDiscovery}
-          disabled={discovering || discoveryRunning}
-          className="h-9 rounded-md border border-foreground/20 px-3 disabled:opacity-60"
-        >
-          {discovering || discoveryRunning ? "Discovery running…" : "Run discovery"}
-        </button>
-        <label className="flex items-center gap-2">
-          <span className="text-sm text-foreground/70">Threshold</span>
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.05}
-            value={confidence}
-            onChange={(e) => setConfidence(parseFloat(e.target.value))}
-            className="w-40"
-          />
-          <input
-            type="number"
-            min={0}
-            max={1}
-            step={0.01}
-            value={confidence.toFixed(2)}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value);
-              if (!Number.isNaN(v)) setConfidence(Math.max(0, Math.min(1, v)));
-            }}
-            className="h-9 w-20 rounded-md border border-foreground/20 bg-background px-2"
-          />
-        </label>
-        <span className="text-sm text-foreground/60">
-          {discoveryRunning ? "A discovery is already running; please wait for it to finish." : "Runs subdomain enumeration and schedules scans for high-confidence assets."}
-        </span>
-      </div>
+          <div className="flex gap-3">
+            <Button
+              onClick={onAdd}
+              disabled={!value.trim()}
+              loading={adding}
+            >
+              Add Seed
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setValue("");
+                setNote("");
+                setError(null);
+              }}
+              disabled={adding}
+            >
+              Clear
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
-      <div className="overflow-auto">
-        <table className="w-full text-sm border-collapse">
-          <thead>
-            <tr className="text-left border-b border-foreground/10">
-              <th className="py-2 pr-4">Created</th>
-              <th className="py-2 pr-4">Type</th>
-              <th className="py-2 pr-4">Value</th>
-              <th className="py-2 pr-4">Note</th>
-              <th className="py-2 pr-4"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {seeds.map((s) => (
-              <tr key={s.id} className="border-b border-foreground/5">
-                <td className="py-2 pr-4">{new Date(s.created_at).toLocaleString()}</td>
-                <td className="py-2 pr-4 font-mono text-xs">{s.seed_type}</td>
-                <td className="py-2 pr-4">{s.value}</td>
-                <td className="py-2 pr-4">{s.note ?? ""}</td>
-                <td className="py-2 pr-4 text-right">
-                  <button
-                    onClick={() => onDelete(s.id)}
-                    className="h-8 rounded-md border border-foreground/20 px-2"
-                  >
-                    Delete
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {seeds.length === 0 && (
-              <tr>
-                <td colSpan={5} className="py-6 text-foreground/60">No seeds yet.</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      {/* Run Discovery */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Run Discovery</CardTitle>
+          <CardDescription>
+            Start the asset discovery process using your configured seeds
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-end gap-4">
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-foreground mb-1.5">
+                Confidence Threshold: {confidence.toFixed(2)}
+              </label>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={confidence}
+                onChange={(e) => setConfidence(parseFloat(e.target.value))}
+                className="w-full h-10 accent-primary"
+                disabled={discoveryRunning}
+              />
+              <div className="flex justify-between text-xs text-muted-foreground mt-1">
+                <span>Low (0.0)</span>
+                <span>Medium (0.5)</span>
+                <span>High (1.0)</span>
+              </div>
+            </div>
+            <Button
+              onClick={onRunDiscovery}
+              disabled={discoveryRunning || seeds.length === 0}
+              loading={discovering}
+              size="lg"
+            >
+              {discoveryRunning ? "Discovery Running..." : "Start Discovery"}
+            </Button>
+          </div>
+          <div className="p-3 rounded-lg bg-info/10 border border-info/20 text-sm">
+            <div className="font-medium text-info mb-1">ℹ️ About Discovery</div>
+            <div className="text-muted-foreground">
+              Discovery will enumerate subdomains, resolve DNS, and schedule scans for assets 
+              that meet the confidence threshold. Assets with higher confidence scores are more 
+              likely to belong to your organization.
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Seeds Table */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Configured Seeds ({seeds.length})</CardTitle>
+          <CardDescription>
+            All discovery starting points
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <div className="py-12">
+              <LoadingSpinner size="lg" />
+            </div>
+          ) : seeds.length === 0 ? (
+            <EmptyState
+              icon="🌱"
+              title="No seeds configured"
+              description="Add your first seed above to start discovering your attack surface"
+            />
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Value</TableHead>
+                  <TableHead>Note</TableHead>
+                  <TableHead>Created</TableHead>
+                  <TableHead className="text-right">Action</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {seeds.map((seed) => {
+                  const typeInfo = SEED_TYPES.find(t => t.value === seed.seed_type);
+                  return (
+                    <TableRow key={seed.id}>
+                      <TableCell>
+                        <Badge variant="info">
+                          {typeInfo?.icon} {typeInfo?.label || seed.seed_type}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="font-medium font-mono">
+                        {seed.value}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {seed.note || "—"}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {new Date(seed.created_at).toLocaleString()}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => onDelete(seed.id)}
+                          className="text-destructive hover:text-destructive"
+                        >
+                          Delete
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
-
-

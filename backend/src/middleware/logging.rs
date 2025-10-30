@@ -87,13 +87,13 @@ pub fn init_logging(log_level: &str, log_format: &str) -> Result<(), Box<dyn std
         }
     };
 
+    // Build filter string from configured log level
+    // This ensures LOG_LEVEL from config always takes precedence over RUST_LOG env var
+    let filter_string = format!("rust_backend={},tower_http=info,sqlx=warn", level);
+    let env_filter = tracing_subscriber::EnvFilter::new(filter_string);
+
     let subscriber = tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| {
-                    format!("rust_backend={},tower_http=info,sqlx=warn", level).into()
-                }),
-        );
+        .with(env_filter);
 
     match log_format.to_lowercase().as_str() {
         "json" => {

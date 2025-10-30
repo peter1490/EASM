@@ -88,8 +88,8 @@ pub async fn reindex_all(
     // Recreate indices
     search_service.recreate_indices().await?;
 
-    // Get all assets and findings from database
-    let assets = app_state.asset_repository.list(None).await?;
+    // Get all assets and findings from database (no limit for reindexing)
+    let assets = app_state.asset_repository.list(None, Some(100000), None).await?;
     let findings = app_state.finding_repository.list_by_type("").await?; // Get all findings
 
     // Bulk index them

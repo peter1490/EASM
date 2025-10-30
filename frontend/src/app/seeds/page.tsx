@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createSeed, deleteSeed, listSeeds, runDiscovery, getDiscoveryStatus, type Seed, type SeedType } from "@/app/api";
+import { createSeed, deleteSeed, listSeeds, runDiscovery, getDiscoveryStatus, type Seed, type SeedType, type DiscoveryStatus } from "@/app/api";
 import Button from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import Badge from "@/components/ui/Badge";
@@ -30,7 +30,7 @@ export default function SeedsPage() {
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [discovering, setDiscovering] = useState(false);
-  const [discoveryRunning, setDiscoveryRunning] = useState(false);
+  const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus | null>(null);
   const [confidence, setConfidence] = useState(0.7);
 
   async function refresh() {
@@ -53,7 +53,7 @@ export default function SeedsPage() {
     async function poll() {
       try {
         const s = await getDiscoveryStatus();
-        setDiscoveryRunning(s.running);
+        setDiscoveryStatus(s);
       } catch {
         // ignore
       }
@@ -90,14 +90,13 @@ export default function SeedsPage() {
 
   async function onRunDiscovery() {
     setError(null);
-    if (discoveryRunning) {
+    if (discoveryStatus?.running) {
       setError("Discovery already running");
       return;
     }
     setDiscovering(true);
     try {
       await runDiscovery({ confidence_threshold: confidence, include_scan: true });
-      setDiscoveryRunning(true);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -123,16 +122,34 @@ export default function SeedsPage() {
       />
 
       {/* Discovery Status */}
-      {discoveryRunning && (
+      {discoveryStatus?.running && (
         <Card className="border-warning bg-warning/5">
           <CardContent className="py-4">
-            <div className="flex items-center gap-3">
-              <LoadingSpinner size="sm" />
-              <div>
-                <div className="font-medium text-warning">Discovery in Progress</div>
-                <div className="text-sm text-muted-foreground">
-                  Enumerating subdomains and discovering new assets
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <LoadingSpinner size="sm" />
+                <div>
+                  <div className="font-medium text-warning">Discovery in Progress</div>
+                  <div className="text-sm text-muted-foreground">
+                    Enumerating subdomains and discovering new assets
+                  </div>
                 </div>
+              </div>
+              <div className="flex gap-4 text-sm">
+                <div className="text-right">
+                  <div className="text-muted-foreground">Seeds Processed</div>
+                  <div className="font-semibold">{discoveryStatus.seeds_processed}</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-muted-foreground">Assets Discovered</div>
+                  <div className="font-semibold">{discoveryStatus.assets_discovered}</div>
+                </div>
+                {discoveryStatus.error_count > 0 && (
+                  <div className="text-right">
+                    <div className="text-muted-foreground">Errors</div>
+                    <div className="font-semibold text-destructive">{discoveryStatus.error_count}</div>
+                  </div>
+                )}
               </div>
             </div>
           </CardContent>
@@ -248,7 +265,7 @@ export default function SeedsPage() {
                 value={confidence}
                 onChange={(e) => setConfidence(parseFloat(e.target.value))}
                 className="w-full h-10 accent-primary"
-                disabled={discoveryRunning}
+                disabled={discoveryStatus?.running}
               />
               <div className="flex justify-between text-xs text-muted-foreground mt-1">
                 <span>Low (0.0)</span>
@@ -258,11 +275,11 @@ export default function SeedsPage() {
             </div>
             <Button
               onClick={onRunDiscovery}
-              disabled={discoveryRunning || seeds.length === 0}
+              disabled={discoveryStatus?.running || seeds.length === 0}
               loading={discovering}
               size="lg"
             >
-              {discoveryRunning ? "Discovery Running..." : "Start Discovery"}
+              {discoveryStatus?.running ? "Discovery Running..." : "Start Discovery"}
             </Button>
           </div>
           <div className="p-3 rounded-lg bg-info/10 border border-info/20 text-sm">

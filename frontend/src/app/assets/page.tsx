@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { getDiscoveryStatus, listAssets, type Asset } from "@/app/api";
+import { useEffect, useState, useMemo } from "react";
+import { getDiscoveryStatus, listAssets, type Asset, type DiscoveryStatus, createScan } from "@/app/api";
 import Button from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import Badge from "@/components/ui/Badge";
@@ -11,26 +11,36 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import EmptyState from "@/components/ui/EmptyState";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import Header from "@/components/Header";
+import AssetDetailModal from "@/components/AssetDetailModal";
+import Checkbox from "@/components/ui/Checkbox";
 
 export default function AssetsPage() {
   const [assets, setAssets] = useState<Asset[]>([]);
-  const [filteredAssets, setFilteredAssets] = useState<Asset[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [minConf, setMinConf] = useState(0);
-  const [discoveryRunning, setDiscoveryRunning] = useState(false);
+  const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [typeFilter, setTypeFilter] = useState<"all" | "domain" | "ip">("all");
+  const [scanStatusFilter, setScanStatusFilter] = useState<"all" | "scanned" | "never_scanned">("all");
+  const [sourceFilter, setSourceFilter] = useState<string>("all");
+  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [selectedAssets, setSelectedAssets] = useState<Set<string>>(new Set());
+  const [bulkScanning, setBulkScanning] = useState(false);
+  const [bulkScanMessage, setBulkScanMessage] = useState<string | null>(null);
+  const [limit, setLimit] = useState(25);
+  const [showLimitSelector, setShowLimitSelector] = useState(false);
 
-  async function refresh(conf = minConf) {
+  async function refresh(conf = minConf, isInitial = false) {
     try {
-      const data = await listAssets(conf);
+      const data = await listAssets(conf, limit, 0);
       const sorted = [...data].sort((a, b) =>
         new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
       );
       setAssets(sorted);
-      setFilteredAssets(sorted);
-      setLoading(false);
+      if (isInitial) {
+        setLoading(false);
+      }
     } catch (e) {
       setError((e as Error).message);
       setLoading(false);
@@ -40,16 +50,19 @@ export default function AssetsPage() {
   useEffect(() => {
     let mounted = true;
     let iv: NodeJS.Timeout | null = null;
+    let isFirstLoad = true;
+    
     async function tick() {
       try {
         const s = await getDiscoveryStatus();
         if (!mounted) return;
-        setDiscoveryRunning(s.running);
+        setDiscoveryStatus(s);
       } catch {
         // ignore
       }
       try {
-        await refresh(minConf);
+        await refresh(minConf, isFirstLoad);
+        isFirstLoad = false;
       } catch {
         // ignore
       }
@@ -61,10 +74,16 @@ export default function AssetsPage() {
       if (iv) clearTimeout(iv);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [minConf]);
+  }, [minConf, limit]);
 
-  // Filter assets based on search and type
-  useEffect(() => {
+  // Get unique sources for filter dropdown (memoized)
+  const allSources = useMemo(
+    () => Array.from(new Set(assets.flatMap(a => a.sources))),
+    [assets]
+  );
+
+  // Filter assets based on search and type (memoized)
+  const filteredAssets = useMemo(() => {
     let filtered = assets;
     
     // Filter by type
@@ -72,17 +91,110 @@ export default function AssetsPage() {
       filtered = filtered.filter(a => a.asset_type === typeFilter);
     }
     
+    // Filter by scan status
+    if (scanStatusFilter === "scanned") {
+      filtered = filtered.filter(a => a.last_scanned_at);
+    } else if (scanStatusFilter === "never_scanned") {
+      filtered = filtered.filter(a => !a.last_scanned_at);
+    }
+    
+    // Filter by source
+    if (sourceFilter !== "all") {
+      filtered = filtered.filter(a => a.sources.includes(sourceFilter));
+    }
+    
     // Filter by search term
     if (searchTerm) {
       const term = searchTerm.toLowerCase();
       filtered = filtered.filter(a => 
         a.value.toLowerCase().includes(term) ||
-        a.sources.some(s => s.toLowerCase().includes(term))
+        a.sources.some(s => s.toLowerCase().includes(term)) ||
+        a.id.toLowerCase().includes(term)
       );
     }
     
-    setFilteredAssets(filtered);
-  }, [assets, searchTerm, typeFilter]);
+    return filtered;
+  }, [assets, searchTerm, typeFilter, scanStatusFilter, sourceFilter]);
+
+  // Bulk scan selected assets
+  const handleBulkScan = async () => {
+    if (selectedAssets.size === 0) return;
+    
+    setBulkScanning(true);
+    setBulkScanMessage(null);
+    
+    try {
+      const selectedAssetList = Array.from(selectedAssets)
+        .map(id => assets.find(a => a.id === id))
+        .filter((a): a is Asset => !!a);
+      
+      for (const asset of selectedAssetList) {
+        await createScan(asset.value, `Bulk scan from assets page`);
+      }
+      
+      setBulkScanMessage(`Successfully initiated ${selectedAssetList.length} scans`);
+      setSelectedAssets(new Set());
+    } catch (e) {
+      setBulkScanMessage(`Error: ${(e as Error).message}`);
+    } finally {
+      setBulkScanning(false);
+    }
+  };
+
+  // Export assets to CSV
+  const exportToCSV = () => {
+    const headers = ["ID", "Type", "Value", "Confidence", "Sources", "Last Scanned", "Created"];
+    const rows = filteredAssets.map(a => [
+      a.id,
+      a.asset_type,
+      a.value,
+      a.ownership_confidence.toFixed(2),
+      a.sources.join("; "),
+      a.last_scanned_at ? new Date(a.last_scanned_at).toISOString() : "Never",
+      new Date(a.created_at).toISOString()
+    ]);
+    
+    const csv = [headers, ...rows].map(row => row.map(cell => `"${cell}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `assets-${new Date().toISOString().split('T')[0]}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Export assets to JSON
+  const exportToJSON = () => {
+    const json = JSON.stringify(filteredAssets, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `assets-${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Toggle asset selection
+  const toggleAssetSelection = (assetId: string) => {
+    const newSelected = new Set(selectedAssets);
+    if (newSelected.has(assetId)) {
+      newSelected.delete(assetId);
+    } else {
+      newSelected.add(assetId);
+    }
+    setSelectedAssets(newSelected);
+  };
+
+  // Toggle all assets selection
+  const toggleAllAssets = () => {
+    if (selectedAssets.size === filteredAssets.length) {
+      setSelectedAssets(new Set());
+    } else {
+      setSelectedAssets(new Set(filteredAssets.map(a => a.id)));
+    }
+  };
 
   const stats = {
     total: assets.length,
@@ -99,16 +211,34 @@ export default function AssetsPage() {
       />
 
       {/* Discovery Status Banner */}
-      {discoveryRunning && (
+      {discoveryStatus?.running && (
         <Card className="border-warning bg-warning/5">
           <CardContent className="py-4">
-            <div className="flex items-center gap-3">
-              <LoadingSpinner size="sm" />
-              <div>
-                <div className="font-medium text-warning">Discovery in Progress</div>
-                <div className="text-sm text-muted-foreground">
-                  New assets will appear automatically as they are discovered
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <LoadingSpinner size="sm" />
+                <div>
+                  <div className="font-medium text-warning">Discovery in Progress</div>
+                  <div className="text-sm text-muted-foreground">
+                    New assets will appear automatically as they are discovered
+                  </div>
                 </div>
+              </div>
+              <div className="flex gap-4 text-sm">
+                <div className="text-right">
+                  <div className="text-muted-foreground">Seeds Processed</div>
+                  <div className="font-semibold">{discoveryStatus.seeds_processed}</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-muted-foreground">Assets Discovered</div>
+                  <div className="font-semibold">{discoveryStatus.assets_discovered}</div>
+                </div>
+                {discoveryStatus.error_count > 0 && (
+                  <div className="text-right">
+                    <div className="text-muted-foreground">Errors</div>
+                    <div className="font-semibold text-destructive">{discoveryStatus.error_count}</div>
+                  </div>
+                )}
               </div>
             </div>
           </CardContent>
@@ -169,13 +299,53 @@ export default function AssetsPage() {
       {/* Filters and Search */}
       <Card>
         <CardHeader>
-          <CardTitle>Filter Assets</CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle>Filter Assets</CardTitle>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">Showing up to:</span>
+              {showLimitSelector ? (
+                <div className="flex items-center gap-2">
+                  <Select
+                    value={limit.toString()}
+                    onChange={(e) => {
+                      setLimit(Number(e.target.value));
+                      setShowLimitSelector(false);
+                    }}
+                    className="w-24"
+                  >
+                    <option value="10">10</option>
+                    <option value="25">25</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                    <option value="250">250</option>
+                    <option value="500">500</option>
+                    <option value="1000">All</option>
+                  </Select>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowLimitSelector(false)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowLimitSelector(true)}
+                >
+                  {limit === 1000 ? "All" : limit} assets
+                </Button>
+              )}
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             <Input
               label="Search"
-              placeholder="Search by value or source..."
+              placeholder="Search by value, source, or ID..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
             />
@@ -187,6 +357,25 @@ export default function AssetsPage() {
               <option value="all">All Types</option>
               <option value="domain">Domains Only</option>
               <option value="ip">IPs Only</option>
+            </Select>
+            <Select
+              label="Scan Status"
+              value={scanStatusFilter}
+              onChange={(e) => setScanStatusFilter(e.target.value as "all" | "scanned" | "never_scanned")}
+            >
+              <option value="all">All Assets</option>
+              <option value="scanned">Scanned</option>
+              <option value="never_scanned">Never Scanned</option>
+            </Select>
+            <Select
+              label="Discovery Source"
+              value={sourceFilter}
+              onChange={(e) => setSourceFilter(e.target.value)}
+            >
+              <option value="all">All Sources</option>
+              {allSources.map(source => (
+                <option key={source} value={source}>{source}</option>
+              ))}
             </Select>
             <div>
               <label className="block text-sm font-medium text-foreground mb-1.5">
@@ -206,6 +395,50 @@ export default function AssetsPage() {
         </CardContent>
       </Card>
 
+      {/* Bulk Actions */}
+      {selectedAssets.size > 0 && (
+        <Card className="border-primary bg-primary/5">
+          <CardContent className="py-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <span className="font-medium">{selectedAssets.size} asset(s) selected</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setSelectedAssets(new Set())}
+                >
+                  Clear Selection
+                </Button>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  onClick={handleBulkScan}
+                  disabled={bulkScanning}
+                  size="sm"
+                >
+                  {bulkScanning ? "Scanning..." : `Scan ${selectedAssets.size} Asset(s)`}
+                </Button>
+                <Button variant="outline" size="sm" onClick={exportToCSV}>
+                  Export CSV
+                </Button>
+                <Button variant="outline" size="sm" onClick={exportToJSON}>
+                  Export JSON
+                </Button>
+              </div>
+            </div>
+            {bulkScanMessage && (
+              <div className={`mt-3 p-2 rounded text-sm ${
+                bulkScanMessage.startsWith("Error") 
+                  ? "bg-destructive/10 text-destructive" 
+                  : "bg-success/10 text-success"
+              }`}>
+                {bulkScanMessage}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       {/* Assets Table */}
       <Card>
         <CardHeader>
@@ -214,21 +447,37 @@ export default function AssetsPage() {
               <CardTitle>Assets ({filteredAssets.length})</CardTitle>
               <CardDescription>
                 {filteredAssets.length === assets.length 
-                  ? "Showing all assets" 
-                  : `Filtered from ${assets.length} total assets`}
+                  ? `Showing ${assets.length} of up to ${limit === 1000 ? "all" : limit} loaded assets` 
+                  : `Filtered to ${filteredAssets.length} from ${assets.length} loaded assets`}
+                {assets.length >= limit && limit < 1000 && (
+                  <span className="text-warning ml-2">
+                    (May have more assets in database)
+                  </span>
+                )}
               </CardDescription>
             </div>
-            <Button 
-              variant="outline" 
-              onClick={() => {
-                setSearchTerm("");
-                setTypeFilter("all");
-                setMinConf(0);
-              }}
-              disabled={!searchTerm && typeFilter === "all" && minConf === 0}
-            >
-              Clear Filters
-            </Button>
+            <div className="flex gap-2">
+              <Button 
+                variant="outline" 
+                onClick={() => {
+                  setSearchTerm("");
+                  setTypeFilter("all");
+                  setScanStatusFilter("all");
+                  setSourceFilter("all");
+                  setMinConf(0);
+                  setLimit(25);
+                }}
+                disabled={!searchTerm && typeFilter === "all" && scanStatusFilter === "all" && sourceFilter === "all" && minConf === 0 && limit === 25}
+              >
+                Clear Filters
+              </Button>
+              <Button variant="outline" onClick={exportToCSV}>
+                Export CSV
+              </Button>
+              <Button variant="outline" onClick={exportToJSON}>
+                Export JSON
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent>
@@ -252,26 +501,43 @@ export default function AssetsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-12">
+                    <Checkbox
+                      checked={selectedAssets.size === filteredAssets.length && filteredAssets.length > 0}
+                      onChange={toggleAllAssets}
+                      indeterminate={selectedAssets.size > 0 && selectedAssets.size < filteredAssets.length}
+                    />
+                  </TableHead>
                   <TableHead>Type</TableHead>
                   <TableHead>Value</TableHead>
                   <TableHead>Confidence</TableHead>
                   <TableHead>Sources</TableHead>
                   <TableHead>Tracking</TableHead>
                   <TableHead>Last Scan</TableHead>
+                  <TableHead className="w-24">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {filteredAssets.map((asset) => (
-                  <TableRow key={asset.id}>
-                    <TableCell>
+                  <TableRow 
+                    key={asset.id}
+                    className="cursor-pointer hover:bg-muted/50 transition-colors"
+                  >
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      <Checkbox
+                        checked={selectedAssets.has(asset.id)}
+                        onChange={() => toggleAssetSelection(asset.id)}
+                      />
+                    </TableCell>
+                    <TableCell onClick={() => setSelectedAssetId(asset.id)}>
                       <Badge variant={asset.asset_type === "domain" ? "info" : "secondary"}>
                         {asset.asset_type}
                       </Badge>
                     </TableCell>
-                    <TableCell className="font-medium font-mono">
+                    <TableCell className="font-medium font-mono" onClick={() => setSelectedAssetId(asset.id)}>
                       {asset.value}
                     </TableCell>
-                    <TableCell>
+                    <TableCell onClick={() => setSelectedAssetId(asset.id)}>
                       <div className="flex items-center gap-2">
                         <div className="flex-1 max-w-24">
                           <div className="h-2 bg-muted rounded-full overflow-hidden">
@@ -292,22 +558,25 @@ export default function AssetsPage() {
                         </span>
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell onClick={() => setSelectedAssetId(asset.id)}>
                       <div className="flex flex-wrap gap-1">
-                        {asset.sources.map((source, idx) => (
+                        {asset.sources.slice(0, 2).map((source, idx) => (
                           <Badge key={idx} variant="secondary">
                             {source}
                           </Badge>
                         ))}
+                        {asset.sources.length > 2 && (
+                          <Badge variant="secondary">+{asset.sources.length - 2}</Badge>
+                        )}
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell onClick={() => setSelectedAssetId(asset.id)}>
                       <AssetTracking metadata={asset.metadata} />
                     </TableCell>
-                    <TableCell className="text-muted-foreground text-sm">
+                    <TableCell className="text-muted-foreground text-sm" onClick={() => setSelectedAssetId(asset.id)}>
                       {asset.last_scanned_at ? (
                         <div className="space-y-1">
-                          <div>{new Date(asset.last_scanned_at).toLocaleString()}</div>
+                          <div className="text-xs">{new Date(asset.last_scanned_at).toLocaleString()}</div>
                           {asset.last_scan_status && (
                             <Badge variant={asset.last_scan_status === "completed" ? "success" : "warning"}>
                               {asset.last_scan_status}
@@ -318,6 +587,22 @@ export default function AssetsPage() {
                         <span className="text-muted-foreground">Never scanned</span>
                       )}
                     </TableCell>
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={async () => {
+                          try {
+                            await createScan(asset.value, `Quick scan of ${asset.value}`);
+                            alert(`Scan initiated for ${asset.value}`);
+                          } catch (e) {
+                            alert(`Error: ${(e as Error).message}`);
+                          }
+                        }}
+                      >
+                        Scan
+                      </Button>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -325,6 +610,12 @@ export default function AssetsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Asset Detail Modal */}
+      <AssetDetailModal
+        assetId={selectedAssetId}
+        onClose={() => setSelectedAssetId(null)}
+      />
     </div>
   );
 }

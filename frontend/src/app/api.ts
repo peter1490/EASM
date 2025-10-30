@@ -99,9 +99,20 @@ export type Asset = {
   updated_at: string;
 };
 
-export async function listAssets(min_confidence = 0): Promise<Asset[]> {
-  const res = await fetch(`${API_BASE}/api/assets?min_confidence=${min_confidence}`, { cache: "no-store" });
+export async function listAssets(min_confidence = 0, limit?: number, offset?: number): Promise<Asset[]> {
+  const params = new URLSearchParams();
+  params.append("min_confidence", min_confidence.toString());
+  if (limit !== undefined) params.append("limit", limit.toString());
+  if (offset !== undefined) params.append("offset", offset.toString());
+  
+  const res = await fetch(`${API_BASE}/api/assets?${params.toString()}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`Failed to list assets: ${res.status}`);
+  return res.json();
+}
+
+export async function getAsset(id: string): Promise<Asset> {
+  const res = await fetch(`${API_BASE}/api/assets/${id}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`Failed to get asset: ${res.status}`);
   return res.json();
 }
 
@@ -118,7 +129,17 @@ export async function runDiscovery(opts: { confidence_threshold?: number; includ
   return res.json();
 }
 
-export async function getDiscoveryStatus(): Promise<{ running: boolean }> {
+export type DiscoveryStatus = {
+  running: boolean;
+  started_at: string | null;
+  completed_at: string | null;
+  seeds_processed: number;
+  assets_discovered: number;
+  errors: string[];
+  error_count: number;
+};
+
+export async function getDiscoveryStatus(): Promise<DiscoveryStatus> {
   const res = await fetch(`${API_BASE}/api/discovery/status`, { cache: "no-store" });
   if (!res.ok) throw new Error(`Failed to get discovery status: ${res.status}`);
   return res.json();

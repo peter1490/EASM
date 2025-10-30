@@ -25,8 +25,14 @@ pub async fn discovery_status(
 ) -> Result<Json<Value>, ApiError> {
     let status = app_state.discovery_service.get_discovery_status().await;
     
-    // API compatibility: return { "running": bool }
+    // Return detailed status information
     Ok(Json(json!({
-        "running": status.is_running
+        "running": status.is_running,
+        "started_at": status.started_at,
+        "completed_at": status.completed_at,
+        "seeds_processed": status.seeds_processed,
+        "assets_discovered": status.assets_discovered,
+        "errors": status.errors,
+        "error_count": status.errors.len()
     })))
 }

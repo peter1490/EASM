@@ -14,6 +14,10 @@ use crate::{
 pub struct AssetQuery {
     #[serde(default, alias = "min_confidence")]
     confidence_threshold: Option<f64>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
 }
 
 pub async fn create_seed(
@@ -43,7 +47,11 @@ pub async fn list_assets(
     State(app_state): State<AppState>,
     Query(params): Query<AssetQuery>,
 ) -> Result<Json<Vec<Asset>>, ApiError> {
-    let assets = app_state.discovery_service.list_assets(params.confidence_threshold).await?;
+    let assets = app_state.discovery_service.list_assets(
+        params.confidence_threshold,
+        params.limit,
+        params.offset,
+    ).await?;
     Ok(Json(assets))
 }
 

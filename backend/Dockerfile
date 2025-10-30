@@ -31,7 +31,7 @@ RUN mkdir -p /app/evidence
 EXPOSE 8000
 
 # Set environment variables for development
-ENV RUST_LOG=debug
+# Note: RUST_LOG is controlled by LOG_LEVEL from docker-compose
 ENV SERVER_HOST=0.0.0.0
 ENV SERVER_PORT=8000
 ENV RUST_BACKTRACE=1
@@ -80,7 +80,7 @@ RUN mkdir -p /app/evidence
 EXPOSE 8000
 
 # Set environment variables for production
-ENV RUST_LOG=info
+# Note: RUST_LOG is controlled by LOG_LEVEL from docker-compose
 ENV SERVER_HOST=0.0.0.0
 ENV SERVER_PORT=8000
 

@@ -21,7 +21,7 @@ use crate::{
 };
 
 /// Discovery run status tracking
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryStatus {
     pub is_running: bool,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -99,8 +99,13 @@ impl DiscoveryService {
         self.seed_repo.delete(id).await
     }
 
-    pub async fn list_assets(&self, confidence_threshold: Option<f64>) -> Result<Vec<Asset>, ApiError> {
-        self.asset_repo.list(confidence_threshold).await
+    pub async fn list_assets(
+        &self,
+        confidence_threshold: Option<f64>,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> Result<Vec<Asset>, ApiError> {
+        self.asset_repo.list(confidence_threshold, limit, offset).await
     }
 
     pub async fn get_asset(&self, id: &Uuid) -> Result<Option<Asset>, ApiError> {
@@ -158,6 +163,26 @@ impl DiscoveryService {
     async fn run_discovery_with_context(&self, ctx: TaskContext) -> Result<(), ApiError> {
         tracing::info!("Starting comprehensive asset discovery with task context");
         
+        // Ensure status is always reset, even on error
+        let result = self.run_discovery_internal(&ctx).await;
+        
+        // Mark discovery as completed (whether success or failure)
+        {
+            let mut status = self.discovery_status.lock().await;
+            status.is_running = false;
+            status.completed_at = Some(chrono::Utc::now());
+            
+            // Add error if failed
+            if let Err(ref e) = result {
+                status.errors.push(format!("Discovery failed: {}", e));
+            }
+        }
+        
+        result
+    }
+
+    /// Internal discovery implementation
+    async fn run_discovery_internal(&self, ctx: &TaskContext) -> Result<(), ApiError> {
         let seeds = self.seed_repo.list().await?;
         let mut total_assets_discovered = 0;
         let mut processed_seeds = 0;
@@ -218,13 +243,6 @@ impl DiscoveryService {
             // Update progress for completed tasks
             let completion_progress = 0.3 + (i as f32 / seeds.len() as f32) * 0.6;
             ctx.update_progress(completion_progress, Some(format!("Completed {} of {} seed processing tasks", i + 1, seeds.len()))).await?;
-        }
-
-        // Mark discovery as completed
-        {
-            let mut status = self.discovery_status.lock().await;
-            status.is_running = false;
-            status.completed_at = Some(chrono::Utc::now());
         }
 
         ctx.update_progress(0.95, Some("Finalizing discovery".to_string())).await?;

@@ -9,7 +9,7 @@ use crate::{
 #[async_trait]
 pub trait AssetRepository {
     async fn create_or_merge(&self, asset: &AssetCreate) -> Result<Asset, ApiError>;
-    async fn list(&self, confidence_threshold: Option<f64>) -> Result<Vec<Asset>, ApiError>;
+    async fn list(&self, confidence_threshold: Option<f64>, limit: Option<i64>, offset: Option<i64>) -> Result<Vec<Asset>, ApiError>;
     async fn list_by_type(&self, asset_type: AssetType, confidence_threshold: Option<f64>) -> Result<Vec<Asset>, ApiError>;
     async fn get_by_id(&self, id: &Uuid) -> Result<Option<Asset>, ApiError>;
     async fn get_by_identifier(&self, asset_type: AssetType, identifier: &str) -> Result<Option<Asset>, ApiError>;
@@ -125,7 +125,10 @@ impl AssetRepository for SqlxAssetRepository {
         }
     }
 
-    async fn list(&self, confidence_threshold: Option<f64>) -> Result<Vec<Asset>, ApiError> {
+    async fn list(&self, confidence_threshold: Option<f64>, limit: Option<i64>, offset: Option<i64>) -> Result<Vec<Asset>, ApiError> {
+        let limit = limit.unwrap_or(1000); // Default to 1000 if not specified
+        let offset = offset.unwrap_or(0);
+
         let rows = match confidence_threshold {
             Some(threshold) => {
                 sqlx::query_as::<_, AssetRow>(
@@ -134,9 +137,12 @@ impl AssetRepository for SqlxAssetRepository {
                     FROM assets
                     WHERE confidence >= $1
                     ORDER BY confidence DESC, created_at DESC
+                    LIMIT $2 OFFSET $3
                     "#
                 )
                 .bind(threshold)
+                .bind(limit)
+                .bind(offset)
                 .fetch_all(&self.pool)
                 .await?
             }
@@ -146,8 +152,11 @@ impl AssetRepository for SqlxAssetRepository {
                     SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
                     FROM assets
                     ORDER BY confidence DESC, created_at DESC
+                    LIMIT $1 OFFSET $2
                     "#
                 )
+                .bind(limit)
+                .bind(offset)
                 .fetch_all(&self.pool)
                 .await?
             }
@@ -341,18 +350,18 @@ mod tests {
         repo.create_or_merge(&asset3).await.unwrap();
 
         // Test listing all assets
-        let all_assets = repo.list(None).await.unwrap();
+        let all_assets = repo.list(None, None, None).await.unwrap();
         assert_eq!(all_assets.len(), 3);
         // Should be ordered by confidence DESC
         assert!(all_assets[0].confidence >= all_assets[1].confidence);
         assert!(all_assets[1].confidence >= all_assets[2].confidence);
 
         // Test listing with confidence threshold
-        let high_confidence_assets = repo.list(Some(0.7)).await.unwrap();
+        let high_confidence_assets = repo.list(Some(0.7), None, None).await.unwrap();
         assert_eq!(high_confidence_assets.len(), 1);
         assert_eq!(high_confidence_assets[0].identifier, "high-confidence.com");
 
-        let medium_confidence_assets = repo.list(Some(0.4)).await.unwrap();
+        let medium_confidence_assets = repo.list(Some(0.4), None, None).await.unwrap();
         assert_eq!(medium_confidence_assets.len(), 2);
     }
 

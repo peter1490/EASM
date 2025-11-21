@@ -91,6 +91,12 @@ pub struct Settings {
     pub enable_opencorporates: bool,
     pub related_asset_confidence_default: f64,
     
+    // Recursive Discovery Limits (to reduce false-positives)
+    pub max_assets_per_discovery: u32,        // Max assets per discovery run
+    pub min_pivot_confidence: f64,            // Min confidence to follow pivot
+    pub max_orgs_per_domain: u32,             // Max orgs to pivot from per domain
+    pub max_domains_per_org: u32,             // Max domains to pivot from per org
+    
     // Rate Limiting
     pub rate_limit_enabled: bool,
     pub rate_limit_requests: u32,
@@ -176,6 +182,12 @@ impl Settings {
             .set_default("enable_opencorporates", false)?
             .set_default("related_asset_confidence_default", 0.3)?
             
+            // Recursive Discovery Limits defaults
+            .set_default("max_assets_per_discovery", 5000u32)?
+            .set_default("min_pivot_confidence", 0.5)?
+            .set_default("max_orgs_per_domain", 3u32)?
+            .set_default("max_domains_per_org", 20u32)?
+            
             // Rate Limiting defaults
             .set_default("rate_limit_enabled", true)?
             .set_default("rate_limit_requests", 100u32)?
@@ -240,6 +252,10 @@ impl Settings {
         if let Some(v) = read_env("MAX_DISCOVERY_DEPTH").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("max_discovery_depth", v)?; }
         if let Some(v) = read_env("SUBDOMAIN_ENUM_TIMEOUT").and_then(|s| s.parse::<f64>().ok()) { builder = builder.set_override("subdomain_enum_timeout", v)?; }
         if let Some(v) = read_env("RELATED_ASSET_CONFIDENCE_DEFAULT").and_then(|s| s.parse::<f64>().ok()) { builder = builder.set_override("related_asset_confidence_default", v)?; }
+        if let Some(v) = read_env("MAX_ASSETS_PER_DISCOVERY").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("max_assets_per_discovery", v)?; }
+        if let Some(v) = read_env("MIN_PIVOT_CONFIDENCE").and_then(|s| s.parse::<f64>().ok()) { builder = builder.set_override("min_pivot_confidence", v)?; }
+        if let Some(v) = read_env("MAX_ORGS_PER_DOMAIN").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("max_orgs_per_domain", v)?; }
+        if let Some(v) = read_env("MAX_DOMAINS_PER_ORG").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("max_domains_per_org", v)?; }
         if let Some(v) = read_env("RATE_LIMIT_REQUESTS").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("rate_limit_requests", v)?; }
         if let Some(v) = read_env("RATE_LIMIT_WINDOW_SECONDS").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("rate_limit_window_seconds", v)?; }
         if let Some(v) = read_env("MAX_CONCURRENT_SCANS").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("max_concurrent_scans", v)?; }
@@ -367,6 +383,31 @@ impl Settings {
         if !(0.0..=1.0).contains(&self.related_asset_confidence_default) {
             return Err(ConfigError::Validation(
                 "related_asset_confidence_default must be between 0.0 and 1.0".to_string()
+            ));
+        }
+        
+        // Validate recursive discovery limits
+        if self.max_assets_per_discovery == 0 || self.max_assets_per_discovery > 100000 {
+            return Err(ConfigError::Validation(
+                "max_assets_per_discovery must be between 1 and 100000".to_string()
+            ));
+        }
+        
+        if !(0.0..=1.0).contains(&self.min_pivot_confidence) {
+            return Err(ConfigError::Validation(
+                "min_pivot_confidence must be between 0.0 and 1.0".to_string()
+            ));
+        }
+        
+        if self.max_orgs_per_domain == 0 || self.max_orgs_per_domain > 50 {
+            return Err(ConfigError::Validation(
+                "max_orgs_per_domain must be between 1 and 50".to_string()
+            ));
+        }
+        
+        if self.max_domains_per_org == 0 || self.max_domains_per_org > 500 {
+            return Err(ConfigError::Validation(
+                "max_domains_per_org must be between 1 and 500".to_string()
             ));
         }
         

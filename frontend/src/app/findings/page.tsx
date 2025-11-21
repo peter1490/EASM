@@ -144,7 +144,7 @@ export default function FindingsPage() {
           {!loading && !error && findings.length === 0 && (
             <EmptyState
               title="No findings found"
-              message="Try adjusting your filters or run a new scan to generate findings."
+              description="Try adjusting your filters or run a new scan to generate findings."
             />
           )}
 

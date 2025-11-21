@@ -8,10 +8,17 @@ use crate::{
     AppState,
 };
 
+#[derive(serde::Deserialize)]
+pub struct RunDiscoveryRequest {
+    pub confidence_threshold: Option<f64>,
+}
+
 pub async fn run_discovery(
     State(app_state): State<AppState>,
+    payload: Option<Json<RunDiscoveryRequest>>,
 ) -> Result<Json<Value>, ApiError> {
-    app_state.discovery_service.run_discovery().await?;
+    let confidence_threshold = payload.and_then(|p| p.confidence_threshold);
+    app_state.discovery_service.run_discovery(confidence_threshold).await?;
     
     // For API compatibility with the Python backend, return numeric fields
     Ok(Json(json!({

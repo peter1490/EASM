@@ -7,6 +7,7 @@ import Button from "@/components/ui/Button";
 import Badge from "@/components/ui/Badge";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
+import AssetDiscoveryGraph from "@/components/AssetDiscoveryGraph";
 
 import Link from "next/link";
 
@@ -165,6 +166,17 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
               <pre className="bg-muted rounded-lg p-4 text-xs overflow-x-auto max-h-64 overflow-y-auto">
                 {JSON.stringify(asset.metadata, null, 2)}
               </pre>
+            </CardContent>
+          </Card>
+
+          {/* Discovery Path */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Discovery Path</CardTitle>
+              <CardDescription>Visual lineage of how this asset was discovered</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <AssetDiscoveryGraph assetId={asset.id} />
             </CardContent>
           </Card>
 

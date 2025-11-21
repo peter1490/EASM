@@ -38,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Asset endpoints
         .route("/api/assets", get(handlers::asset_handlers::list_assets))
         .route("/api/assets/:id", get(handlers::asset_handlers::get_asset))
+        .route("/api/assets/:id/path", get(handlers::asset_handlers::get_asset_path))
         // Seed endpoints
         .route("/api/seeds", post(handlers::asset_handlers::create_seed))
         .route("/api/seeds", get(handlers::asset_handlers::list_seeds))

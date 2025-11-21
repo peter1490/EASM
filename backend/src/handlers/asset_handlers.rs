@@ -84,3 +84,11 @@ pub async fn get_asset(
         .ok_or_else(|| ApiError::NotFound(format!("Asset {} not found", id)))?;
     Ok(Json(asset))
 }
+
+pub async fn get_asset_path(
+    State(app_state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<Asset>>, ApiError> {
+    let path = app_state.discovery_service.get_asset_path(&id).await?;
+    Ok(Json(path))
+}

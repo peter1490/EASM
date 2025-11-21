@@ -191,9 +191,9 @@ export default function SettingsPage() {
                          <div className="h-2 w-2 rounded-full bg-success" />
                          <span>{component.name}</span>
                        </div>
-                       <Badge variant="outline" className="text-success border-success/20 bg-success/10">
-                         {component.status}
-                       </Badge>
+                      <Badge variant="success" className="text-success border-success/20 bg-success/10">
+                        {component.status}
+                      </Badge>
                      </div>
                    ))}
                  </div>

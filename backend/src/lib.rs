@@ -68,8 +68,27 @@ impl AppState {
         
         // Create external services and utilities
         let external_services = Arc::new(ExternalServicesManager::new(config_arc.clone())?);
-        let dns_resolver = Arc::new(DnsResolver::new().await?);
-        let http_analyzer = Arc::new(HttpAnalyzer::new()?);
+        
+        // Create DNS resolver with settings configuration
+        use crate::services::external::{DnsConfig, HttpConfig};
+        let dns_config = DnsConfig {
+            query_timeout: std::time::Duration::from_secs(5),
+            max_concurrent: config_arc.dns_concurrency as usize,
+            rate_limit: config_arc.dns_concurrency,
+        };
+        let dns_resolver = Arc::new(DnsResolver::with_config(dns_config).await?);
+        
+        // Create HTTP analyzer with settings configuration
+        let http_config = HttpConfig {
+            request_timeout: std::time::Duration::from_secs_f64(config_arc.http_timeout_seconds),
+            tls_timeout: std::time::Duration::from_secs_f64(config_arc.tls_timeout_seconds),
+            max_redirects: 5,
+            max_concurrent: 20,
+            rate_limit: 50,
+            user_agent: "EASM-Scanner/1.0".to_string(),
+        };
+        let http_analyzer = Arc::new(HttpAnalyzer::with_config(http_config)?);
+        
         let task_manager = Arc::new(TaskManager::new(config_arc.clone()));
         
         // Create services with dependency injection
@@ -93,6 +112,7 @@ impl AppState {
             http_analyzer.clone(),
             task_manager.clone(),
             config_arc.clone(),
+            scan_service.clone(),
         ));
         
         // Create drift service

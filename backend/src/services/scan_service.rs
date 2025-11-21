@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::{
     config::{Settings, COMMON_PORTS},
     error::ApiError,
-    models::{Scan, ScanCreate, ScanStatus, FindingCreate, AssetCreate, AssetType},
+    models::{Scan, ScanCreate, ScanStatus, FindingCreate, Asset, AssetCreate, AssetType},
     repositories::{ScanRepository, FindingRepository, AssetRepository},
     services::{
         external::{
@@ -159,19 +159,22 @@ impl ScanService {
         // Check for cancellation
         ctx.check_cancellation().await?;
         
+        // Create or get the root asset for the scan target to establish lineage
+        let root_asset_id = self.create_scan_root_asset(target).await?;
+        
         // Determine target type and process accordingly
         if target.contains('/') {
             // CIDR range
             ctx.update_progress(0.2, Some("Processing CIDR range".to_string())).await?;
-            self.process_cidr_scan_with_context(&ctx, scan_id, target).await?;
+            self.process_cidr_scan_with_context(&ctx, scan_id, target, root_asset_id).await?;
         } else if target.parse::<IpAddr>().is_ok() {
             // IP address
             ctx.update_progress(0.2, Some("Processing IP address".to_string())).await?;
-            self.process_ip_scan_with_context(&ctx, scan_id, target).await?;
+            self.process_ip_scan_with_context(&ctx, scan_id, target, root_asset_id).await?;
         } else {
             // Domain
             ctx.update_progress(0.2, Some("Processing domain".to_string())).await?;
-            self.process_domain_scan_with_context(&ctx, scan_id, target).await?;
+            self.process_domain_scan_with_context(&ctx, scan_id, target, root_asset_id).await?;
         }
         
         // Update scan status to completed
@@ -184,8 +187,61 @@ impl ScanService {
 
 
 
+    /// Create or get the root asset for a scan target to establish lineage
+    async fn create_scan_root_asset(&self, target: &str) -> Result<Uuid, ApiError> {
+        // Determine asset type based on target
+        let (asset_type, identifier) = if target.contains('/') {
+            // CIDR range - we'll create the first IP or just use identifier
+            (AssetType::Ip, target.to_string())
+        } else if target.parse::<IpAddr>().is_ok() {
+            (AssetType::Ip, target.to_string())
+        } else {
+            (AssetType::Domain, target.to_string())
+        };
+        
+        // Check if asset already exists (could be from discovery)
+        let existing_asset = self.asset_repo.get_by_identifier(asset_type.clone(), &identifier).await?;
+        
+        let metadata = if let Some(ref existing) = existing_asset {
+            // Asset exists - check if it has a parent (was discovered)
+            if existing.parent_id.is_some() {
+                // Asset has a parent from discovery - don't mark as scan_root
+                // Just add scan metadata without overwriting discovery lineage
+                json!({
+                    "last_scanned_at": chrono::Utc::now(),
+                    "scanned_directly": true
+                })
+            } else {
+                // Asset exists but has no parent - it was a previous scan root or seed
+                json!({
+                    "is_scan_root": true,
+                    "last_scanned_at": chrono::Utc::now()
+                })
+            }
+        } else {
+            // New asset - this is a true scan root
+            json!({
+                "is_scan_root": true,
+                "scanned_at": chrono::Utc::now()
+            })
+        };
+        
+        let asset = AssetCreate {
+            asset_type,
+            identifier,
+            confidence: 1.0, // Scan target has maximum confidence
+            sources: json!(["scan_target"]),
+            metadata,
+            seed_id: None,
+            parent_id: None, // Don't override existing parent_id (handled by create_or_merge)
+        };
+        
+        let created_asset = self.asset_repo.create_or_merge(&asset).await?;
+        Ok(created_asset.id)
+    }
+
     /// Process domain scan with task context and progress updates
-    async fn process_domain_scan_with_context(&self, ctx: &TaskContext, scan_id: Uuid, domain: &str) -> Result<(), ApiError> {
+    async fn process_domain_scan_with_context(&self, ctx: &TaskContext, scan_id: Uuid, domain: &str, root_asset_id: Uuid) -> Result<(), ApiError> {
         tracing::info!("Processing domain scan for {}", domain);
         
         // Step 1: Subdomain enumeration
@@ -214,7 +270,7 @@ impl ScanService {
         
         // Step 2: DNS resolution for all discovered subdomains
         ctx.update_progress(0.5, Some("Resolving DNS records".to_string())).await?;
-        let mut resolved_ips = Vec::new();
+        let mut resolved_ips_with_parent = Vec::new();
         for (i, subdomain) in subdomains.iter().enumerate() {
             ctx.check_cancellation().await?;
             
@@ -222,8 +278,12 @@ impl ScanService {
                 Ok(ips) => {
                     if !ips.is_empty() {
                         self.create_dns_finding(scan_id, subdomain, &ips).await?;
-                        self.create_domain_asset(scan_id, subdomain).await?;
-                        resolved_ips.extend(ips);
+                        // Create domain asset with proper lineage (parent is root domain)
+                        let subdomain_asset = self.create_domain_asset_with_parent(scan_id, subdomain, Some(root_asset_id)).await?;
+                        // Store IPs with their parent subdomain asset for lineage
+                        for ip in ips {
+                            resolved_ips_with_parent.push((ip, subdomain_asset.id));
+                        }
                     }
                 }
                 Err(e) => {
@@ -236,15 +296,15 @@ impl ScanService {
             ctx.update_progress(dns_progress, Some(format!("Resolved {} of {} domains", i + 1, subdomains.len()))).await?;
         }
         
-        // Step 3: Process discovered IPs
+        // Step 3: Process discovered IPs with proper parent tracking
         ctx.update_progress(0.7, Some("Scanning discovered IPs".to_string())).await?;
-        for (i, ip) in resolved_ips.iter().enumerate() {
+        for (i, (ip, parent_domain_id)) in resolved_ips_with_parent.iter().enumerate() {
             ctx.check_cancellation().await?;
-            self.process_ip_address(scan_id, *ip).await?;
+            self.process_ip_address_with_parent(scan_id, *ip, Some(*parent_domain_id)).await?;
             
             // Update progress during IP processing
-            let ip_progress = 0.7 + (i as f32 / resolved_ips.len() as f32) * 0.15;
-            ctx.update_progress(ip_progress, Some(format!("Scanned {} of {} IPs", i + 1, resolved_ips.len()))).await?;
+            let ip_progress = 0.7 + (i as f32 / resolved_ips_with_parent.len() as f32) * 0.15;
+            ctx.update_progress(ip_progress, Some(format!("Scanned {} of {} IPs", i + 1, resolved_ips_with_parent.len()))).await?;
         }
         
         // Step 4: Threat intelligence for the main domain
@@ -259,18 +319,19 @@ impl ScanService {
 
 
     /// Process IP scan with task context
-    async fn process_ip_scan_with_context(&self, ctx: &TaskContext, scan_id: Uuid, ip_str: &str) -> Result<(), ApiError> {
+    async fn process_ip_scan_with_context(&self, ctx: &TaskContext, scan_id: Uuid, ip_str: &str, _root_asset_id: Uuid) -> Result<(), ApiError> {
         let ip: IpAddr = ip_str.parse()
             .map_err(|e| ApiError::Validation(format!("Invalid IP address: {}", e)))?;
         
         ctx.update_progress(0.3, Some(format!("Scanning IP {}", ip))).await?;
-        self.process_ip_address_with_context(ctx, scan_id, ip).await
+        // For direct IP scans, the root asset IS the IP, so parent is None
+        self.process_ip_address_with_context_and_parent(ctx, scan_id, ip, None).await
     }
 
 
 
     /// Process CIDR scan with task context
-    async fn process_cidr_scan_with_context(&self, ctx: &TaskContext, scan_id: Uuid, cidr: &str) -> Result<(), ApiError> {
+    async fn process_cidr_scan_with_context(&self, ctx: &TaskContext, scan_id: Uuid, cidr: &str, root_asset_id: Uuid) -> Result<(), ApiError> {
         tracing::info!("Processing CIDR scan for {}", cidr);
         
         let ips = expand_cidr(cidr)?;
@@ -289,6 +350,7 @@ impl ScanService {
         ctx.update_progress(0.3, Some(format!("Scanning {} hosts in CIDR range", ips.len()))).await?;
         
         // Process each IP with concurrency control
+        // For CIDR scans, each IP is a child of the CIDR root asset
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.settings.tcp_scan_concurrency as usize));
         let mut tasks = Vec::new();
         
@@ -301,7 +363,8 @@ impl ScanService {
             
             let task = tokio::spawn(async move {
                 let _permit = permit;
-                scan_service.process_ip_address(scan_id, ip).await
+                // Each IP in CIDR is child of the root CIDR asset
+                scan_service.process_ip_address_with_parent(scan_id, ip, Some(root_asset_id)).await
             });
             
             tasks.push(task);
@@ -332,9 +395,9 @@ impl ScanService {
 
 
 
-    /// Process individual IP address with task context
-    async fn process_ip_address_with_context(&self, ctx: &TaskContext, scan_id: Uuid, ip: IpAddr) -> Result<(), ApiError> {
-        tracing::debug!("Processing IP address {}", ip);
+    /// Process individual IP address with task context and optional parent for lineage
+    async fn process_ip_address_with_context_and_parent(&self, ctx: &TaskContext, scan_id: Uuid, ip: IpAddr, parent_id: Option<Uuid>) -> Result<(), ApiError> {
+        tracing::debug!("Processing IP address {} with parent {:?}", ip, parent_id);
         
         // Step 1: Port scanning
         ctx.update_progress(0.4, Some(format!("Port scanning {}", ip))).await?;
@@ -343,7 +406,7 @@ impl ScanService {
         
         if !open_ports.is_empty() {
             self.create_port_scan_finding(scan_id, ip, &open_ports).await?;
-            self.create_ip_asset(scan_id, ip).await?;
+            let ip_asset = self.create_ip_asset_with_parent(scan_id, ip, parent_id).await?;
             
             ctx.update_progress(0.6, Some(format!("Found {} open ports on {}", open_ports.len(), ip))).await?;
             
@@ -361,21 +424,21 @@ impl ScanService {
             for &port in &open_ports {
                 ctx.check_cancellation().await?;
                 if matches!(port, 443 | 8443) {
-                    self.analyze_tls_service(scan_id, ip, port).await?;
+                    self.analyze_tls_service_with_parent(scan_id, ip, port, ip_asset.id).await?;
                 }
             }
             
             ctx.update_progress(0.8, Some(format!("Completed TLS analysis for {}", ip))).await?;
-        }
-        
-        // Step 4: Reverse DNS lookup
-        if let Ok(hostnames) = self.dns_resolver.reverse_lookup(&ip).await {
-            if !hostnames.is_empty() {
-                self.create_reverse_dns_finding(scan_id, ip, &hostnames).await?;
-                
-                // Create domain assets for discovered hostnames
-                for hostname in hostnames {
-                    self.create_domain_asset(scan_id, &hostname).await?;
+            
+            // Step 4: Reverse DNS lookup - domains discovered from IP should have IP as parent
+            if let Ok(hostnames) = self.dns_resolver.reverse_lookup(&ip).await {
+                if !hostnames.is_empty() {
+                    self.create_reverse_dns_finding(scan_id, ip, &hostnames).await?;
+                    
+                    // Create domain assets for discovered hostnames with IP as parent
+                    for hostname in hostnames {
+                        self.create_domain_asset_with_parent(scan_id, &hostname, Some(ip_asset.id)).await?;
+                    }
                 }
             }
         }
@@ -388,9 +451,9 @@ impl ScanService {
         Ok(())
     }
 
-    /// Process individual IP address with port scanning and service detection
-    async fn process_ip_address(&self, scan_id: Uuid, ip: IpAddr) -> Result<(), ApiError> {
-        tracing::debug!("Processing IP address {}", ip);
+    /// Process individual IP address with port scanning and service detection (with optional parent for lineage)
+    async fn process_ip_address_with_parent(&self, scan_id: Uuid, ip: IpAddr, parent_id: Option<Uuid>) -> Result<(), ApiError> {
+        tracing::debug!("Processing IP address {} with parent {:?}", ip, parent_id);
         
         // Step 1: Port scanning
         let timeout_duration = Duration::from_secs_f64(self.settings.tcp_scan_timeout);
@@ -398,7 +461,7 @@ impl ScanService {
         
         if !open_ports.is_empty() {
             self.create_port_scan_finding(scan_id, ip, &open_ports).await?;
-            self.create_ip_asset(scan_id, ip).await?;
+            let ip_asset = self.create_ip_asset_with_parent(scan_id, ip, parent_id).await?;
             
             // Step 2: HTTP probing for web ports
             for &port in &open_ports {
@@ -407,22 +470,22 @@ impl ScanService {
                 }
             }
             
-            // Step 3: TLS analysis for HTTPS ports
+            // Step 3: TLS analysis for HTTPS ports - certificates are children of the IP
             for &port in &open_ports {
                 if matches!(port, 443 | 8443) {
-                    self.analyze_tls_service(scan_id, ip, port).await?;
+                    self.analyze_tls_service_with_parent(scan_id, ip, port, ip_asset.id).await?;
                 }
             }
-        }
-        
-        // Step 4: Reverse DNS lookup
-        if let Ok(hostnames) = self.dns_resolver.reverse_lookup(&ip).await {
-            if !hostnames.is_empty() {
-                self.create_reverse_dns_finding(scan_id, ip, &hostnames).await?;
-                
-                // Create domain assets for discovered hostnames
-                for hostname in hostnames {
-                    self.create_domain_asset(scan_id, &hostname).await?;
+            
+            // Step 4: Reverse DNS lookup - domains discovered from IP should have IP as parent
+            if let Ok(hostnames) = self.dns_resolver.reverse_lookup(&ip).await {
+                if !hostnames.is_empty() {
+                    self.create_reverse_dns_finding(scan_id, ip, &hostnames).await?;
+                    
+                    // Create domain assets for discovered hostnames with IP as parent
+                    for hostname in hostnames {
+                        self.create_domain_asset_with_parent(scan_id, &hostname, Some(ip_asset.id)).await?;
+                    }
                 }
             }
         }
@@ -446,8 +509,8 @@ impl ScanService {
         Ok(())
     }
 
-    /// Analyze TLS service and extract certificate information
-    async fn analyze_tls_service(&self, scan_id: Uuid, ip: IpAddr, port: u16) -> Result<(), ApiError> {
+    /// Analyze TLS service and extract certificate information (with parent for lineage)
+    async fn analyze_tls_service_with_parent(&self, scan_id: Uuid, ip: IpAddr, port: u16, parent_id: Uuid) -> Result<(), ApiError> {
         use crate::utils::crypto::get_tls_certificate_info;
         
         let hostname = ip.to_string(); // Use IP as hostname for direct IP connections
@@ -459,10 +522,10 @@ impl ScanService {
                 
                 self.create_tls_finding(scan_id, &format!("{}:{}", ip, port), &cert_info_json).await?;
                 
-                // Create certificate asset if organization is found
+                // Create certificate asset if organization is found - certificate is child of the IP
                 if let Some(org) = &cert_info.organization {
                     if !org.is_empty() {
-                        self.create_certificate_asset(scan_id, &cert_info_json).await?;
+                        self.create_certificate_asset_with_parent(scan_id, &cert_info_json, Some(parent_id)).await?;
                     }
                 }
             }
@@ -595,8 +658,8 @@ impl ScanService {
         Ok(())
     }
 
-    // Asset creation methods
-    async fn create_domain_asset(&self, _scan_id: Uuid, domain: &str) -> Result<(), ApiError> {
+    // Asset creation methods with lineage tracking
+    async fn create_domain_asset_with_parent(&self, _scan_id: Uuid, domain: &str, parent_id: Option<Uuid>) -> Result<Asset, ApiError> {
         let asset = AssetCreate {
             asset_type: AssetType::Domain,
             identifier: domain.to_string(),
@@ -605,13 +668,14 @@ impl ScanService {
             metadata: json!({
                 "discovered_via": "scan"
             }),
+            seed_id: None,
+            parent_id,
         };
         
-        self.asset_repo.create_or_merge(&asset).await?;
-        Ok(())
+        self.asset_repo.create_or_merge(&asset).await
     }
 
-    async fn create_ip_asset(&self, _scan_id: Uuid, ip: IpAddr) -> Result<(), ApiError> {
+    async fn create_ip_asset_with_parent(&self, _scan_id: Uuid, ip: IpAddr, parent_id: Option<Uuid>) -> Result<Asset, ApiError> {
         let asset = AssetCreate {
             asset_type: AssetType::Ip,
             identifier: ip.to_string(),
@@ -620,13 +684,14 @@ impl ScanService {
             metadata: json!({
                 "discovered_via": "scan"
             }),
+            seed_id: None,
+            parent_id,
         };
         
-        self.asset_repo.create_or_merge(&asset).await?;
-        Ok(())
+        self.asset_repo.create_or_merge(&asset).await
     }
 
-    async fn create_certificate_asset(&self, _scan_id: Uuid, cert_info: &Value) -> Result<(), ApiError> {
+    async fn create_certificate_asset_with_parent(&self, _scan_id: Uuid, cert_info: &Value, parent_id: Option<Uuid>) -> Result<(), ApiError> {
         if let Some(subject) = cert_info.get("subject").and_then(|v| v.as_str()) {
             let asset = AssetCreate {
                 asset_type: AssetType::Certificate,
@@ -634,6 +699,8 @@ impl ScanService {
                 confidence: 0.8, // Good confidence for certificate-based discovery
                 sources: json!(["tls_scan"]),
                 metadata: cert_info.clone(),
+                seed_id: None,
+                parent_id,
             };
             
             self.asset_repo.create_or_merge(&asset).await?;

@@ -12,6 +12,8 @@ pub enum AssetType {
     Ip,
     Port,
     Certificate,
+    Organization,
+    Asn,
 }
 
 #[derive(Debug, Clone, PartialEq, sqlx::Type, Serialize, Deserialize)]
@@ -50,6 +52,8 @@ pub struct Asset {
     pub metadata: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub seed_id: Option<Uuid>,
+    pub parent_id: Option<Uuid>,
     // Optional fields for frontend compatibility (not in DB yet)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_scan_id: Option<String>,
@@ -70,6 +74,10 @@ pub struct AssetRow {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[sqlx(default)]
+    pub seed_id: Option<Uuid>,
+    #[sqlx(default)]
+    pub parent_id: Option<Uuid>,
+    #[sqlx(default)]
     pub last_scan_id: Option<Uuid>,
     #[sqlx(default)]
     pub last_scan_status: Option<String>, // Using String since ScanStatus enum might need sqlx Type impl
@@ -88,6 +96,8 @@ impl From<AssetRow> for Asset {
             metadata: row.metadata,
             created_at: row.created_at,
             updated_at: row.updated_at,
+            seed_id: row.seed_id,
+            parent_id: row.parent_id,
             last_scan_id: row.last_scan_id.map(|id| id.to_string()),
             last_scan_status: row.last_scan_status,
             last_scanned_at: row.last_scanned_at,
@@ -110,6 +120,8 @@ pub struct AssetCreate {
     pub confidence: f64,
     pub sources: Value,
     pub metadata: Value,
+    pub seed_id: Option<Uuid>,
+    pub parent_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

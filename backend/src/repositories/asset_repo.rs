@@ -14,6 +14,8 @@ pub trait AssetRepository {
     async fn list_by_type(&self, asset_type: AssetType, confidence_threshold: Option<f64>) -> Result<Vec<Asset>, ApiError>;
     async fn get_by_id(&self, id: &Uuid) -> Result<Option<Asset>, ApiError>;
     async fn get_by_identifier(&self, asset_type: AssetType, identifier: &str) -> Result<Option<Asset>, ApiError>;
+    async fn get_path(&self, id: &Uuid) -> Result<Vec<Asset>, ApiError>;
+    async fn update_confidence(&self, id: &Uuid, new_confidence: f64) -> Result<Asset, ApiError>;
 }
 
 #[async_trait]
@@ -43,7 +45,7 @@ impl AssetRepository for SqlxAssetRepository {
         // Try to find existing asset with same type and identifier
         let existing = sqlx::query_as::<_, AssetRow>(
             r#"
-            SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
+            SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id
             FROM assets
             WHERE asset_type = $1 AND identifier = $2
             "#
@@ -56,8 +58,10 @@ impl AssetRepository for SqlxAssetRepository {
 
         match existing {
             Some(existing_asset) => {
-                // Merge logic: combine sources and update confidence if higher
+                // Merge logic: combine sources and update confidence with rediscovery bonus
                 let mut merged_sources = existing_asset.sources.as_array().unwrap_or(&vec![]).clone();
+                let original_source_count = merged_sources.len();
+                
                 if let Some(new_sources) = asset.sources.as_array() {
                     for source in new_sources {
                         if !merged_sources.contains(source) {
@@ -65,13 +69,26 @@ impl AssetRepository for SqlxAssetRepository {
                         }
                     }
                 }
+                
+                let new_source_count = merged_sources.len();
+                let discovered_new_sources = new_source_count > original_source_count;
 
-                // Use higher confidence score
-                let new_confidence = if asset.confidence > existing_asset.confidence {
-                    asset.confidence
+                // Calculate merged confidence:
+                // - Start with the higher of the two confidences
+                // - Add a small bonus if new sources were discovered (0.05 per new source, max 0.15)
+                // - Cap at 1.0
+                let base_confidence = asset.confidence.max(existing_asset.confidence);
+                let rediscovery_bonus = if discovered_new_sources {
+                    let new_sources_added = (new_source_count - original_source_count) as f64;
+                    (new_sources_added * 0.05).min(0.15)
+                } else if asset.confidence > 0.0 {
+                    // Same sources but rediscovered - small validation bonus
+                    0.02
                 } else {
-                    existing_asset.confidence
+                    0.0
                 };
+                
+                let new_confidence = (base_confidence + rediscovery_bonus).min(1.0);
 
                 // Merge metadata
                 let mut merged_metadata = existing_asset.metadata.as_object().unwrap_or(&serde_json::Map::new()).clone();
@@ -82,18 +99,24 @@ impl AssetRepository for SqlxAssetRepository {
                 }
 
                 // Update the existing asset
+                // IMPORTANT: Use COALESCE with new values first to allow lineage updates
+                // This ensures that if lineage info is provided later, it gets added
                 let row = sqlx::query_as::<_, AssetRow>(
                     r#"
                     UPDATE assets
-                    SET confidence = $1, sources = $2, metadata = $3, updated_at = $4
-                    WHERE id = $5
-                    RETURNING id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
+                    SET confidence = $1, sources = $2, metadata = $3, updated_at = $4, 
+                        seed_id = COALESCE($5, assets.seed_id), 
+                        parent_id = COALESCE($6, assets.parent_id)
+                    WHERE id = $7
+                    RETURNING id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id
                     "#
                 )
                 .bind(new_confidence)
                 .bind(serde_json::Value::Array(merged_sources))
                 .bind(serde_json::Value::Object(merged_metadata))
                 .bind(now)
+                .bind(asset.seed_id)
+                .bind(asset.parent_id)
                 .bind(existing_asset.id)
                 .fetch_one(&self.pool)
                 .await?;
@@ -105,9 +128,9 @@ impl AssetRepository for SqlxAssetRepository {
                 let id = Uuid::new_v4();
                 let row = sqlx::query_as::<_, AssetRow>(
                     r#"
-                    INSERT INTO assets (id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                    RETURNING id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
+                    INSERT INTO assets (id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    RETURNING id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id
                     "#
                 )
                 .bind(id)
@@ -118,6 +141,8 @@ impl AssetRepository for SqlxAssetRepository {
                 .bind(&asset.metadata)
                 .bind(now)
                 .bind(now)
+                .bind(asset.seed_id)
+                .bind(asset.parent_id)
                 .fetch_one(&self.pool)
                 .await?;
 
@@ -141,7 +166,7 @@ impl AssetRepository for SqlxAssetRepository {
                         ORDER BY LOWER(TRIM(target)), created_at DESC
                     )
                     SELECT 
-                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at,
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at, a.seed_id, a.parent_id,
                         ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
                     FROM assets a
                     LEFT JOIN latest_scans ls ON ls.normalized_target = LOWER(TRIM(a.identifier))
@@ -166,7 +191,7 @@ impl AssetRepository for SqlxAssetRepository {
                         ORDER BY LOWER(TRIM(target)), created_at DESC
                     )
                     SELECT 
-                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at,
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at, a.seed_id, a.parent_id,
                         ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
                     FROM assets a
                     LEFT JOIN latest_scans ls ON ls.normalized_target = LOWER(TRIM(a.identifier))
@@ -223,7 +248,7 @@ impl AssetRepository for SqlxAssetRepository {
                 ORDER BY LOWER(TRIM(target)), created_at DESC
             )
             SELECT 
-                a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at,
+                a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at, a.seed_id, a.parent_id,
                 ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
             FROM assets a
             LEFT JOIN latest_scans ls ON ls.normalized_target = LOWER(TRIM(a.identifier))
@@ -250,7 +275,7 @@ impl AssetRepository for SqlxAssetRepository {
                         ORDER BY LOWER(TRIM(target)), created_at DESC
                     )
                     SELECT 
-                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at,
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at, a.seed_id, a.parent_id,
                         ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
                     FROM assets a
                     LEFT JOIN latest_scans ls ON ls.normalized_target = LOWER(TRIM(a.identifier))
@@ -273,7 +298,7 @@ impl AssetRepository for SqlxAssetRepository {
                         ORDER BY LOWER(TRIM(target)), created_at DESC
                     )
                     SELECT 
-                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at,
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at, a.seed_id, a.parent_id,
                         ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
                     FROM assets a
                     LEFT JOIN latest_scans ls ON ls.normalized_target = LOWER(TRIM(a.identifier))
@@ -300,7 +325,7 @@ impl AssetRepository for SqlxAssetRepository {
                 ORDER BY LOWER(TRIM(target)), created_at DESC
             )
             SELECT 
-                a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at,
+                a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at, a.seed_id, a.parent_id,
                 ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
             FROM assets a
             LEFT JOIN latest_scans ls ON ls.normalized_target = LOWER(TRIM(a.identifier))
@@ -314,6 +339,76 @@ impl AssetRepository for SqlxAssetRepository {
         .map(Asset::from);
 
         Ok(result)
+    }
+
+    async fn get_path(&self, id: &Uuid) -> Result<Vec<Asset>, ApiError> {
+        // Optimized path query with cycle detection, depth limit, and no scan join
+        // This is a lightweight query focused only on lineage traversal
+        let rows = sqlx::query_as::<_, AssetRow>(
+            r#"
+            WITH RECURSIVE asset_path AS (
+                -- Base case: the requested asset
+                SELECT 
+                    id, asset_type, identifier, confidence, sources, metadata, 
+                    created_at, updated_at, seed_id, parent_id,
+                    ARRAY[id] as path_ids,  -- Track visited nodes for cycle detection
+                    0 as depth               -- Track depth for limiting
+                FROM assets
+                WHERE id = $1
+                
+                UNION ALL
+                
+                -- Recursive step: get the parent
+                SELECT 
+                    p.id, p.asset_type, p.identifier, p.confidence, p.sources, p.metadata, 
+                    p.created_at, p.updated_at, p.seed_id, p.parent_id,
+                    ap.path_ids || p.id,     -- Add current node to path
+                    ap.depth + 1             -- Increment depth
+                FROM assets p
+                INNER JOIN asset_path ap ON p.id = ap.parent_id
+                WHERE NOT (p.id = ANY(ap.path_ids))  -- Prevent cycles
+                  AND ap.depth < 100                  -- Limit depth to prevent runaway queries
+            )
+            SELECT 
+                id, asset_type, identifier, confidence, sources, metadata, 
+                created_at, updated_at, seed_id, parent_id,
+                NULL::uuid as last_scan_id,
+                NULL::text as last_scan_status,
+                NULL::timestamptz as last_scanned_at
+            FROM asset_path
+            ORDER BY depth DESC  -- Order from root to leaf for easier reversal
+            "#
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        // The CTE returns from child to parent (ordered by depth DESC = parent first)
+        // We reverse it to show Root/Seed -> Asset path
+        let mut assets: Vec<Asset> = rows.into_iter().map(Asset::from).collect();
+        assets.reverse();
+        
+        Ok(assets)
+    }
+    
+    async fn update_confidence(&self, id: &Uuid, new_confidence: f64) -> Result<Asset, ApiError> {
+        let now = chrono::Utc::now();
+        
+        let row = sqlx::query_as::<_, AssetRow>(
+            r#"
+            UPDATE assets
+            SET confidence = $1, updated_at = $2
+            WHERE id = $3
+            RETURNING id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id
+            "#
+        )
+        .bind(new_confidence)
+        .bind(now)
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await?;
+        
+        Ok(Asset::from(row))
     }
 }
 
@@ -342,6 +437,8 @@ mod tests {
             confidence: 0.8,
             sources: json!(["dns_scan"]),
             metadata: json!({"ttl": 300}),
+            seed_id: None,
+            parent_id: None,
         };
 
         let result = repo.create_or_merge(&asset_create).await;
@@ -366,6 +463,8 @@ mod tests {
             confidence: 0.6,
             sources: json!(["dns_scan"]),
             metadata: json!({"ttl": 300}),
+            seed_id: None,
+            parent_id: None,
         };
 
         let initial_asset = repo.create_or_merge(&asset_create1).await.unwrap();
@@ -377,6 +476,8 @@ mod tests {
             confidence: 0.9, // Higher confidence
             sources: json!(["certificate_scan"]), // Different source
             metadata: json!({"issuer": "Let's Encrypt"}), // Additional metadata
+            seed_id: None,
+            parent_id: None,
         };
 
         let merged_asset = repo.create_or_merge(&asset_create2).await.unwrap();
@@ -411,6 +512,8 @@ mod tests {
             confidence: 0.9,
             sources: json!(["dns_scan"]),
             metadata: json!({}),
+            seed_id: None,
+            parent_id: None,
         };
 
         let asset2 = AssetCreate {
@@ -419,6 +522,8 @@ mod tests {
             confidence: 0.5,
             sources: json!(["port_scan"]),
             metadata: json!({}),
+            seed_id: None,
+            parent_id: None,
         };
 
         let asset3 = AssetCreate {
@@ -427,6 +532,8 @@ mod tests {
             confidence: 0.3,
             sources: json!(["passive_dns"]),
             metadata: json!({}),
+            seed_id: None,
+            parent_id: None,
         };
 
         repo.create_or_merge(&asset1).await.unwrap();
@@ -461,6 +568,8 @@ mod tests {
             confidence: 0.8,
             sources: json!(["dns_scan"]),
             metadata: json!({}),
+            seed_id: None,
+            parent_id: None,
         };
 
         let ip_asset = AssetCreate {
@@ -469,6 +578,8 @@ mod tests {
             confidence: 0.6,
             sources: json!(["port_scan"]),
             metadata: json!({}),
+            seed_id: None,
+            parent_id: None,
         };
 
         repo.create_or_merge(&domain_asset).await.unwrap();
@@ -502,6 +613,8 @@ mod tests {
             confidence: 0.8,
             sources: json!(["dns_scan"]),
             metadata: json!({}),
+            seed_id: None,
+            parent_id: None,
         };
 
         let created_asset = repo.create_or_merge(&asset_create).await.unwrap();
@@ -531,6 +644,8 @@ mod tests {
             confidence: 0.8,
             sources: json!(["dns_scan"]),
             metadata: json!({}),
+            seed_id: None,
+            parent_id: None,
         };
 
         let created_asset = repo.create_or_merge(&asset_create).await.unwrap();
@@ -544,6 +659,226 @@ mod tests {
         let nonexistent_id = Uuid::new_v4();
         let not_found = repo.get_by_id(&nonexistent_id).await.unwrap();
         assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_lineage_merge_update() {
+        let pool = setup_test_db().await;
+        let repo = SqlxAssetRepository::new(pool);
+
+        // Create asset without lineage
+        let asset_create_no_lineage = AssetCreate {
+            asset_type: AssetType::Domain,
+            identifier: "example.com".to_string(),
+            confidence: 0.7,
+            sources: json!(["dns_scan"]),
+            metadata: json!({}),
+            seed_id: None,
+            parent_id: None,
+        };
+
+        let asset = repo.create_or_merge(&asset_create_no_lineage).await.unwrap();
+        assert!(asset.seed_id.is_none());
+        assert!(asset.parent_id.is_none());
+
+        // Create a seed to use as lineage
+        let seed_id = Uuid::new_v4();
+        let parent_id = Uuid::new_v4();
+
+        // Merge with lineage info - this should UPDATE the lineage
+        let asset_create_with_lineage = AssetCreate {
+            asset_type: AssetType::Domain,
+            identifier: "example.com".to_string(),
+            confidence: 0.8,
+            sources: json!(["certificate_scan"]),
+            metadata: json!({}),
+            seed_id: Some(seed_id),
+            parent_id: Some(parent_id),
+        };
+
+        let updated_asset = repo.create_or_merge(&asset_create_with_lineage).await.unwrap();
+        
+        // CRITICAL TEST: Lineage should now be populated
+        assert_eq!(updated_asset.seed_id, Some(seed_id), "Seed ID should be updated");
+        assert_eq!(updated_asset.parent_id, Some(parent_id), "Parent ID should be updated");
+        assert_eq!(updated_asset.id, asset.id, "Should be same asset");
+    }
+
+    #[tokio::test]
+    async fn test_get_path_linear_chain() {
+        let pool = setup_test_db().await;
+        let repo = SqlxAssetRepository::new(pool);
+
+        // Create a linear chain: Seed -> Domain -> Subdomain -> IP
+        let seed_asset = AssetCreate {
+            asset_type: AssetType::Domain,
+            identifier: "example.com".to_string(),
+            confidence: 1.0,
+            sources: json!(["seed"]),
+            metadata: json!({}),
+            seed_id: None,
+            parent_id: None,
+        };
+        let seed = repo.create_or_merge(&seed_asset).await.unwrap();
+
+        let subdomain_asset = AssetCreate {
+            asset_type: AssetType::Domain,
+            identifier: "www.example.com".to_string(),
+            confidence: 0.9,
+            sources: json!(["dns"]),
+            metadata: json!({}),
+            seed_id: Some(seed.id),
+            parent_id: Some(seed.id),
+        };
+        let subdomain = repo.create_or_merge(&subdomain_asset).await.unwrap();
+
+        let ip_asset = AssetCreate {
+            asset_type: AssetType::Ip,
+            identifier: "192.168.1.1".to_string(),
+            confidence: 0.8,
+            sources: json!(["dns_resolution"]),
+            metadata: json!({}),
+            seed_id: Some(seed.id),
+            parent_id: Some(subdomain.id),
+        };
+        let ip = repo.create_or_merge(&ip_asset).await.unwrap();
+
+        // Get path from IP
+        let path = repo.get_path(&ip.id).await.unwrap();
+        
+        assert_eq!(path.len(), 3, "Path should contain 3 assets");
+        assert_eq!(path[0].id, seed.id, "First should be seed");
+        assert_eq!(path[1].id, subdomain.id, "Second should be subdomain");
+        assert_eq!(path[2].id, ip.id, "Third should be IP");
+    }
+
+    #[tokio::test]
+    async fn test_get_path_single_asset() {
+        let pool = setup_test_db().await;
+        let repo = SqlxAssetRepository::new(pool);
+
+        let asset = AssetCreate {
+            asset_type: AssetType::Domain,
+            identifier: "example.com".to_string(),
+            confidence: 1.0,
+            sources: json!(["seed"]),
+            metadata: json!({}),
+            seed_id: None,
+            parent_id: None,
+        };
+        let created = repo.create_or_merge(&asset).await.unwrap();
+
+        let path = repo.get_path(&created.id).await.unwrap();
+        
+        assert_eq!(path.len(), 1, "Path should contain only the asset itself");
+        assert_eq!(path[0].id, created.id);
+    }
+
+    #[tokio::test]
+    async fn test_get_path_deep_chain() {
+        let pool = setup_test_db().await;
+        let repo = SqlxAssetRepository::new(pool);
+
+        // Create a chain of 10 assets
+        let mut previous_id = None;
+        let mut asset_ids = Vec::new();
+
+        for i in 0..10 {
+            let asset = AssetCreate {
+                asset_type: AssetType::Domain,
+                identifier: format!("level{}.example.com", i),
+                confidence: 1.0 - (i as f64 * 0.05),
+                sources: json!(["test"]),
+                metadata: json!({}),
+                seed_id: None,
+                parent_id: previous_id,
+            };
+            let created = repo.create_or_merge(&asset).await.unwrap();
+            asset_ids.push(created.id);
+            previous_id = Some(created.id);
+        }
+
+        // Get path from deepest asset
+        let path = repo.get_path(asset_ids.last().unwrap()).await.unwrap();
+        
+        assert_eq!(path.len(), 10, "Path should contain all 10 assets");
+        
+        // Verify order (root to leaf)
+        for (i, asset) in path.iter().enumerate() {
+            assert_eq!(asset.id, asset_ids[i], "Asset at position {} should match", i);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_path_nonexistent() {
+        let pool = setup_test_db().await;
+        let repo = SqlxAssetRepository::new(pool);
+
+        let nonexistent_id = Uuid::new_v4();
+        let path = repo.get_path(&nonexistent_id).await.unwrap();
+        
+        assert_eq!(path.len(), 0, "Path should be empty for nonexistent asset");
+    }
+
+    #[tokio::test]
+    async fn test_get_path_with_branching() {
+        let pool = setup_test_db().await;
+        let repo = SqlxAssetRepository::new(pool);
+
+        // Create a tree structure:
+        //        root
+        //       /    \
+        //   child1  child2
+        //     |
+        //  grandchild
+        
+        let root = repo.create_or_merge(&AssetCreate {
+            asset_type: AssetType::Domain,
+            identifier: "root.com".to_string(),
+            confidence: 1.0,
+            sources: json!(["seed"]),
+            metadata: json!({}),
+            seed_id: None,
+            parent_id: None,
+        }).await.unwrap();
+
+        let child1 = repo.create_or_merge(&AssetCreate {
+            asset_type: AssetType::Domain,
+            identifier: "child1.root.com".to_string(),
+            confidence: 0.9,
+            sources: json!(["dns"]),
+            metadata: json!({}),
+            seed_id: Some(root.id),
+            parent_id: Some(root.id),
+        }).await.unwrap();
+
+        let _child2 = repo.create_or_merge(&AssetCreate {
+            asset_type: AssetType::Domain,
+            identifier: "child2.root.com".to_string(),
+            confidence: 0.9,
+            sources: json!(["dns"]),
+            metadata: json!({}),
+            seed_id: Some(root.id),
+            parent_id: Some(root.id),
+        }).await.unwrap();
+
+        let grandchild = repo.create_or_merge(&AssetCreate {
+            asset_type: AssetType::Ip,
+            identifier: "192.168.1.1".to_string(),
+            confidence: 0.8,
+            sources: json!(["dns"]),
+            metadata: json!({}),
+            seed_id: Some(root.id),
+            parent_id: Some(child1.id),
+        }).await.unwrap();
+
+        // Get path from grandchild - should only return path through child1
+        let path = repo.get_path(&grandchild.id).await.unwrap();
+        
+        assert_eq!(path.len(), 3, "Path should contain root -> child1 -> grandchild");
+        assert_eq!(path[0].id, root.id);
+        assert_eq!(path[1].id, child1.id);
+        assert_eq!(path[2].id, grandchild.id);
     }
 }
 

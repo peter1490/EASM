@@ -12,8 +12,8 @@ pub mod integration_tests;
 
 pub use crtsh::CrtShClient;
 pub use shodan::{ShodanClient, ShodanResult, ShodanExtractedAssets, ShodanCertificateInfo};
-pub use dns::{DnsResolver, DnsResult, ReverseDnsResult};
-pub use http::{HttpAnalyzer, HttpProbeResult, TlsInfo, TlsCertificateResult};
+pub use dns::{DnsResolver, DnsResult, ReverseDnsResult, DnsConfig};
+pub use http::{HttpAnalyzer, HttpProbeResult, TlsInfo, TlsCertificateResult, HttpConfig};
 pub use virustotal::{VirusTotalClient, VirusTotalDomainReport, VirusTotalIpReport};
 pub use certspotter::{CertSpotterClient, CertSpotterIssuance, CertSpotterCertificate};
 pub use rate_limited_client::RateLimitedClient;

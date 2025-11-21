@@ -332,3 +332,7 @@ export async function getFindingTypes(): Promise<string[]> {
   if (!res.ok) throw new Error(`Failed to get finding types: ${res.status}`);
   return res.json();
 }
+
+export function getAssetPathUrl(assetId: string): string {
+  return `${API_BASE}/api/assets/${assetId}/path`;
+}

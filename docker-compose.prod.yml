@@ -10,13 +10,29 @@ services:
     environment:
       - DATABASE_URL=postgresql://easm:easm@db:5432/easm
       - VIRUSTOTAL_API_KEY=${VIRUSTOTAL_API_KEY}
+      - SHODAN_API_KEY=${SHODAN_API_KEY}
+      - CERTSPOTTER_API_TOKEN=${CERTSPOTTER_API_TOKEN}
+      - URLSCAN_API_KEY=${URLSCAN_API_KEY}
+      - OTX_API_KEY=${OTX_API_KEY}
       - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-http://localhost:3000}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LOG_FORMAT=${LOG_FORMAT:-json}
       - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
       - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-100}
       - RATE_LIMIT_WINDOW_SECONDS=${RATE_LIMIT_WINDOW_SECONDS:-60}
-      - API_KEYS=${API_KEYS:-dev-key-change-me-in-production}
+      - API_KEYS=${API_KEYS:-change-me-in-production}
+      # Discovery Settings
+      - MAX_CIDR_HOSTS=${MAX_CIDR_HOSTS:-4096}
+      - MAX_DISCOVERY_DEPTH=${MAX_DISCOVERY_DEPTH:-3}
+      - SUBDOMAIN_ENUM_TIMEOUT=${SUBDOMAIN_ENUM_TIMEOUT:-120.0}
+      - ENABLE_WAYBACK=${ENABLE_WAYBACK:-true}
+      - ENABLE_URLSCAN=${ENABLE_URLSCAN:-false}
+      - ENABLE_OTX=${ENABLE_OTX:-false}
+      # Recursive Discovery Limits (to reduce false-positives)
+      - MAX_ASSETS_PER_DISCOVERY=${MAX_ASSETS_PER_DISCOVERY:-5000}
+      - MIN_PIVOT_CONFIDENCE=${MIN_PIVOT_CONFIDENCE:-0.5}
+      - MAX_ORGS_PER_DOMAIN=${MAX_ORGS_PER_DOMAIN:-3}
+      - MAX_DOMAINS_PER_ORG=${MAX_DOMAINS_PER_ORG:-20}
     volumes:
       # Mount evidence directory
       - ./backend/evidence:/app/evidence

@@ -39,20 +39,16 @@ pub async fn get_metrics(
     let overall = report.overall;
 
     // Get counts from repositories
-    let active_scans = match app_state.scan_repository.list_by_status(Some(ScanStatus::Running)).await {
-        Ok(scans) => scans.len() as i64,
-        Err(_) => 0,
-    };
+    let active_scans = app_state.scan_repository.list_by_status(Some(ScanStatus::Running)).await
+        .map(|scans| scans.len() as i64)
+        .unwrap_or(0);
 
-    let total_assets = match app_state.asset_repository.count(None).await {
-        Ok(count) => count,
-        Err(_) => 0,
-    };
+    let total_assets = app_state.asset_repository.count(None).await
+        .unwrap_or(0);
 
-    let total_findings = match app_state.finding_repository.filter(&FindingFilter::default()).await {
-        Ok(response) => response.total_count,
-        Err(_) => 0,
-    };
+    let total_findings = app_state.finding_repository.filter(&FindingFilter::default()).await
+        .map(|response| response.total_count)
+        .unwrap_or(0);
 
     // Construct response
     let metrics = DashboardMetrics {

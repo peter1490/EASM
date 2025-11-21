@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     response::Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::{
     error::ApiError,
@@ -18,6 +18,14 @@ pub struct AssetQuery {
     limit: Option<i64>,
     #[serde(default)]
     offset: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AssetListResponse {
+    pub assets: Vec<Asset>,
+    pub total_count: i64,
+    pub limit: i64,
+    pub offset: i64,
 }
 
 pub async fn create_seed(
@@ -46,13 +54,26 @@ pub async fn delete_seed(
 pub async fn list_assets(
     State(app_state): State<AppState>,
     Query(params): Query<AssetQuery>,
-) -> Result<Json<Vec<Asset>>, ApiError> {
+) -> Result<Json<AssetListResponse>, ApiError> {
+    let limit = params.limit.unwrap_or(25);
+    let offset = params.offset.unwrap_or(0);
+    
     let assets = app_state.discovery_service.list_assets(
         params.confidence_threshold,
-        params.limit,
-        params.offset,
+        Some(limit),
+        Some(offset),
     ).await?;
-    Ok(Json(assets))
+    
+    let total_count = app_state.discovery_service.count_assets(
+        params.confidence_threshold,
+    ).await?;
+    
+    Ok(Json(AssetListResponse {
+        assets,
+        total_count,
+        limit,
+        offset,
+    }))
 }
 
 pub async fn get_asset(

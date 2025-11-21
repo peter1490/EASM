@@ -1,7 +1,7 @@
 use crate::error::ApiError;
 use super::rate_limited_client::RateLimitedClient;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShodanResult {
@@ -56,6 +56,25 @@ pub struct ShodanHostInfo {
     pub city: Option<String>,
 }
 
+/// Comprehensive asset extraction from Shodan results
+#[derive(Debug, Clone, Default)]
+pub struct ShodanExtractedAssets {
+    pub ips: HashSet<String>,
+    pub domains: HashSet<String>,
+    pub asns: HashSet<String>,
+    pub organizations: HashSet<String>,
+    pub certificates: Vec<ShodanCertificateInfo>,
+}
+
+/// Certificate information extracted from Shodan
+#[derive(Debug, Clone)]
+pub struct ShodanCertificateInfo {
+    pub subject: String,
+    pub issuer: Option<String>,
+    pub domains: Vec<String>,
+    pub organization: Option<String>,
+}
+
 /// Shodan API client with rate limiting and comprehensive error handling
 pub struct ShodanClient {
     client: RateLimitedClient,
@@ -83,7 +102,7 @@ impl ShodanClient {
         }
 
         let url = format!(
-            "https://api.shodan.io/shodan/host/search?key={}&q={}",
+            "https://api.shodan.io/shodan/host/search?key={}&query={}",
             api_key,
             urlencoding::encode(query)
         );
@@ -145,9 +164,209 @@ impl ShodanClient {
         self.search(&query).await
     }
 
+    /// Search for subdomains using Shodan's hostname filter
+    /// This searches for all hosts that match the domain pattern
+    pub async fn search_subdomains(&self, domain: &str) -> Result<Vec<String>, ApiError> {
+        if domain.is_empty() {
+            return Err(ApiError::Validation("Domain cannot be empty".to_string()));
+        }
+
+        // Use Shodan's hostname filter to find subdomains
+        // We search for hostnames containing the domain
+        let query = format!("hostname:{}", domain);
+        
+        tracing::info!("Searching Shodan for subdomains of: {}", domain);
+        
+        let results = self.search(&query).await?;
+        
+        // Extract unique hostnames from results
+        let mut subdomains = std::collections::HashSet::new();
+        
+        for result in results {
+            // Add hostnames from the hostnames field
+            if let Some(ref hostnames) = result.hostnames {
+                for hostname in hostnames {
+                    // Only include hostnames that contain or are subdomains of the target domain
+                    if hostname.ends_with(domain) || hostname == domain {
+                        subdomains.insert(hostname.clone());
+                    }
+                }
+            }
+            
+            // Also check domains field if available
+            if let Some(ref domains) = result.domains {
+                for domain_name in domains {
+                    if domain_name.ends_with(domain) || domain_name == domain {
+                        subdomains.insert(domain_name.clone());
+                    }
+                }
+            }
+        }
+        
+        let subdomain_list: Vec<String> = subdomains.into_iter().collect();
+        tracing::info!("Found {} unique subdomains from Shodan for {}", subdomain_list.len(), domain);
+        
+        Ok(subdomain_list)
+    }
+
+    /// Comprehensive search that extracts ALL asset types from Shodan results
+    /// Returns IPs, domains, ASNs, organizations, and certificate information
+    pub async fn search_comprehensive(&self, query: &str) -> Result<ShodanExtractedAssets, ApiError> {
+        tracing::info!("Performing comprehensive Shodan search for: {}", query);
+        
+        let results = self.search(query).await?;
+        let extracted = self.extract_assets_from_results(&results);
+        
+        Ok(extracted)
+    }
+    
+    /// Search by domain and extract all related assets (IPs, subdomains, ASNs, orgs, certs)
+    pub async fn search_domain_comprehensive(&self, domain: &str) -> Result<ShodanExtractedAssets, ApiError> {
+        let query = format!("hostname:{}", domain);
+        self.search_comprehensive(&query).await
+    }
+    
+    /// Search by organization and extract all related assets
+    pub async fn search_org_comprehensive(&self, org: &str) -> Result<ShodanExtractedAssets, ApiError> {
+        let query = format!("org:\"{}\"", org);
+        self.search_comprehensive(&query).await
+    }
+    
+    /// Search by ASN and extract all related assets
+    pub async fn search_asn_comprehensive(&self, asn: &str) -> Result<ShodanExtractedAssets, ApiError> {
+        let query = format!("asn:{}", asn);
+        self.search_comprehensive(&query).await
+    }
+
     /// Check if API key is configured
     pub fn is_configured(&self) -> bool {
         self.api_key.is_some()
+    }
+
+    /// Extract all asset types from Shodan search results
+    /// Returns IPs, domains, ASNs, organizations, and certificate info
+    pub fn extract_assets_from_results(&self, results: &[ShodanResult]) -> ShodanExtractedAssets {
+        let mut extracted = ShodanExtractedAssets::default();
+        
+        for result in results {
+            // Extract IP addresses
+            extracted.ips.insert(result.ip_str.clone());
+            
+            // Extract hostnames/domains
+            if let Some(ref hostnames) = result.hostnames {
+                for hostname in hostnames {
+                    if !hostname.is_empty() {
+                        extracted.domains.insert(hostname.clone());
+                    }
+                }
+            }
+            
+            // Extract additional domains field
+            if let Some(ref domains) = result.domains {
+                for domain in domains {
+                    if !domain.is_empty() {
+                        extracted.domains.insert(domain.clone());
+                    }
+                }
+            }
+            
+            // Extract ASN information
+            if let Some(ref asn) = result.asn {
+                if !asn.is_empty() {
+                    // Normalize ASN format (ensure it starts with "AS")
+                    let normalized_asn = if asn.starts_with("AS") {
+                        asn.clone()
+                    } else {
+                        format!("AS{}", asn)
+                    };
+                    extracted.asns.insert(normalized_asn);
+                }
+            }
+            
+            // Extract organization information
+            if let Some(ref org) = result.org {
+                if !org.is_empty() && org.len() > 2 {
+                    extracted.organizations.insert(org.clone());
+                }
+            }
+            
+            // Extract certificate information from SSL/TLS data
+            // Check if the data contains SSL/TLS certificate information
+            if result.port == 443 || result.data.contains("ssl") || result.data.contains("tls") {
+                // Try to extract certificate details from the data field
+                // This is a simplified extraction - in production you might want to parse more thoroughly
+                if let Some(cert_info) = self.extract_certificate_from_data(&result.data, &result.hostnames) {
+                    extracted.certificates.push(cert_info);
+                }
+            }
+        }
+        
+        tracing::info!(
+            "Extracted from Shodan results: {} IPs, {} domains, {} ASNs, {} orgs, {} certs",
+            extracted.ips.len(),
+            extracted.domains.len(),
+            extracted.asns.len(),
+            extracted.organizations.len(),
+            extracted.certificates.len()
+        );
+        
+        extracted
+    }
+    
+    /// Extract certificate information from Shodan data field
+    fn extract_certificate_from_data(&self, data: &str, hostnames: &Option<Vec<String>>) -> Option<ShodanCertificateInfo> {
+        // Look for common certificate patterns in the data
+        // This is a simplified implementation - Shodan's data field can be complex
+        
+        // Check if data contains certificate-related keywords
+        if !data.to_lowercase().contains("certificate") 
+            && !data.to_lowercase().contains("subject") 
+            && !data.to_lowercase().contains("issuer") {
+            return None;
+        }
+        
+        let mut cert_info = ShodanCertificateInfo {
+            subject: String::new(),
+            issuer: None,
+            domains: Vec::new(),
+            organization: None,
+        };
+        
+        // Try to extract subject
+        if let Some(subject_start) = data.find("Subject:") {
+            if let Some(subject_end) = data[subject_start..].find('\n') {
+                let subject = &data[subject_start + 8..subject_start + subject_end];
+                cert_info.subject = subject.trim().to_string();
+                
+                // Extract organization from subject (CN=..., O=...)
+                if let Some(org_start) = subject.find("O=") {
+                    if let Some(org_end) = subject[org_start..].find(',').or(Some(subject[org_start..].len())) {
+                        let org = &subject[org_start + 2..org_start + org_end];
+                        cert_info.organization = Some(org.trim().to_string());
+                    }
+                }
+            }
+        }
+        
+        // Try to extract issuer
+        if let Some(issuer_start) = data.find("Issuer:") {
+            if let Some(issuer_end) = data[issuer_start..].find('\n') {
+                let issuer = &data[issuer_start + 7..issuer_start + issuer_end];
+                cert_info.issuer = Some(issuer.trim().to_string());
+            }
+        }
+        
+        // Add hostnames as certificate domains
+        if let Some(ref host_vec) = hostnames {
+            cert_info.domains = host_vec.clone();
+        }
+        
+        // Only return if we extracted meaningful information
+        if !cert_info.subject.is_empty() || cert_info.organization.is_some() || !cert_info.domains.is_empty() {
+            Some(cert_info)
+        } else {
+            None
+        }
     }
 }
 

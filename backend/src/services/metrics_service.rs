@@ -4,6 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 use serde::{Deserialize, Serialize};
+use sysinfo::System;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestMetrics {
@@ -27,6 +28,7 @@ pub struct EndpointMetrics {
 pub struct SystemMetrics {
     pub uptime_seconds: u64,
     pub memory_usage_bytes: u64,
+    pub total_memory_bytes: u64,
     pub cpu_usage_percent: f64,
     pub active_connections: u32,
 }
@@ -56,14 +58,19 @@ pub struct MetricsService {
     start_time: Instant,
     endpoint_stats: Arc<Mutex<HashMap<String, EndpointStats>>>,
     window_duration: Duration,
+    system_monitor: Arc<Mutex<System>>,
 }
 
 impl MetricsService {
     pub fn new() -> Self {
+        let mut system = System::new_all();
+        system.refresh_all();
+        
         Self {
             start_time: Instant::now(),
             endpoint_stats: Arc::new(Mutex::new(HashMap::new())),
             window_duration: Duration::from_secs(300), // 5 minute window
+            system_monitor: Arc::new(Mutex::new(system)),
         }
     }
 
@@ -145,17 +152,25 @@ impl MetricsService {
         }
     }
 
-    /// Get current system metrics
+    /// Get current system metrics using sysinfo
     fn get_system_metrics(&self) -> SystemMetrics {
         let uptime_seconds = self.start_time.elapsed().as_secs();
         
-        // In a real implementation, you would use system APIs to get actual metrics
-        // For now, we'll return placeholder values
+        // Refresh system info
+        let mut system = self.system_monitor.lock().unwrap();
+        system.refresh_cpu_all();
+        system.refresh_memory();
+        
+        let memory_usage_bytes = system.used_memory();
+        let total_memory_bytes = system.total_memory();
+        let cpu_usage_percent = system.global_cpu_usage() as f64;
+
         SystemMetrics {
             uptime_seconds,
-            memory_usage_bytes: 0, // Would use system APIs
-            cpu_usage_percent: 0.0, // Would use system APIs
-            active_connections: 0, // Would track actual connections
+            memory_usage_bytes,
+            total_memory_bytes,
+            cpu_usage_percent,
+            active_connections: 0, // This would require deeper OS integration or a different crate
         }
     }
 
@@ -281,6 +296,7 @@ mod tests {
         assert_eq!(report.endpoints.len(), 1);
         assert_eq!(report.overall.total_requests, 1);
         assert!(report.system.uptime_seconds > 0 || report.system.uptime_seconds == 0);
+        // Note: In tests we can't reliably check sysinfo values as CI environments vary
     }
 
     #[test]

@@ -8,6 +8,8 @@ import Badge from "@/components/ui/Badge";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 
+import Link from "next/link";
+
 export interface AssetDetailModalProps {
   assetId: string | null;
   onClose: () => void;
@@ -33,7 +35,7 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
 
         // Fetch related scans
         const scans = await listScans();
-        const filtered = scans.filter(s => s.target === data.value);
+        const filtered = scans.filter(s => s.target.toLowerCase().trim() === data.value.toLowerCase().trim());
         setRelatedScans(filtered);
       } catch (e) {
         setError((e as Error).message);
@@ -47,18 +49,18 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
 
   const handleScan = async () => {
     if (!asset) return;
-    
+
     setScanningNow(true);
     setScanSuccess(false);
     setError(null);
-    
+
     try {
       await createScan(asset.value, `Scan from asset ${asset.value}`);
       setScanSuccess(true);
-      
+
       // Refresh related scans
       const scans = await listScans();
-      const filtered = scans.filter(s => s.target === asset.value);
+      const filtered = scans.filter(s => s.target.toLowerCase().trim() === asset.value.toLowerCase().trim());
       setRelatedScans(filtered);
     } catch (e) {
       setError((e as Error).message);
@@ -102,13 +104,12 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
                     <div className="flex-1 max-w-48">
                       <div className="h-3 bg-muted rounded-full overflow-hidden">
                         <div
-                          className={`h-full transition-all ${
-                            asset.ownership_confidence >= 0.7 
-                              ? "bg-success" 
-                              : asset.ownership_confidence >= 0.4 
-                              ? "bg-warning" 
+                          className={`h-full transition-all ${asset.ownership_confidence >= 0.7
+                            ? "bg-success"
+                            : asset.ownership_confidence >= 0.4
+                              ? "bg-warning"
                               : "bg-destructive"
-                          }`}
+                            }`}
                           style={{ width: `${asset.ownership_confidence * 100}%` }}
                         />
                       </div>
@@ -118,17 +119,17 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
                     </span>
                   </div>
                 </div>
-                
+
                 <div>
                   <div className="text-sm text-muted-foreground mb-1">Discovery Sources</div>
                   <div className="text-lg font-semibold">{asset.sources.length} sources</div>
                 </div>
-                
+
                 <div>
                   <div className="text-sm text-muted-foreground mb-1">Created</div>
                   <div className="text-sm">{new Date(asset.created_at).toLocaleString()}</div>
                 </div>
-                
+
                 <div>
                   <div className="text-sm text-muted-foreground mb-1">Last Updated</div>
                   <div className="text-sm">{new Date(asset.updated_at).toLocaleString()}</div>
@@ -174,7 +175,7 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
                 <div>
                   <CardTitle>Scan Information</CardTitle>
                   <CardDescription>
-                    {asset.last_scanned_at 
+                    {asset.last_scanned_at
                       ? `Last scanned on ${new Date(asset.last_scanned_at).toLocaleString()}`
                       : "This asset has never been scanned"}
                   </CardDescription>
@@ -182,7 +183,7 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
                 <Button
                   onClick={handleScan}
                   disabled={scanningNow}
-                  variant="default"
+                  variant="primary"
                 >
                   {scanningNow ? "Scanning..." : "Run Scan Now"}
                 </Button>
@@ -194,7 +195,7 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
                   Scan initiated successfully! It will run in the background.
                 </div>
               )}
-              
+
               {error && !loading && (
                 <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive">
                   {error}
@@ -204,15 +205,30 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
               {asset.last_scan_status && (
                 <div className="flex items-center gap-2">
                   <span className="text-sm text-muted-foreground">Last Scan Status:</span>
-                  <Badge 
-                    variant={
-                      asset.last_scan_status === "completed" ? "success" : 
-                      asset.last_scan_status === "failed" ? "destructive" : 
-                      "warning"
-                    }
-                  >
-                    {asset.last_scan_status}
-                  </Badge>
+                  {asset.last_scan_id ? (
+                    <Link href={`/scan/${asset.last_scan_id}`} className="hover:opacity-80 transition-opacity">
+                      <Badge
+                        variant={
+                          asset.last_scan_status === "completed" ? "success" :
+                            asset.last_scan_status === "failed" ? "error" :
+                              "warning"
+                        }
+                        className="cursor-pointer"
+                      >
+                        {asset.last_scan_status} ↗
+                      </Badge>
+                    </Link>
+                  ) : (
+                    <Badge
+                      variant={
+                        asset.last_scan_status === "completed" ? "success" :
+                          asset.last_scan_status === "failed" ? "error" :
+                            "warning"
+                      }
+                    >
+                      {asset.last_scan_status}
+                    </Badge>
+                  )}
                 </div>
               )}
 
@@ -221,32 +237,33 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
                   <div className="text-sm font-medium mb-2">Related Scans ({relatedScans.length})</div>
                   <div className="space-y-2 max-h-48 overflow-y-auto">
                     {relatedScans.map(scan => (
-                      <div 
-                        key={scan.id} 
-                        className="flex items-center justify-between p-3 rounded-lg bg-muted hover:bg-muted/80 transition-colors"
-                      >
-                        <div className="space-y-1">
-                          <div className="text-sm font-medium">{scan.target}</div>
-                          <div className="text-xs text-muted-foreground">
-                            {new Date(scan.created_at).toLocaleString()}
+                      <Link key={scan.id} href={`/scan/${scan.id}`}>
+                        <div
+                          className="flex items-center justify-between p-3 rounded-lg bg-muted hover:bg-muted/80 transition-colors cursor-pointer mb-2 last:mb-0"
+                        >
+                          <div className="space-y-1">
+                            <div className="text-sm font-medium">{scan.target}</div>
+                            <div className="text-xs text-muted-foreground">
+                              {new Date(scan.created_at).toLocaleString()}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Badge variant={
+                              scan.status === "completed" ? "success" :
+                                scan.status === "failed" ? "error" :
+                                  scan.status === "running" ? "info" :
+                                    "secondary"
+                            }>
+                              {scan.status}
+                            </Badge>
+                            {scan.findings_count !== undefined && (
+                              <span className="text-xs text-muted-foreground">
+                                {scan.findings_count} findings
+                              </span>
+                            )}
                           </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <Badge variant={
-                            scan.status === "completed" ? "success" :
-                            scan.status === "failed" ? "destructive" :
-                            scan.status === "running" ? "info" :
-                            "secondary"
-                          }>
-                            {scan.status}
-                          </Badge>
-                          {scan.findings_count !== undefined && (
-                            <span className="text-xs text-muted-foreground">
-                              {scan.findings_count} findings
-                            </span>
-                          )}
-                        </div>
-                      </div>
+                      </Link>
                     ))}
                   </div>
                 </div>

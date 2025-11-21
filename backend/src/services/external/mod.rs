@@ -11,7 +11,7 @@ pub mod manager;
 pub mod integration_tests;
 
 pub use crtsh::CrtShClient;
-pub use shodan::{ShodanClient, ShodanResult};
+pub use shodan::{ShodanClient, ShodanResult, ShodanExtractedAssets, ShodanCertificateInfo};
 pub use dns::{DnsResolver, DnsResult, ReverseDnsResult};
 pub use http::{HttpAnalyzer, HttpProbeResult, TlsInfo, TlsCertificateResult};
 pub use virustotal::{VirusTotalClient, VirusTotalDomainReport, VirusTotalIpReport};

@@ -2,19 +2,74 @@ use axum::{
     extract::{Path, State},
     response::Json,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
     error::ApiError,
+    models::{FindingFilter, ScanStatus},
     AppState,
 };
 
-/// Get overall performance metrics
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DashboardMetrics {
+    pub uptime_seconds: u64,
+    pub memory_usage: MemoryUsage,
+    pub cpu_usage_percent: f64,
+    pub active_scans: i64,
+    pub total_assets: i64,
+    pub total_findings: i64,
+    pub requests_per_second: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MemoryUsage {
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub free_bytes: u64,
+}
+
+/// Get overall dashboard metrics
 pub async fn get_metrics(
     State(app_state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
-    let metrics = app_state.metrics_service.get_overall_metrics();
-    Ok(Json(serde_json::to_value(metrics).unwrap()))
+) -> Result<Json<DashboardMetrics>, ApiError> {
+    // Get system performance metrics
+    let report = app_state.metrics_service.generate_report();
+    let system = report.system;
+    let overall = report.overall;
+
+    // Get counts from repositories
+    let active_scans = match app_state.scan_repository.list_by_status(Some(ScanStatus::Running)).await {
+        Ok(scans) => scans.len() as i64,
+        Err(_) => 0,
+    };
+
+    let total_assets = match app_state.asset_repository.count(None).await {
+        Ok(count) => count,
+        Err(_) => 0,
+    };
+
+    let total_findings = match app_state.finding_repository.filter(&FindingFilter::default()).await {
+        Ok(response) => response.total_count,
+        Err(_) => 0,
+    };
+
+    // Construct response
+    let metrics = DashboardMetrics {
+        uptime_seconds: system.uptime_seconds,
+        memory_usage: MemoryUsage {
+            total_bytes: system.total_memory_bytes,
+            used_bytes: system.memory_usage_bytes,
+            free_bytes: system.total_memory_bytes.saturating_sub(system.memory_usage_bytes),
+        },
+        cpu_usage_percent: system.cpu_usage_percent,
+        active_scans,
+        total_assets,
+        total_findings,
+        requests_per_second: overall.requests_per_second,
+    };
+
+    Ok(Json(metrics))
 }
 
 /// Get comprehensive performance report
@@ -62,6 +117,7 @@ pub async fn get_health_metrics(
     
     Ok(Json(serde_json::json!({
         "status": status,
+        "version": env!("CARGO_PKG_VERSION"),
         "uptime_seconds": report.system.uptime_seconds,
         "total_requests": report.overall.total_requests,
         "success_rate": if report.overall.total_requests > 0 {
@@ -77,37 +133,5 @@ pub async fn get_health_metrics(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use crate::services::MetricsService;
-
-    fn create_test_metrics_service() -> Arc<MetricsService> {
-        let service = Arc::new(MetricsService::new());
-        
-        // Add some test data
-        service.record_request("/api/test", "GET", std::time::Duration::from_millis(100), true);
-        service.record_request("/api/test", "GET", std::time::Duration::from_millis(200), false);
-        
-        service
-    }
-
-    #[test]
-    fn test_metrics_service_integration() {
-        let service = create_test_metrics_service();
-        let metrics = service.get_overall_metrics();
-        
-        assert_eq!(metrics.total_requests, 2);
-        assert_eq!(metrics.successful_requests, 1);
-        assert_eq!(metrics.failed_requests, 1);
-        assert_eq!(metrics.average_response_time_ms, 150.0);
-    }
-
-    #[test]
-    fn test_performance_report_generation() {
-        let service = create_test_metrics_service();
-        let report = service.generate_report();
-        
-        assert_eq!(report.endpoints.len(), 1);
-        assert_eq!(report.overall.total_requests, 2);
-        assert!(report.system.uptime_seconds > 0 || report.system.uptime_seconds == 0);
-    }
+    
 }

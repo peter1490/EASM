@@ -273,6 +273,16 @@ mod tests {
         async fn count_by_scan(&self, scan_id: &Uuid) -> Result<i64, ApiError> {
             Ok(self.findings.get(scan_id).map(|v| v.len() as i64).unwrap_or(0))
         }
+
+        async fn filter(&self, _filter: &crate::models::FindingFilter) -> Result<crate::models::FindingListResponse, ApiError> {
+            // Mock implementation returns empty results
+            Ok(crate::models::FindingListResponse {
+                findings: Vec::new(),
+                total_count: 0,
+                limit: 100,
+                offset: 0,
+            })
+        }
     }
 
     struct MockScanRepository {

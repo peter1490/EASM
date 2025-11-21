@@ -8,6 +8,7 @@ pub mod static_handlers;
 pub mod drift_handlers;
 pub mod search_handlers;
 pub mod metrics_handlers;
+pub mod finding_handlers;
 
 pub use scan_handlers::*;
 pub use asset_handlers::*;
@@ -19,3 +20,4 @@ pub use static_handlers::*;
 pub use drift_handlers::*;
 pub use search_handlers::*;
 pub use metrics_handlers::*;
+pub use finding_handlers::*;

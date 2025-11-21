@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
-import { getDiscoveryStatus, listAssets, type Asset, type DiscoveryStatus, createScan } from "@/app/api";
+import { getDiscoveryStatus, listAssets, type Asset, type AssetListResponse, type DiscoveryStatus, createScan } from "@/app/api";
 import Button from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import Badge from "@/components/ui/Badge";
@@ -13,6 +13,8 @@ import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import Header from "@/components/Header";
 import AssetDetailModal from "@/components/AssetDetailModal";
 import Checkbox from "@/components/ui/Checkbox";
+
+import Link from "next/link";
 
 export default function AssetsPage() {
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -30,14 +32,23 @@ export default function AssetsPage() {
   const [bulkScanMessage, setBulkScanMessage] = useState<string | null>(null);
   const [limit, setLimit] = useState(25);
   const [showLimitSelector, setShowLimitSelector] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [hasMorePages, setHasMorePages] = useState(false);
+  const [totalAssets, setTotalAssets] = useState(0);
 
-  async function refresh(conf = minConf, isInitial = false) {
+  async function refresh(conf = minConf, isInitial = false, page = currentPage) {
     try {
-      const data = await listAssets(conf, limit, 0);
-      const sorted = [...data].sort((a, b) =>
+      const offset = (page - 1) * limit;
+      const response = await listAssets(conf, limit, offset);
+      const sorted = [...response.assets].sort((a, b) =>
         new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
       );
       setAssets(sorted);
+      setTotalAssets(response.total_count);
+
+      // Check if there are more pages
+      setHasMorePages(offset + response.assets.length < response.total_count);
+
       if (isInitial) {
         setLoading(false);
       }
@@ -51,7 +62,7 @@ export default function AssetsPage() {
     let mounted = true;
     let iv: NodeJS.Timeout | null = null;
     let isFirstLoad = true;
-    
+
     async function tick() {
       try {
         const s = await getDiscoveryStatus();
@@ -61,7 +72,7 @@ export default function AssetsPage() {
         // ignore
       }
       try {
-        await refresh(minConf, isFirstLoad);
+        await refresh(minConf, isFirstLoad, currentPage);
         isFirstLoad = false;
       } catch {
         // ignore
@@ -74,7 +85,7 @@ export default function AssetsPage() {
       if (iv) clearTimeout(iv);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [minConf, limit]);
+  }, [minConf, limit, currentPage]);
 
   // Get unique sources for filter dropdown (memoized)
   const allSources = useMemo(
@@ -85,53 +96,53 @@ export default function AssetsPage() {
   // Filter assets based on search and type (memoized)
   const filteredAssets = useMemo(() => {
     let filtered = assets;
-    
+
     // Filter by type
     if (typeFilter !== "all") {
       filtered = filtered.filter(a => a.asset_type === typeFilter);
     }
-    
+
     // Filter by scan status
     if (scanStatusFilter === "scanned") {
       filtered = filtered.filter(a => a.last_scanned_at);
     } else if (scanStatusFilter === "never_scanned") {
       filtered = filtered.filter(a => !a.last_scanned_at);
     }
-    
+
     // Filter by source
     if (sourceFilter !== "all") {
       filtered = filtered.filter(a => a.sources.includes(sourceFilter));
     }
-    
+
     // Filter by search term
     if (searchTerm) {
       const term = searchTerm.toLowerCase();
-      filtered = filtered.filter(a => 
+      filtered = filtered.filter(a =>
         a.value.toLowerCase().includes(term) ||
         a.sources.some(s => s.toLowerCase().includes(term)) ||
         a.id.toLowerCase().includes(term)
       );
     }
-    
+
     return filtered;
   }, [assets, searchTerm, typeFilter, scanStatusFilter, sourceFilter]);
 
   // Bulk scan selected assets
   const handleBulkScan = async () => {
     if (selectedAssets.size === 0) return;
-    
+
     setBulkScanning(true);
     setBulkScanMessage(null);
-    
+
     try {
       const selectedAssetList = Array.from(selectedAssets)
         .map(id => assets.find(a => a.id === id))
         .filter((a): a is Asset => !!a);
-      
+
       for (const asset of selectedAssetList) {
         await createScan(asset.value, `Bulk scan from assets page`);
       }
-      
+
       setBulkScanMessage(`Successfully initiated ${selectedAssetList.length} scans`);
       setSelectedAssets(new Set());
     } catch (e) {
@@ -153,7 +164,7 @@ export default function AssetsPage() {
       a.last_scanned_at ? new Date(a.last_scanned_at).toISOString() : "Never",
       new Date(a.created_at).toISOString()
     ]);
-    
+
     const csv = [headers, ...rows].map(row => row.map(cell => `"${cell}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
@@ -196,8 +207,31 @@ export default function AssetsPage() {
     }
   };
 
+  // Pagination handlers
+  const goToNextPage = () => {
+    if (hasMorePages) {
+      setCurrentPage(prev => prev + 1);
+    }
+  };
+
+  const goToPreviousPage = () => {
+    if (currentPage > 1) {
+      setCurrentPage(prev => prev - 1);
+    }
+  };
+
+  const goToFirstPage = () => {
+    setCurrentPage(1);
+  };
+
+  // Reset to page 1 when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [minConf, typeFilter, scanStatusFilter, sourceFilter, searchTerm, limit]);
+
   const stats = {
-    total: assets.length,
+    total: totalAssets,
+    totalOnPage: assets.length,
     domains: assets.filter(a => a.asset_type === "domain").length,
     ips: assets.filter(a => a.asset_type === "ip").length,
     highConfidence: assets.filter(a => a.ownership_confidence >= 0.7).length,
@@ -205,8 +239,8 @@ export default function AssetsPage() {
 
   return (
     <div className="space-y-8 animate-fade-in">
-      <Header 
-        title="Asset Inventory" 
+      <Header
+        title="Asset Inventory"
         description="Discovered assets from your attack surface"
       />
 
@@ -250,15 +284,15 @@ export default function AssetsPage() {
         <Card>
           <CardHeader className="pb-3">
             <CardDescription>Total Assets</CardDescription>
-            <CardTitle className="text-3xl">{stats.total}</CardTitle>
+            <CardTitle className="text-3xl">{stats.total.toLocaleString()}</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="text-xs text-muted-foreground">
-              All discovered assets
+              All discovered assets in database
             </div>
           </CardContent>
         </Card>
-        
+
         <Card>
           <CardHeader className="pb-3">
             <CardDescription>Domains</CardDescription>
@@ -270,7 +304,7 @@ export default function AssetsPage() {
             </div>
           </CardContent>
         </Card>
-        
+
         <Card>
           <CardHeader className="pb-3">
             <CardDescription>IP Addresses</CardDescription>
@@ -282,7 +316,7 @@ export default function AssetsPage() {
             </div>
           </CardContent>
         </Card>
-        
+
         <Card>
           <CardHeader className="pb-3">
             <CardDescription>High Confidence</CardDescription>
@@ -427,11 +461,10 @@ export default function AssetsPage() {
               </div>
             </div>
             {bulkScanMessage && (
-              <div className={`mt-3 p-2 rounded text-sm ${
-                bulkScanMessage.startsWith("Error") 
-                  ? "bg-destructive/10 text-destructive" 
-                  : "bg-success/10 text-success"
-              }`}>
+              <div className={`mt-3 p-2 rounded text-sm ${bulkScanMessage.startsWith("Error")
+                ? "bg-destructive/10 text-destructive"
+                : "bg-success/10 text-success"
+                }`}>
                 {bulkScanMessage}
               </div>
             )}
@@ -446,19 +479,14 @@ export default function AssetsPage() {
             <div>
               <CardTitle>Assets ({filteredAssets.length})</CardTitle>
               <CardDescription>
-                {filteredAssets.length === assets.length 
-                  ? `Showing ${assets.length} of up to ${limit === 1000 ? "all" : limit} loaded assets` 
-                  : `Filtered to ${filteredAssets.length} from ${assets.length} loaded assets`}
-                {assets.length >= limit && limit < 1000 && (
-                  <span className="text-warning ml-2">
-                    (May have more assets in database)
-                  </span>
-                )}
+                Page {currentPage} of {Math.ceil(totalAssets / limit)} • {filteredAssets.length === assets.length
+                  ? `Showing ${assets.length} of ${totalAssets.toLocaleString()} total assets`
+                  : `Filtered to ${filteredAssets.length} from ${assets.length} assets on this page`}
               </CardDescription>
             </div>
             <div className="flex gap-2">
-              <Button 
-                variant="outline" 
+              <Button
+                variant="outline"
                 onClick={() => {
                   setSearchTerm("");
                   setTypeFilter("all");
@@ -466,6 +494,7 @@ export default function AssetsPage() {
                   setSourceFilter("all");
                   setMinConf(0);
                   setLimit(25);
+                  setCurrentPage(1);
                 }}
                 disabled={!searchTerm && typeFilter === "all" && scanStatusFilter === "all" && sourceFilter === "all" && minConf === 0 && limit === 25}
               >
@@ -493,8 +522,8 @@ export default function AssetsPage() {
             <EmptyState
               icon="🎯"
               title="No assets found"
-              description={assets.length === 0 
-                ? "Start a discovery process from the Seeds page to find assets" 
+              description={assets.length === 0
+                ? "Start a discovery process from the Seeds page to find assets"
                 : "Try adjusting your filters to see more assets"}
             />
           ) : (
@@ -519,7 +548,7 @@ export default function AssetsPage() {
               </TableHeader>
               <TableBody>
                 {filteredAssets.map((asset) => (
-                  <TableRow 
+                  <TableRow
                     key={asset.id}
                     className="cursor-pointer hover:bg-muted/50 transition-colors"
                   >
@@ -542,13 +571,12 @@ export default function AssetsPage() {
                         <div className="flex-1 max-w-24">
                           <div className="h-2 bg-muted rounded-full overflow-hidden">
                             <div
-                              className={`h-full transition-all ${
-                                asset.ownership_confidence >= 0.7 
-                                  ? "bg-success" 
-                                  : asset.ownership_confidence >= 0.4 
-                                  ? "bg-warning" 
+                              className={`h-full transition-all ${asset.ownership_confidence >= 0.7
+                                ? "bg-success"
+                                : asset.ownership_confidence >= 0.4
+                                  ? "bg-warning"
                                   : "bg-destructive"
-                              }`}
+                                }`}
                               style={{ width: `${asset.ownership_confidence * 100}%` }}
                             />
                           </div>
@@ -578,9 +606,22 @@ export default function AssetsPage() {
                         <div className="space-y-1">
                           <div className="text-xs">{new Date(asset.last_scanned_at).toLocaleString()}</div>
                           {asset.last_scan_status && (
-                            <Badge variant={asset.last_scan_status === "completed" ? "success" : "warning"}>
-                              {asset.last_scan_status}
-                            </Badge>
+                            <div onClick={(e) => e.stopPropagation()}>
+                              {asset.last_scan_id ? (
+                                <Link href={`/scan/${asset.last_scan_id}`}>
+                                  <Badge
+                                    variant={asset.last_scan_status === "completed" ? "success" : asset.last_scan_status === "failed" ? "error" : "warning"}
+                                    className="cursor-pointer hover:opacity-80 transition-opacity"
+                                  >
+                                    {asset.last_scan_status} ↗
+                                  </Badge>
+                                </Link>
+                              ) : (
+                                <Badge variant={asset.last_scan_status === "completed" ? "success" : asset.last_scan_status === "failed" ? "error" : "warning"}>
+                                  {asset.last_scan_status}
+                                </Badge>
+                              )}
+                            </div>
                           )}
                         </div>
                       ) : (
@@ -608,6 +649,41 @@ export default function AssetsPage() {
               </TableBody>
             </Table>
           )}
+
+          {/* Pagination Controls */}
+          {!loading && !error && filteredAssets.length > 0 && (
+            <div className="mt-6 flex items-center justify-between border-t border-border pt-4">
+              <div className="text-sm text-muted-foreground">
+                Page {currentPage} of {Math.ceil(totalAssets / limit)} • Showing {((currentPage - 1) * limit) + 1}-{Math.min(currentPage * limit, totalAssets)} of {totalAssets.toLocaleString()} total assets
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={goToFirstPage}
+                  disabled={currentPage === 1}
+                >
+                  First
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={goToPreviousPage}
+                  disabled={currentPage === 1}
+                >
+                  Previous
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={goToNextPage}
+                  disabled={!hasMorePages}
+                >
+                  Next
+                </Button>
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -627,9 +703,9 @@ function AssetTracking({ metadata }: { metadata: Record<string, unknown> }) {
   const path: string[] = Array.isArray(raw)
     ? (raw.filter((x): x is string => typeof x === "string"))
     : [];
-    
+
   if (path.length === 0) return <span className="text-muted-foreground">—</span>;
-  
+
   const labels = path.map((step) => {
     const s = String(step);
     if (s.startsWith("seed:")) return { text: s.replace(/^seed:/, ""), type: "seed" };
@@ -637,7 +713,7 @@ function AssetTracking({ metadata }: { metadata: Record<string, unknown> }) {
     if (s.startsWith("asset:")) return { text: s.replace(/^asset:/, ""), type: "asset" };
     return { text: s, type: "default" };
   });
-  
+
   return (
     <div className="flex items-center gap-1.5 flex-wrap">
       {labels.map((label, idx) => (

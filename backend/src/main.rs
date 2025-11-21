@@ -44,6 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/seeds/:id", delete(handlers::asset_handlers::delete_seed))
         // Discovery endpoints
         .route("/api/discovery/run", post(handlers::discovery_handlers::run_discovery))
+        .route("/api/discovery/stop", post(handlers::discovery_handlers::stop_discovery))
         .route("/api/discovery/status", get(handlers::discovery_handlers::discovery_status))
         // Evidence endpoints
         .route("/api/scans/:scan_id/evidence", post(handlers::evidence_handlers::upload_evidence))
@@ -63,6 +64,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/search/findings", get(handlers::search_handlers::search_findings))
         .route("/api/search/reindex", post(handlers::search_handlers::reindex_all))
         .route("/api/search/status", get(handlers::search_handlers::search_status))
+        // Finding filter endpoints
+        .route("/api/findings/filter", get(handlers::finding_handlers::filter_findings))
+        .route("/api/findings/types", get(handlers::finding_handlers::get_finding_types))
         // Metrics and performance endpoints
         .route("/api/metrics", get(handlers::metrics_handlers::get_metrics))
         .route("/api/metrics/report", get(handlers::metrics_handlers::get_performance_report))

@@ -85,6 +85,7 @@ clap = { version = "4.0", features = ["derive"] }
 
 # Search indexing
 elasticsearch = "8.5.0-alpha.1"
+sysinfo = "0.36.1"
 
 [dev-dependencies]
 # Testing

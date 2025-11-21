@@ -20,6 +20,16 @@ pub async fn run_discovery(
     })))
 }
 
+pub async fn stop_discovery(
+    State(app_state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    app_state.discovery_service.stop_discovery().await?;
+    
+    Ok(Json(json!({
+        "message": "Discovery stopped successfully"
+    })))
+}
+
 pub async fn discovery_status(
     State(app_state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {

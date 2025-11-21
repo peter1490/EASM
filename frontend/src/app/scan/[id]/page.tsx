@@ -10,8 +10,9 @@ import Badge from "@/components/ui/Badge";
 import EmptyState from "@/components/ui/EmptyState";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import FindingRenderer, { getFindingTypeLabel, getFindingTypeIcon } from "@/components/FindingRenderer";
+import DriftAnalysis from "@/components/DriftAnalysis";
 
-type TabType = "overview" | "findings" | "raw";
+type TabType = "overview" | "findings" | "drift" | "raw";
 
 export default function ScanDetailPage() {
   const params = useParams<{ id: string }>();
@@ -69,6 +70,7 @@ export default function ScanDetailPage() {
   const tabs: Array<{ id: TabType; label: string; icon: string }> = [
     { id: "overview", label: "Overview", icon: "📊" },
     { id: "findings", label: `Findings (${stats.total})`, icon: "🔍" },
+    { id: "drift", label: "Drift Analysis", icon: "⚓" },
     { id: "raw", label: "Raw Data", icon: "📄" },
   ];
 
@@ -312,6 +314,10 @@ export default function ScanDetailPage() {
               ))
           )}
         </div>
+      )}
+
+      {activeTab === "drift" && (
+        <DriftAnalysis scanId={id} />
       )}
 
       {activeTab === "raw" && (

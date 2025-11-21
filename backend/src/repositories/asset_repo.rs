@@ -10,6 +10,7 @@ use crate::{
 pub trait AssetRepository {
     async fn create_or_merge(&self, asset: &AssetCreate) -> Result<Asset, ApiError>;
     async fn list(&self, confidence_threshold: Option<f64>, limit: Option<i64>, offset: Option<i64>) -> Result<Vec<Asset>, ApiError>;
+    async fn count(&self, confidence_threshold: Option<f64>) -> Result<i64, ApiError>;
     async fn list_by_type(&self, asset_type: AssetType, confidence_threshold: Option<f64>) -> Result<Vec<Asset>, ApiError>;
     async fn get_by_id(&self, id: &Uuid) -> Result<Option<Asset>, ApiError>;
     async fn get_by_identifier(&self, asset_type: AssetType, identifier: &str) -> Result<Option<Asset>, ApiError>;
@@ -133,10 +134,19 @@ impl AssetRepository for SqlxAssetRepository {
             Some(threshold) => {
                 sqlx::query_as::<_, AssetRow>(
                     r#"
-                    SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
-                    FROM assets
-                    WHERE confidence >= $1
-                    ORDER BY confidence DESC, created_at DESC
+                    WITH latest_scans AS (
+                        SELECT DISTINCT ON (LOWER(TRIM(target))) 
+                            id, status, created_at, LOWER(TRIM(target)) as normalized_target
+                        FROM scans
+                        ORDER BY LOWER(TRIM(target)), created_at DESC
+                    )
+                    SELECT 
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at,
+                        ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
+                    FROM assets a
+                    LEFT JOIN latest_scans ls ON ls.normalized_target = LOWER(TRIM(a.identifier))
+                    WHERE a.confidence >= $1
+                    ORDER BY a.confidence DESC, a.created_at DESC
                     LIMIT $2 OFFSET $3
                     "#
                 )
@@ -149,9 +159,18 @@ impl AssetRepository for SqlxAssetRepository {
             None => {
                 sqlx::query_as::<_, AssetRow>(
                     r#"
-                    SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
-                    FROM assets
-                    ORDER BY confidence DESC, created_at DESC
+                    WITH latest_scans AS (
+                        SELECT DISTINCT ON (LOWER(TRIM(target))) 
+                            id, status, created_at, LOWER(TRIM(target)) as normalized_target
+                        FROM scans
+                        ORDER BY LOWER(TRIM(target)), created_at DESC
+                    )
+                    SELECT 
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at,
+                        ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
+                    FROM assets a
+                    LEFT JOIN latest_scans ls ON ls.normalized_target = LOWER(TRIM(a.identifier))
+                    ORDER BY a.confidence DESC, a.created_at DESC
                     LIMIT $1 OFFSET $2
                     "#
                 )
@@ -165,12 +184,50 @@ impl AssetRepository for SqlxAssetRepository {
         Ok(rows.into_iter().map(Asset::from).collect())
     }
 
+    async fn count(&self, confidence_threshold: Option<f64>) -> Result<i64, ApiError> {
+        let count = match confidence_threshold {
+            Some(threshold) => {
+                sqlx::query_scalar::<_, i64>(
+                    r#"
+                    SELECT COUNT(*)
+                    FROM assets
+                    WHERE confidence >= $1
+                    "#
+                )
+                .bind(threshold)
+                .fetch_one(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query_scalar::<_, i64>(
+                    r#"
+                    SELECT COUNT(*)
+                    FROM assets
+                    "#
+                )
+                .fetch_one(&self.pool)
+                .await?
+            }
+        };
+
+        Ok(count)
+    }
+
     async fn get_by_id(&self, id: &Uuid) -> Result<Option<Asset>, ApiError> {
         let result = sqlx::query_as::<_, AssetRow>(
             r#"
-            SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
-            FROM assets
-            WHERE id = $1
+            WITH latest_scans AS (
+                SELECT DISTINCT ON (LOWER(TRIM(target))) 
+                    id, status, created_at, LOWER(TRIM(target)) as normalized_target
+                FROM scans
+                ORDER BY LOWER(TRIM(target)), created_at DESC
+            )
+            SELECT 
+                a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at,
+                ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
+            FROM assets a
+            LEFT JOIN latest_scans ls ON ls.normalized_target = LOWER(TRIM(a.identifier))
+            WHERE a.id = $1
             "#
         )
         .bind(id)
@@ -186,10 +243,19 @@ impl AssetRepository for SqlxAssetRepository {
             Some(threshold) => {
                 sqlx::query_as::<_, AssetRow>(
                     r#"
-                    SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
-                    FROM assets
-                    WHERE asset_type = $1 AND confidence >= $2
-                    ORDER BY confidence DESC, created_at DESC
+                    WITH latest_scans AS (
+                        SELECT DISTINCT ON (LOWER(TRIM(target))) 
+                            id, status, created_at, LOWER(TRIM(target)) as normalized_target
+                        FROM scans
+                        ORDER BY LOWER(TRIM(target)), created_at DESC
+                    )
+                    SELECT 
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at,
+                        ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
+                    FROM assets a
+                    LEFT JOIN latest_scans ls ON ls.normalized_target = LOWER(TRIM(a.identifier))
+                    WHERE a.asset_type = $1 AND a.confidence >= $2
+                    ORDER BY a.confidence DESC, a.created_at DESC
                     "#
                 )
                 .bind(asset_type)
@@ -200,10 +266,19 @@ impl AssetRepository for SqlxAssetRepository {
             None => {
                 sqlx::query_as::<_, AssetRow>(
                     r#"
-                    SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
-                    FROM assets
-                    WHERE asset_type = $1
-                    ORDER BY confidence DESC, created_at DESC
+                    WITH latest_scans AS (
+                        SELECT DISTINCT ON (LOWER(TRIM(target))) 
+                            id, status, created_at, LOWER(TRIM(target)) as normalized_target
+                        FROM scans
+                        ORDER BY LOWER(TRIM(target)), created_at DESC
+                    )
+                    SELECT 
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at,
+                        ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
+                    FROM assets a
+                    LEFT JOIN latest_scans ls ON ls.normalized_target = LOWER(TRIM(a.identifier))
+                    WHERE a.asset_type = $1
+                    ORDER BY a.confidence DESC, a.created_at DESC
                     "#
                 )
                 .bind(asset_type)
@@ -218,9 +293,18 @@ impl AssetRepository for SqlxAssetRepository {
     async fn get_by_identifier(&self, asset_type: AssetType, identifier: &str) -> Result<Option<Asset>, ApiError> {
         let result = sqlx::query_as::<_, AssetRow>(
             r#"
-            SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at
-            FROM assets
-            WHERE asset_type = $1 AND identifier = $2
+            WITH latest_scans AS (
+                SELECT DISTINCT ON (LOWER(TRIM(target))) 
+                    id, status, created_at, LOWER(TRIM(target)) as normalized_target
+                FROM scans
+                ORDER BY LOWER(TRIM(target)), created_at DESC
+            )
+            SELECT 
+                a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at,
+                ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
+            FROM assets a
+            LEFT JOIN latest_scans ls ON ls.normalized_target = LOWER(TRIM(a.identifier))
+            WHERE a.asset_type = $1 AND a.identifier = $2
             "#
         )
         .bind(asset_type)

@@ -333,9 +333,28 @@ function SubdomainEnumerationRenderer({ data }: { data: FindingData }) {
 }
 
 function GenericRenderer({ data }: { data: FindingData }) {
+  // Handle null, undefined, or empty data
+  if (!data || typeof data !== 'object') {
+    return (
+      <div className="text-sm text-muted-foreground">
+        No data available
+      </div>
+    );
+  }
+
+  const entries = Object.entries(data);
+  
+  if (entries.length === 0) {
+    return (
+      <div className="text-sm text-muted-foreground">
+        No data available
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-2">
-      {Object.entries(data).map(([key, value]) => (
+      {entries.map(([key, value]) => (
         <div key={key} className="flex items-start gap-2">
           <span className="text-sm text-muted-foreground min-w-32">{key}:</span>
           <span className="text-sm font-mono flex-1 break-all">{formatValue(value)}</span>

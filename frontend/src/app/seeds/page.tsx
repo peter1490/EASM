@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createSeed, deleteSeed, listSeeds, runDiscovery, getDiscoveryStatus, type Seed, type SeedType, type DiscoveryStatus } from "@/app/api";
+import { createSeed, deleteSeed, listSeeds, runDiscovery, stopDiscovery, getDiscoveryStatus, type Seed, type SeedType, type DiscoveryStatus } from "@/app/api";
 import Button from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import Badge from "@/components/ui/Badge";
@@ -33,6 +33,16 @@ export default function SeedsPage() {
   const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus | null>(null);
   const [confidence, setConfidence] = useState(0.7);
 
+  const fetchDiscoveryStatus = async () => {
+    try {
+      const s = await getDiscoveryStatus();
+      setDiscoveryStatus(s);
+      return s;
+    } catch {
+      return null;
+    }
+  };
+
   async function refresh() {
     try {
       const data = await listSeeds();
@@ -50,17 +60,23 @@ export default function SeedsPage() {
 
   useEffect(() => {
     let timer: NodeJS.Timeout | null = null;
+    let mounted = true;
+
     async function poll() {
-      try {
-        const s = await getDiscoveryStatus();
-        setDiscoveryStatus(s);
-      } catch {
-        // ignore
+      if (!mounted) return;
+      const s = await fetchDiscoveryStatus();
+      
+      if (mounted) {
+        // If running, poll more frequently
+        const interval = s?.running ? 2000 : 5000;
+        timer = setTimeout(poll, interval);
       }
-      timer = setTimeout(poll, 2000);
     }
     poll();
-    return () => { if (timer) clearTimeout(timer); };
+    return () => { 
+      mounted = false;
+      if (timer) clearTimeout(timer); 
+    };
   }, []);
 
   async function onAdd() {
@@ -91,12 +107,31 @@ export default function SeedsPage() {
   async function onRunDiscovery() {
     setError(null);
     if (discoveryStatus?.running) {
-      setError("Discovery already running");
+      // If running, this button acts as stop
+      try {
+        await stopDiscovery();
+        // Optimistic update
+        setDiscoveryStatus(s => s ? ({ ...s, running: false }) : null);
+      } catch (e) {
+        setError((e as Error).message);
+      }
       return;
     }
     setDiscovering(true);
     try {
       await runDiscovery({ confidence_threshold: confidence, include_scan: true });
+      // Optimistic update to show "Running" immediately
+      setDiscoveryStatus(s => s ? ({ ...s, running: true }) : { 
+        running: true, 
+        started_at: new Date().toISOString(), 
+        completed_at: null, 
+        seeds_processed: 0, 
+        assets_discovered: 0, 
+        errors: [], 
+        error_count: 0 
+      });
+      // Fetch actual status immediately
+      fetchDiscoveryStatus();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -275,11 +310,12 @@ export default function SeedsPage() {
             </div>
             <Button
               onClick={onRunDiscovery}
-              disabled={discoveryStatus?.running || seeds.length === 0}
+              disabled={seeds.length === 0 && !discoveryStatus?.running}
               loading={discovering}
+              variant={discoveryStatus?.running ? "destructive" : "primary"}
               size="lg"
             >
-              {discoveryStatus?.running ? "Discovery Running..." : "Start Discovery"}
+              {discoveryStatus?.running ? "Stop Discovery" : "Start Discovery"}
             </Button>
           </div>
           <div className="p-3 rounded-lg bg-info/10 border border-info/20 text-sm">

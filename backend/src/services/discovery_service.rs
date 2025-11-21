@@ -13,7 +13,7 @@ use crate::{
     repositories::{AssetRepository, SeedRepository},
     services::{
         external::{
-            ExternalServicesManager, DnsResolver, HttpAnalyzer
+            ExternalServicesManager, DnsResolver, HttpAnalyzer, ShodanExtractedAssets
         },
         task_manager::{TaskManager, TaskType, TaskContext},
     },
@@ -29,6 +29,7 @@ pub struct DiscoveryStatus {
     pub seeds_processed: usize,
     pub assets_discovered: usize,
     pub errors: Vec<String>,
+    pub task_id: Option<Uuid>,
 }
 
 impl Default for DiscoveryStatus {
@@ -40,6 +41,7 @@ impl Default for DiscoveryStatus {
             seeds_processed: 0,
             assets_discovered: 0,
             errors: Vec::new(),
+            task_id: None,
         }
     }
 }
@@ -108,6 +110,13 @@ impl DiscoveryService {
         self.asset_repo.list(confidence_threshold, limit, offset).await
     }
 
+    pub async fn count_assets(
+        &self,
+        confidence_threshold: Option<f64>,
+    ) -> Result<i64, ApiError> {
+        self.asset_repo.count(confidence_threshold).await
+    }
+
     pub async fn get_asset(&self, id: &Uuid) -> Result<Option<Asset>, ApiError> {
         self.asset_repo.get_by_id(id).await
     }
@@ -145,7 +154,7 @@ impl DiscoveryService {
             "started_at": chrono::Utc::now()
         });
         
-        let _task_id = self.task_manager.submit_task(
+        let task_id = self.task_manager.submit_task(
             TaskType::Discovery,
             task_metadata,
             move |ctx| {
@@ -155,6 +164,35 @@ impl DiscoveryService {
                 })
             }
         ).await?;
+
+        // Update status with task_id
+        {
+            let mut status = self.discovery_status.lock().await;
+            status.task_id = Some(task_id);
+        }
+
+        Ok(())
+    }
+
+    /// Stop the running discovery task
+    pub async fn stop_discovery(&self) -> Result<(), ApiError> {
+        let task_id = {
+            let status = self.discovery_status.lock().await;
+            if !status.is_running {
+                return Err(ApiError::Validation("Discovery is not running".to_string()));
+            }
+            status.task_id
+        };
+
+        if let Some(id) = task_id {
+            self.task_manager.cancel_task(id).await?;
+            
+            // Update status immediately
+            let mut status = self.discovery_status.lock().await;
+            status.is_running = false;
+            status.completed_at = Some(chrono::Utc::now());
+            status.errors.push("Discovery stopped by user".to_string());
+        }
 
         Ok(())
     }
@@ -192,6 +230,7 @@ impl DiscoveryService {
         // Process seeds with concurrency control
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.settings.max_concurrent_scans as usize));
         let mut tasks = Vec::new();
+        let total_seeds = seeds.len();
 
         for (i, seed) in seeds.iter().enumerate() {
             ctx.check_cancellation().await?;
@@ -208,8 +247,8 @@ impl DiscoveryService {
             tasks.push(task);
             
             // Update progress for task submission
-            let submission_progress = 0.1 + (i as f32 / seeds.len() as f32) * 0.2;
-            ctx.update_progress(submission_progress, Some(format!("Submitted {} of {} seed processing tasks", i + 1, seeds.len()))).await?;
+            let submission_progress = 0.1 + ((i as f32) / (total_seeds as f32)) * 0.2;
+            ctx.update_progress(submission_progress, Some(format!("Submitted {} of {} seed processing tasks", i + 1, total_seeds))).await?;
         }
 
         // Wait for all seed processing to complete
@@ -241,8 +280,8 @@ impl DiscoveryService {
             }
             
             // Update progress for completed tasks
-            let completion_progress = 0.3 + (i as f32 / seeds.len() as f32) * 0.6;
-            ctx.update_progress(completion_progress, Some(format!("Completed {} of {} seed processing tasks", i + 1, seeds.len()))).await?;
+            let completion_progress = 0.3 + ((i as f32) / (total_seeds as f32)) * 0.6;
+            ctx.update_progress(completion_progress, Some(format!("Completed {} of {} seed processing tasks", i + 1, total_seeds))).await?;
         }
 
         ctx.update_progress(0.95, Some("Finalizing discovery".to_string())).await?;
@@ -517,7 +556,23 @@ impl DiscoveryService {
         let mut confidence_scores = HashMap::new();
         let mut sources = HashMap::new();
 
-        // Step 1: Subdomain enumeration
+        // Step 1: Get comprehensive Shodan data first (extracts IPs, domains, ASNs, orgs, certs)
+        let mut shodan_extracted = ShodanExtractedAssets::default();
+        match self.external_services.get_shodan_comprehensive_data(domain).await {
+            Ok(extracted) => {
+                tracing::info!(
+                    "Comprehensive Shodan extraction for {}: {} domains, {} IPs, {} ASNs, {} orgs, {} certs",
+                    domain, extracted.domains.len(), extracted.ips.len(), 
+                    extracted.asns.len(), extracted.organizations.len(), extracted.certificates.len()
+                );
+                shodan_extracted = extracted;
+            }
+            Err(e) => {
+                tracing::debug!("Shodan comprehensive extraction not available for {}: {}", domain, e);
+            }
+        }
+
+        // Step 2: Subdomain enumeration (includes Shodan + all other sources)
         match self.external_services.enumerate_subdomains(domain).await {
             Ok(subdomain_result) => {
                 for subdomain in &subdomain_result.subdomains {
@@ -542,6 +597,48 @@ impl DiscoveryService {
             }
             Err(e) => {
                 tracing::warn!("Subdomain enumeration failed for {}: {}", domain, e);
+            }
+        }
+
+        // Step 3: Process IPs extracted from Shodan
+        for ip in &shodan_extracted.ips {
+            let confidence = 0.8; // High confidence for Shodan IPs
+            let asset = AssetCreate {
+                asset_type: AssetType::Ip,
+                identifier: ip.clone(),
+                confidence,
+                sources: json!(["shodan"]),
+                metadata: json!({
+                    "discovered_from": domain,
+                    "discovery_method": "shodan_comprehensive",
+                    "source": "shodan_domain_search"
+                }),
+            };
+            assets.push(asset);
+            confidence_scores.insert(ip.clone(), confidence);
+            sources.insert(ip.clone(), vec!["shodan".to_string()]);
+        }
+
+        // Step 4: Process certificates extracted from Shodan
+        for cert in &shodan_extracted.certificates {
+            if let Some(ref org) = cert.organization {
+                let confidence = 0.7;
+                let cert_asset = AssetCreate {
+                    asset_type: AssetType::Certificate,
+                    identifier: cert.subject.clone(),
+                    confidence,
+                    sources: json!(["shodan"]),
+                    metadata: json!({
+                        "organization": org,
+                        "issuer": cert.issuer,
+                        "san_domains": cert.domains,
+                        "discovered_from": domain,
+                        "discovery_method": "shodan_comprehensive"
+                    }),
+                };
+                assets.push(cert_asset);
+                confidence_scores.insert(cert.subject.clone(), confidence);
+                sources.insert(cert.subject.clone(), vec!["shodan".to_string()]);
             }
         }
 
@@ -630,14 +727,103 @@ impl DiscoveryService {
     }
 
     /// Discover assets from an organization seed
+    /// Uses comprehensive Shodan extraction for ALL asset types, then queries crt.sh for additional domains
     async fn discover_from_organization(&self, org: &str) -> Result<DiscoveryResult, ApiError> {
         let mut assets = Vec::new();
         let mut confidence_scores = HashMap::new();
         let mut sources = HashMap::new();
 
-        // Use crt.sh to find domains by organization
+        // PRIORITY 1: Comprehensive Shodan search - extracts IPs, domains, ASNs, certs, etc.
+        tracing::info!("Searching organization '{}' using Shodan (PRIMARY - Comprehensive)", org);
+        match self.external_services.search_shodan_org_comprehensive(org).await {
+            Ok(extracted) => {
+                tracing::info!(
+                    "✓ Shodan comprehensive extraction for '{}': {} IPs, {} domains, {} ASNs, {} orgs, {} certs",
+                    org, extracted.ips.len(), extracted.domains.len(), 
+                    extracted.asns.len(), extracted.organizations.len(), extracted.certificates.len()
+                );
+                
+                // Process IPs
+                for ip in &extracted.ips {
+                    let confidence = 0.7;
+                    let asset = AssetCreate {
+                        asset_type: AssetType::Ip,
+                        identifier: ip.clone(),
+                        confidence,
+                        sources: json!(["shodan"]),
+                        metadata: json!({
+                            "organization": org,
+                            "discovery_method": "shodan_org_comprehensive"
+                        }),
+                    };
+                    assets.push(asset);
+                    confidence_scores.insert(ip.clone(), confidence);
+                    sources.insert(ip.clone(), vec!["shodan".to_string()]);
+                }
+                
+                // Process domains found in Shodan
+                for domain in &extracted.domains {
+                    let confidence = 0.6;
+                    let asset = AssetCreate {
+                        asset_type: AssetType::Domain,
+                        identifier: domain.clone(),
+                        confidence,
+                        sources: json!(["shodan"]),
+                        metadata: json!({
+                            "organization": org,
+                            "discovery_method": "shodan_org_comprehensive"
+                        }),
+                    };
+                    assets.push(asset);
+                    confidence_scores.insert(domain.clone(), confidence);
+                    sources.insert(domain.clone(), vec!["shodan".to_string()]);
+                }
+                
+                // Process certificates
+                for cert in &extracted.certificates {
+                    if let Some(ref cert_org) = cert.organization {
+                        let confidence = 0.7;
+                        let cert_asset = AssetCreate {
+                            asset_type: AssetType::Certificate,
+                            identifier: cert.subject.clone(),
+                            confidence,
+                            sources: json!(["shodan"]),
+                            metadata: json!({
+                                "organization": cert_org,
+                                "issuer": cert.issuer,
+                                "san_domains": cert.domains,
+                                "discovered_from": org,
+                                "discovery_method": "shodan_org_comprehensive"
+                            }),
+                        };
+                        assets.push(cert_asset);
+                        confidence_scores.insert(cert.subject.clone(), confidence);
+                        sources.insert(cert.subject.clone(), vec!["shodan".to_string()]);
+                    }
+                }
+                
+                // Log discovered ASNs for potential recursive discovery
+                if !extracted.asns.is_empty() {
+                    tracing::info!("Discovered ASNs from organization '{}': {:?} (available for recursive discovery)", 
+                        org, extracted.asns);
+                }
+                
+                // Log discovered related organizations
+                if !extracted.organizations.is_empty() {
+                    tracing::info!("Discovered related organizations: {:?} (available for recursive discovery)", 
+                        extracted.organizations);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Shodan comprehensive organization search failed for {}: {}", org, e);
+            }
+        }
+
+        // ALWAYS query crt.sh for additional domain coverage
+        tracing::info!("Searching organization '{}' using crt.sh for additional domain coverage", org);
         match self.external_services.search_crtsh_by_organization(org).await {
             Ok(domains) => {
+                tracing::info!("Found {} domains from crt.sh for organization '{}'", domains.len(), org);
                 for domain in domains {
                     let confidence = self.calculate_crtsh_org_confidence(&domain, org);
 
@@ -662,33 +848,11 @@ impl DiscoveryService {
             }
         }
 
-        // Use Shodan to find assets by organization
-        match self.external_services.search_shodan_by_org(org).await {
-            Ok(shodan_results) => {
-                for result in shodan_results {
-                    let confidence = self.calculate_shodan_confidence(&result, org);
-                    
-                    let asset = AssetCreate {
-                        asset_type: AssetType::Ip,
-                        identifier: result.ip_str.clone(),
-                        confidence,
-                        sources: json!(["shodan"]),
-                        metadata: json!({
-                            "organization": org,
-                            "shodan_data": result,
-                            "discovery_method": "shodan_org_search"
-                        }),
-                    };
-                    
-                    assets.push(asset);
-                    confidence_scores.insert(result.ip_str.clone(), confidence);
-                    sources.insert(result.ip_str, vec!["shodan".to_string()]);
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Shodan organization search failed for {}: {}", org, e);
-            }
-        }
+        tracing::info!(
+            "Organization discovery complete for '{}': {} total assets found (IPs + Domains + Certificates)",
+            org,
+            assets.len()
+        );
 
         Ok(DiscoveryResult {
             assets,
@@ -698,36 +862,87 @@ impl DiscoveryService {
     }
 
     /// Discover assets from an ASN seed
+    /// Uses comprehensive Shodan extraction to find ALL asset types associated with the ASN
     async fn discover_from_asn(&self, asn: &str) -> Result<DiscoveryResult, ApiError> {
         let mut assets = Vec::new();
         let mut confidence_scores = HashMap::new();
         let mut sources = HashMap::new();
 
-        // Use Shodan to find assets by ASN
-        match self.external_services.search_shodan_by_asn(asn).await {
-            Ok(shodan_results) => {
-                for result in shodan_results {
-                    let confidence = self.calculate_asn_confidence(&result, asn);
-                    
+        // Use comprehensive Shodan search for ASN
+        tracing::info!("Searching ASN '{}' using Shodan (Comprehensive)", asn);
+        match self.external_services.search_shodan_asn_comprehensive(asn).await {
+            Ok(extracted) => {
+                tracing::info!(
+                    "✓ Shodan comprehensive extraction for ASN '{}': {} IPs, {} domains, {} orgs, {} certs",
+                    asn, extracted.ips.len(), extracted.domains.len(), 
+                    extracted.organizations.len(), extracted.certificates.len()
+                );
+                
+                // Process IPs
+                for ip in &extracted.ips {
+                    let confidence = 0.8;
                     let asset = AssetCreate {
                         asset_type: AssetType::Ip,
-                        identifier: result.ip_str.clone(),
+                        identifier: ip.clone(),
                         confidence,
                         sources: json!(["shodan"]),
                         metadata: json!({
                             "asn": asn,
-                            "shodan_data": result,
-                            "discovery_method": "shodan_asn_search"
+                            "discovery_method": "shodan_asn_comprehensive"
                         }),
                     };
-                    
                     assets.push(asset);
-                    confidence_scores.insert(result.ip_str.clone(), confidence);
-                    sources.insert(result.ip_str, vec!["shodan".to_string()]);
+                    confidence_scores.insert(ip.clone(), confidence);
+                    sources.insert(ip.clone(), vec!["shodan".to_string()]);
+                }
+                
+                // Process domains
+                for domain in &extracted.domains {
+                    let confidence = 0.7;
+                    let asset = AssetCreate {
+                        asset_type: AssetType::Domain,
+                        identifier: domain.clone(),
+                        confidence,
+                        sources: json!(["shodan"]),
+                        metadata: json!({
+                            "asn": asn,
+                            "discovery_method": "shodan_asn_comprehensive"
+                        }),
+                    };
+                    assets.push(asset);
+                    confidence_scores.insert(domain.clone(), confidence);
+                    sources.insert(domain.clone(), vec!["shodan".to_string()]);
+                }
+                
+                // Process certificates
+                for cert in &extracted.certificates {
+                    let confidence = 0.7;
+                    let cert_asset = AssetCreate {
+                        asset_type: AssetType::Certificate,
+                        identifier: cert.subject.clone(),
+                        confidence,
+                        sources: json!(["shodan"]),
+                        metadata: json!({
+                            "asn": asn,
+                            "organization": cert.organization,
+                            "issuer": cert.issuer,
+                            "san_domains": cert.domains,
+                            "discovery_method": "shodan_asn_comprehensive"
+                        }),
+                    };
+                    assets.push(cert_asset);
+                    confidence_scores.insert(cert.subject.clone(), confidence);
+                    sources.insert(cert.subject.clone(), vec!["shodan".to_string()]);
+                }
+                
+                // Log discovered organizations for potential recursive discovery
+                if !extracted.organizations.is_empty() {
+                    tracing::info!("Discovered organizations from ASN '{}': {:?} (available for recursive discovery)", 
+                        asn, extracted.organizations);
                 }
             }
             Err(e) => {
-                tracing::warn!("Shodan ASN search failed for {}: {}", asn, e);
+                tracing::warn!("Shodan comprehensive ASN search failed for {}: {}", asn, e);
             }
         }
 
@@ -783,36 +998,89 @@ impl DiscoveryService {
     }
 
     /// Discover assets from a keyword seed
+    /// Uses comprehensive Shodan extraction to find ALL asset types matching the keyword
     async fn discover_from_keyword(&self, keyword: &str) -> Result<DiscoveryResult, ApiError> {
         let mut assets = Vec::new();
         let mut confidence_scores = HashMap::new();
         let mut sources = HashMap::new();
 
-        // Use Shodan to search by keyword
-        match self.external_services.search_shodan(keyword).await {
-            Ok(shodan_results) => {
-                for result in shodan_results {
-                    let confidence = self.calculate_keyword_confidence(&result, keyword);
-                    
+        // Use comprehensive Shodan search for keyword
+        tracing::info!("Searching keyword '{}' using Shodan (Comprehensive)", keyword);
+        match self.external_services.search_shodan_comprehensive(keyword).await {
+            Ok(extracted) => {
+                tracing::info!(
+                    "✓ Shodan comprehensive extraction for keyword '{}': {} IPs, {} domains, {} ASNs, {} orgs, {} certs",
+                    keyword, extracted.ips.len(), extracted.domains.len(), 
+                    extracted.asns.len(), extracted.organizations.len(), extracted.certificates.len()
+                );
+                
+                // Process IPs
+                for ip in &extracted.ips {
+                    let confidence = 0.5; // Lower confidence for keyword searches
                     let asset = AssetCreate {
                         asset_type: AssetType::Ip,
-                        identifier: result.ip_str.clone(),
+                        identifier: ip.clone(),
                         confidence,
                         sources: json!(["shodan"]),
                         metadata: json!({
                             "keyword": keyword,
-                            "shodan_data": result,
-                            "discovery_method": "shodan_keyword_search"
+                            "discovery_method": "shodan_keyword_comprehensive"
                         }),
                     };
-                    
                     assets.push(asset);
-                    confidence_scores.insert(result.ip_str.clone(), confidence);
-                    sources.insert(result.ip_str, vec!["shodan".to_string()]);
+                    confidence_scores.insert(ip.clone(), confidence);
+                    sources.insert(ip.clone(), vec!["shodan".to_string()]);
+                }
+                
+                // Process domains
+                for domain in &extracted.domains {
+                    let confidence = 0.5;
+                    let asset = AssetCreate {
+                        asset_type: AssetType::Domain,
+                        identifier: domain.clone(),
+                        confidence,
+                        sources: json!(["shodan"]),
+                        metadata: json!({
+                            "keyword": keyword,
+                            "discovery_method": "shodan_keyword_comprehensive"
+                        }),
+                    };
+                    assets.push(asset);
+                    confidence_scores.insert(domain.clone(), confidence);
+                    sources.insert(domain.clone(), vec!["shodan".to_string()]);
+                }
+                
+                // Process certificates
+                for cert in &extracted.certificates {
+                    let confidence = 0.5;
+                    let cert_asset = AssetCreate {
+                        asset_type: AssetType::Certificate,
+                        identifier: cert.subject.clone(),
+                        confidence,
+                        sources: json!(["shodan"]),
+                        metadata: json!({
+                            "keyword": keyword,
+                            "organization": cert.organization,
+                            "issuer": cert.issuer,
+                            "san_domains": cert.domains,
+                            "discovery_method": "shodan_keyword_comprehensive"
+                        }),
+                    };
+                    assets.push(cert_asset);
+                    confidence_scores.insert(cert.subject.clone(), confidence);
+                    sources.insert(cert.subject.clone(), vec!["shodan".to_string()]);
+                }
+                
+                // Log discovered ASNs and organizations for potential recursive discovery
+                if !extracted.asns.is_empty() {
+                    tracing::info!("Discovered ASNs from keyword '{}': {:?}", keyword, extracted.asns);
+                }
+                if !extracted.organizations.is_empty() {
+                    tracing::info!("Discovered organizations from keyword '{}': {:?}", keyword, extracted.organizations);
                 }
             }
             Err(e) => {
-                tracing::warn!("Shodan keyword search failed for {}: {}", keyword, e);
+                tracing::warn!("Shodan comprehensive keyword search failed for {}: {}", keyword, e);
             }
         }
 

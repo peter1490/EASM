@@ -69,6 +69,12 @@ pub struct AssetRow {
     pub metadata: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[sqlx(default)]
+    pub last_scan_id: Option<Uuid>,
+    #[sqlx(default)]
+    pub last_scan_status: Option<String>, // Using String since ScanStatus enum might need sqlx Type impl
+    #[sqlx(default)]
+    pub last_scanned_at: Option<DateTime<Utc>>,
 }
 
 impl From<AssetRow> for Asset {
@@ -82,9 +88,9 @@ impl From<AssetRow> for Asset {
             metadata: row.metadata,
             created_at: row.created_at,
             updated_at: row.updated_at,
-            last_scan_id: None,
-            last_scan_status: None,
-            last_scanned_at: None,
+            last_scan_id: row.last_scan_id.map(|id| id.to_string()),
+            last_scan_status: row.last_scan_status,
+            last_scanned_at: row.last_scanned_at,
         }
     }
 }

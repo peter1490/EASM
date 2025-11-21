@@ -2,7 +2,7 @@ use crate::config::Settings;
 use crate::error::ApiError;
 use super::{
     CrtShClient, ShodanClient, VirusTotalClient, CertSpotterClient,
-    ShodanResult, CertSpotterCertificate
+    ShodanResult, ShodanExtractedAssets, CertSpotterCertificate
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -61,9 +61,50 @@ impl ExternalServicesManager {
     }
 
     /// Perform comprehensive subdomain enumeration using all available sources
+    /// Queries Shodan first as primary source, then always queries other sources for comprehensive coverage
+    /// Returns a SubdomainEnumerationResult plus extracted Shodan assets for recursive discovery
     pub async fn enumerate_subdomains(&self, domain: &str) -> Result<SubdomainEnumerationResult, ApiError> {
         let mut all_subdomains = std::collections::HashSet::new();
         let mut sources = HashMap::new();
+
+        // PRIORITY 1: Try Shodan first (if configured) as primary source
+        // Use comprehensive search to extract ALL asset types
+        if let Some(ref client) = self.shodan_client {
+            tracing::info!("Enumerating subdomains for {} using Shodan (PRIMARY - Comprehensive)", domain);
+            match client.search_domain_comprehensive(domain).await {
+                Ok(extracted) => {
+                    // Add discovered domains
+                    if !extracted.domains.is_empty() {
+                        tracing::info!("✓ Shodan found {} domains", extracted.domains.len());
+                        let shodan_domains: Vec<String> = extracted.domains.iter().cloned().collect();
+                        sources.insert("shodan".to_string(), shodan_domains.clone());
+                        all_subdomains.extend(shodan_domains);
+                    }
+                    
+                    // Log additional asset types found (for recursive discovery in parent function)
+                    if !extracted.ips.is_empty() {
+                        tracing::info!("✓ Shodan found {} IPs (available for recursive discovery)", extracted.ips.len());
+                    }
+                    if !extracted.asns.is_empty() {
+                        tracing::info!("✓ Shodan found {} ASNs (available for recursive discovery)", extracted.asns.len());
+                    }
+                    if !extracted.organizations.is_empty() {
+                        tracing::info!("✓ Shodan found {} organizations (available for recursive discovery)", extracted.organizations.len());
+                    }
+                    if !extracted.certificates.is_empty() {
+                        tracing::info!("✓ Shodan found {} certificates (available for recursive discovery)", extracted.certificates.len());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Shodan comprehensive enumeration failed for {}: {}", domain, e);
+                }
+            }
+        } else {
+            tracing::info!("Shodan not configured");
+        }
+
+        // ALWAYS query additional sources for comprehensive coverage
+        tracing::info!("Querying additional sources for comprehensive coverage");
 
         // Certificate Transparency (crt.sh) - always available
         tracing::info!("Enumerating subdomains for {} using crt.sh", domain);
@@ -121,6 +162,17 @@ impl ExternalServicesManager {
             subdomains: final_subdomains,
             sources,
         })
+    }
+    
+    /// Get comprehensive Shodan data for a domain (for use in recursive discovery)
+    /// Returns all asset types extracted from Shodan
+    pub async fn get_shodan_comprehensive_data(&self, domain: &str) -> Result<ShodanExtractedAssets, ApiError> {
+        if let Some(ref client) = self.shodan_client {
+            client.search_domain_comprehensive(domain).await
+        } else {
+            // Return empty result if Shodan not configured
+            Ok(ShodanExtractedAssets::default())
+        }
     }
 
     /// Search crt.sh for domains by organization name
@@ -300,6 +352,42 @@ impl ExternalServicesManager {
         
         tracing::info!("External services manager initialized with {} services", configured_count);
         Ok(())
+    }
+
+    /// Comprehensive Shodan search that extracts ALL asset types (IPs, domains, ASNs, orgs, certs)
+    pub async fn search_shodan_comprehensive(&self, query: &str) -> Result<ShodanExtractedAssets, ApiError> {
+        if let Some(ref client) = self.shodan_client {
+            client.search_comprehensive(query).await
+        } else {
+            Err(ApiError::ExternalService("Shodan API not configured".to_string()))
+        }
+    }
+
+    /// Comprehensive domain search on Shodan - extracts all related assets
+    pub async fn search_shodan_domain_comprehensive(&self, domain: &str) -> Result<ShodanExtractedAssets, ApiError> {
+        if let Some(ref client) = self.shodan_client {
+            client.search_domain_comprehensive(domain).await
+        } else {
+            Err(ApiError::ExternalService("Shodan API not configured".to_string()))
+        }
+    }
+
+    /// Comprehensive organization search on Shodan - extracts all related assets
+    pub async fn search_shodan_org_comprehensive(&self, org: &str) -> Result<ShodanExtractedAssets, ApiError> {
+        if let Some(ref client) = self.shodan_client {
+            client.search_org_comprehensive(org).await
+        } else {
+            Err(ApiError::ExternalService("Shodan API not configured".to_string()))
+        }
+    }
+
+    /// Comprehensive ASN search on Shodan - extracts all related assets
+    pub async fn search_shodan_asn_comprehensive(&self, asn: &str) -> Result<ShodanExtractedAssets, ApiError> {
+        if let Some(ref client) = self.shodan_client {
+            client.search_asn_comprehensive(asn).await
+        } else {
+            Err(ApiError::ExternalService("Shodan API not configured".to_string()))
+        }
     }
 }
 

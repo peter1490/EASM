@@ -108,6 +108,7 @@ export type DiscoveryStatus = {
   assets_discovered: number;
   assets_updated?: number;
   queue_pending?: number;
+  scans_queued?: number;
   errors: string[];
   error_count: number;
 };
@@ -128,9 +129,16 @@ export type DiscoveryRun = {
 };
 
 export type DiscoveryConfig = {
+  /** Minimum confidence to auto-trigger security scans (0.0-1.0, 0 = disabled) */
   auto_scan_threshold?: number;
+  /** Maximum recursion depth for pivoting */
   max_depth?: number;
+  /** Specific seed IDs to process (empty = all seeds) */
   seed_ids?: string[];
+  /** Skip recently processed seeds */
+  skip_recent?: boolean;
+  /** Recent threshold in hours */
+  recent_hours?: number;
   // Legacy frontend fields (mapped by backend)
   confidence_threshold?: number;
   include_scan?: boolean;
@@ -612,6 +620,30 @@ export async function recalculateAssetRisk(assetId: string): Promise<Asset> {
 export async function getRiskOverview(): Promise<Record<string, unknown>> {
   const res = await fetch(`${API_BASE}/api/risk/overview`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get risk overview: ${res.status}`);
+  return res.json();
+}
+
+export type RiskRecalculationResult = {
+  success_count: number;
+  error_count: number;
+  errors: string[];
+};
+
+export async function recalculateAllRisks(): Promise<RiskRecalculationResult> {
+  const res = await fetch(`${API_BASE}/api/risk/recalculate-all`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to recalculate all risks: ${res.status}`);
+  return res.json();
+}
+
+export async function getHighRiskAssets(limit = 20): Promise<Asset[]> {
+  const params = new URLSearchParams();
+  params.append("limit", limit.toString());
+  
+  const res = await fetch(`${API_BASE}/api/risk/high-risk-assets?${params.toString()}`, { cache: "no-store", credentials: "include" });
+  if (!res.ok) throw new Error(`Failed to get high risk assets: ${res.status}`);
   return res.json();
 }
 

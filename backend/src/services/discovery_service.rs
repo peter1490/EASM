@@ -12,11 +12,9 @@
 //! 
 //! Security scanning is handled separately by SecurityScanService.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio::time::timeout;
 use uuid::Uuid;
 use serde_json::json;
 use chrono::Utc;
@@ -27,9 +25,10 @@ use crate::{
     models::{
         Asset, AssetCreate, AssetType, Seed, SeedCreate, SeedType,
         DiscoveryRun, DiscoveryRunCreate, DiscoveryConfig, DiscoveryResult,
-        DiscoveryQueueItemCreate, QueueItemType, QueueItemStatus,
+        DiscoveryQueueItemCreate, QueueItemType,
         AssetSourceCreate, SourceType, AssetRelationshipCreate, RelationshipType,
         TriggerType,
+        SecurityScanCreate, SecurityScanType, ScanTriggerType,
     },
     repositories::{
         AssetRepository, SeedRepository,
@@ -38,10 +37,11 @@ use crate::{
     },
     services::{
         external::{
-            ExternalServicesManager, DnsResolver, HttpAnalyzer, ShodanExtractedAssets
+            ExternalServicesManager, DnsResolver, HttpAnalyzer,
         },
         task_manager::{TaskManager, TaskType, TaskContext},
-        confidence::{ConfidenceScorer, ConfidenceFactors, MethodConfidence},
+        confidence::ConfidenceScorer,
+        SecurityScanService,
     },
     utils::network::expand_cidr,
 };
@@ -73,7 +73,11 @@ pub struct DiscoveryStatus {
     pub assets_discovered: usize,
     pub assets_updated: usize,
     pub queue_pending: usize,
+    pub scans_queued: usize,
     pub errors: Vec<String>,
+    /// Auto-scan threshold for high-confidence assets (0.0 = disabled)
+    #[serde(skip)]
+    pub auto_scan_threshold: f64,
 }
 
 pub struct DiscoveryService {
@@ -84,6 +88,9 @@ pub struct DiscoveryService {
     discovery_queue_repo: Arc<dyn DiscoveryQueueRepository + Send + Sync>,
     asset_source_repo: Arc<dyn AssetSourceRepository + Send + Sync>,
     asset_relationship_repo: Arc<dyn AssetRelationshipRepository + Send + Sync>,
+    
+    // Services
+    security_scan_service: Option<Arc<SecurityScanService>>,
     
     // External services
     external_services: Arc<ExternalServicesManager>,
@@ -120,6 +127,7 @@ impl DiscoveryService {
             discovery_queue_repo,
             asset_source_repo,
             asset_relationship_repo,
+            security_scan_service: None,
             external_services,
             dns_resolver,
             http_analyzer,
@@ -128,6 +136,12 @@ impl DiscoveryService {
             confidence_scorer: Arc::new(ConfidenceScorer::new()),
             status: Arc::new(Mutex::new(DiscoveryStatus::default())),
         }
+    }
+    
+    /// Set the security scan service for auto-scan functionality
+    pub fn with_security_scan_service(mut self, service: Arc<SecurityScanService>) -> Self {
+        self.security_scan_service = Some(service);
+        self
     }
 
     // ========================================================================
@@ -347,10 +361,24 @@ impl DiscoveryService {
         let seeds = self.seed_repo.list().await?;
         let seed_count = seeds.len();
         
+        // Extract auto_scan_threshold from config
+        let auto_scan_threshold = config.as_ref()
+            .and_then(|c| c.auto_scan_threshold)
+            .unwrap_or(0.0);
+        
         {
             let mut status = self.status.lock().await;
             status.seeds_total = seed_count;
             status.current_phase = "Loading seeds".to_string();
+            status.auto_scan_threshold = auto_scan_threshold;
+            status.scans_queued = 0;
+        }
+        
+        if auto_scan_threshold > 0.0 {
+            tracing::info!(
+                "Auto-scan enabled: assets with confidence >= {:.2} will be scanned",
+                auto_scan_threshold
+            );
         }
         
         ctx.update_progress(0.05, Some(format!("Found {} seeds", seed_count))).await?;
@@ -413,7 +441,7 @@ impl DiscoveryService {
             
             {
                 let mut status = self.status.lock().await;
-                status.queue_pending = pending as usize;
+                status.queue_pending = pending.try_into().unwrap_or(0);
             }
 
             if pending == 0 {
@@ -462,7 +490,8 @@ impl DiscoveryService {
                 processed += 1;
 
                 // Update progress
-                let progress = 0.1 + (0.8 * (processed as f32 / (processed + pending as usize) as f32));
+                let pending_usize: usize = pending.try_into().unwrap_or(0);
+                let progress = 0.1 + (0.8 * (processed as f32 / (processed + pending_usize).max(1) as f32));
                 ctx.update_progress(progress, Some(format!("Processed {} items", processed))).await?;
 
                 // Update status
@@ -1057,6 +1086,28 @@ impl DiscoveryService {
             raw_data: None,
         };
         self.asset_source_repo.create(&source_create).await?;
+        
+        // Auto-scan high confidence newly created assets
+        if was_created {
+            let auto_scan_threshold = {
+                self.status.lock().await.auto_scan_threshold
+            };
+            
+            if auto_scan_threshold > 0.0 {
+                if let Err(e) = self.maybe_trigger_auto_scan(
+                    asset.id,
+                    &asset_type,
+                    confidence,
+                    Some(auto_scan_threshold),
+                ).await {
+                    tracing::warn!("Failed to trigger auto-scan for {}: {}", identifier, e);
+                } else if confidence >= auto_scan_threshold {
+                    // Increment counter if scan was likely queued
+                    let mut status = self.status.lock().await;
+                    status.scans_queued += 1;
+                }
+            }
+        }
 
         Ok((asset.id, was_created))
     }
@@ -1132,6 +1183,81 @@ impl DiscoveryService {
         let boost = (source_count as f64 - 1.0) * 0.1;
         (base + boost).min(0.9)
     }
+    
+    /// Check if asset should be auto-scanned and queue a security scan
+    async fn maybe_trigger_auto_scan(
+        &self,
+        asset_id: Uuid,
+        asset_type: &AssetType,
+        confidence: f64,
+        auto_scan_threshold: Option<f64>,
+    ) -> Result<(), ApiError> {
+        // Only proceed if we have a threshold set and the security scan service is available
+        let threshold = match auto_scan_threshold {
+            Some(t) if t > 0.0 => t,
+            _ => return Ok(()), // No threshold set or threshold is 0
+        };
+        
+        let security_scan_service = match &self.security_scan_service {
+            Some(service) => service,
+            None => return Ok(()), // No security scan service configured
+        };
+        
+        // Only scan scannable asset types
+        let is_scannable = matches!(asset_type, AssetType::Domain | AssetType::Ip | AssetType::Certificate);
+        if !is_scannable {
+            return Ok(());
+        }
+        
+        // Check if confidence meets threshold
+        if confidence < threshold {
+            tracing::debug!(
+                "Asset {} confidence {:.2} below auto-scan threshold {:.2}",
+                asset_id, confidence, threshold
+            );
+            return Ok(());
+        }
+        
+        // Check if asset was recently scanned (avoid duplicate scans)
+        let existing_scans = security_scan_service.list_scans_for_asset(&asset_id).await?;
+        if let Some(scan) = existing_scans.first() {
+            let scan_age = chrono::Utc::now() - scan.created_at;
+            if scan_age.num_hours() < 24 {
+                tracing::debug!(
+                    "Asset {} was scanned within 24h, skipping auto-scan",
+                    asset_id
+                );
+                return Ok(());
+            }
+        }
+        
+        // Create and execute a security scan via the service (this submits to task manager)
+        let scan_create = SecurityScanCreate {
+            asset_id,
+            scan_type: Some(SecurityScanType::Full),
+            trigger_type: Some(ScanTriggerType::Discovery),
+            priority: Some(3), // Lower priority than manual scans
+            note: Some("Auto-triggered by discovery (high confidence asset)".to_string()),
+            config: None,
+        };
+        
+        match security_scan_service.create_scan(scan_create).await {
+            Ok(scan) => {
+                tracing::info!(
+                    "Auto-triggered security scan {} for asset {} (confidence: {:.2})",
+                    scan.id, asset_id, confidence
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to trigger auto-scan for asset {}: {}",
+                    asset_id, e
+                );
+            }
+        }
+        
+        Ok(())
+    }
 }
 
 // Implement Clone for async task spawning
@@ -1144,6 +1270,7 @@ impl Clone for DiscoveryService {
             discovery_queue_repo: Arc::clone(&self.discovery_queue_repo),
             asset_source_repo: Arc::clone(&self.asset_source_repo),
             asset_relationship_repo: Arc::clone(&self.asset_relationship_repo),
+            security_scan_service: self.security_scan_service.clone(),
             external_services: Arc::clone(&self.external_services),
             dns_resolver: Arc::clone(&self.dns_resolver),
             http_analyzer: Arc::clone(&self.http_analyzer),

@@ -75,10 +75,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Static file serving for evidence files
         .route("/api/static/evidence/*file", get(handlers::serve_evidence_file))
         .route("/api/static/health", get(handlers::static_files_health_check))
-        // Risk scoring endpoints (UPDATED)
-        .route("/api/risk/assets/:id", get(handlers::risk_handlers::get_asset_risk)) // New
-        .route("/api/risk/assets/:id/recalculate", post(handlers::risk_handlers::recalculate_asset_risk)) // New
-        .route("/api/risk/overview", get(handlers::risk_handlers::get_risk_overview)) // New
+        // Risk scoring endpoints
+        .route("/api/risk/assets/:id", get(handlers::risk_handlers::get_asset_risk))
+        .route("/api/risk/assets/:id/recalculate", post(handlers::risk_handlers::recalculate_asset_risk))
+        .route("/api/risk/overview", get(handlers::risk_handlers::get_risk_overview))
+        .route("/api/risk/recalculate-all", post(handlers::risk_handlers::recalculate_all_risks))
+        .route("/api/risk/high-risk-assets", get(handlers::risk_handlers::get_high_risk_assets))
         // Port drift detection endpoints
         .route("/api/scans/:id/drift/detect", post(handlers::drift_handlers::detect_port_drift))
         .route("/api/scans/:id/drift/findings", get(handlers::drift_handlers::get_drift_findings))

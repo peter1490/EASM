@@ -1,13 +1,14 @@
 use axum::{
-    extract::{Path, State, Extension},
+    extract::{Path, State, Extension, Query},
     response::Json,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::{
     error::ApiError,
     AppState,
     models::asset::Asset,
+    services::RiskRecalculationResult,
     auth::{context::UserContext, rbac::Role},
 };
 
@@ -17,6 +18,17 @@ pub struct RiskOverviewResponse {
     pub assets_by_level: serde_json::Value,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct HighRiskQuery {
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+}
+
+fn default_limit() -> i64 {
+    20
+}
+
+/// GET /api/risk/assets/:id - Get risk data for a specific asset
 pub async fn get_asset_risk(
     State(app_state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -27,6 +39,7 @@ pub async fn get_asset_risk(
     Ok(Json(asset))
 }
 
+/// POST /api/risk/assets/:id/recalculate - Recalculate risk for a single asset
 pub async fn recalculate_asset_risk(
     State(app_state): State<AppState>,
     Extension(user): Extension<UserContext>,
@@ -40,9 +53,32 @@ pub async fn recalculate_asset_risk(
     Ok(Json(asset))
 }
 
+/// POST /api/risk/recalculate-all - Recalculate risk for all assets
+pub async fn recalculate_all_risks(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
+) -> Result<Json<RiskRecalculationResult>, ApiError> {
+    if !user.has_role(Role::Operator) && !user.has_role(Role::Admin) {
+         return Err(ApiError::Authorization("Operator role or higher required".to_string()));
+    }
+
+    let result = app_state.risk_service.recalculate_all_risks().await?;
+    Ok(Json(result))
+}
+
+/// GET /api/risk/overview - Get comprehensive risk overview
 pub async fn get_risk_overview(
     State(app_state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let overview = app_state.risk_service.get_risk_overview().await?;
     Ok(Json(overview))
+}
+
+/// GET /api/risk/high-risk-assets - Get assets with highest risk scores
+pub async fn get_high_risk_assets(
+    State(app_state): State<AppState>,
+    Query(query): Query<HighRiskQuery>,
+) -> Result<Json<Vec<Asset>>, ApiError> {
+    let assets = app_state.risk_service.get_high_risk_assets(query.limit).await?;
+    Ok(Json(assets))
 }

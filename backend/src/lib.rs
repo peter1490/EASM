@@ -166,21 +166,7 @@ impl AppState {
             config_arc.clone(),
         ));
         
-        let discovery_service = Arc::new(DiscoveryService::new(
-            asset_repository.clone(),
-            seed_repository.clone(),
-            discovery_run_repository.clone(),
-            discovery_queue_repository.clone(),
-            asset_source_repository.clone(),
-            asset_relationship_repository.clone(),
-            external_services.clone(),
-            dns_resolver.clone(),
-            http_analyzer.clone(),
-            task_manager.clone(),
-            config_arc.clone(),
-        ));
-        
-        // Create security scan service
+        // Create security scan service FIRST (discovery service depends on it)
         let security_scan_service = Arc::new(SecurityScanService::new(
             asset_repository.clone(),
             security_scan_repository.clone(),
@@ -192,6 +178,23 @@ impl AppState {
             task_manager.clone(),
             config_arc.clone(),
         ));
+        
+        // Create discovery service with security scan service for auto-scan functionality
+        let discovery_service = Arc::new(
+            DiscoveryService::new(
+                asset_repository.clone(),
+                seed_repository.clone(),
+                discovery_run_repository.clone(),
+                discovery_queue_repository.clone(),
+                asset_source_repository.clone(),
+                asset_relationship_repository.clone(),
+                external_services.clone(),
+                dns_resolver.clone(),
+                http_analyzer.clone(),
+                task_manager.clone(),
+                config_arc.clone(),
+            ).with_security_scan_service(security_scan_service.clone())
+        );
         
         // Create drift service
         let drift_service: Arc<dyn DriftService + Send + Sync> = Arc::new(
@@ -231,10 +234,11 @@ impl AppState {
             user_repository.clone(),
         ).await?);
 
-        // Create risk service
+        // Create risk service (uses security findings for proper risk calculation)
         let risk_service = Arc::new(RiskService::new(
             asset_repository.clone(),
-            finding_repository.clone(),
+            security_finding_repository.clone(),
+            db_pool.clone(),
         ));
         
         Ok(Self {

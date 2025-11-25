@@ -5,7 +5,10 @@ import {
   getRiskOverview,
   listAssets,
   recalculateAssetRisk,
+  recalculateAllRisks,
+  getHighRiskAssets,
   type Asset,
+  type RiskRecalculationResult,
 } from "@/app/api";
 import Header from "@/components/Header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
@@ -26,16 +29,20 @@ const RISK_COLORS: Record<string, "error" | "warning" | "info" | "secondary" | "
 export default function RiskPage() {
   const [overview, setOverview] = useState<Record<string, unknown> | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [highRiskAssets, setHighRiskAssets] = useState<Asset[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [recalculating, setRecalculating] = useState<string | null>(null);
+  const [recalculatingAll, setRecalculatingAll] = useState(false);
+  const [recalcResult, setRecalcResult] = useState<RiskRecalculationResult | null>(null);
 
   async function loadData() {
     try {
       setLoading(true);
-      const [overviewData, assetsData] = await Promise.all([
+      const [overviewData, assetsData, highRiskData] = await Promise.all([
         getRiskOverview(),
         listAssets(0, 100),
+        getHighRiskAssets(10),
       ]);
       setOverview(overviewData);
       // Sort assets by risk score descending
@@ -43,6 +50,7 @@ export default function RiskPage() {
         (b.risk_score || 0) - (a.risk_score || 0)
       );
       setAssets(sortedAssets);
+      setHighRiskAssets(highRiskData);
       setError(null);
     } catch (err) {
       setError((err as Error).message);
@@ -62,6 +70,7 @@ export default function RiskPage() {
     try {
       const updated = await recalculateAssetRisk(assetId);
       setAssets(prev => prev.map(a => a.id === assetId ? updated : a));
+      setHighRiskAssets(prev => prev.map(a => a.id === assetId ? updated : a));
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -69,23 +78,37 @@ export default function RiskPage() {
     }
   }
 
+  async function handleRecalculateAll() {
+    setRecalculatingAll(true);
+    setRecalcResult(null);
+    try {
+      const result = await recalculateAllRisks();
+      setRecalcResult(result);
+      loadData(); // Refresh data after recalculation
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setRecalculatingAll(false);
+    }
+  }
+
   const assetsByRisk = overview?.assets_by_level as Record<string, number> | undefined;
+  const findingsBySeverity = overview?.findings_by_severity as Record<string, number> | undefined;
   
-  // Get counts
+  // Get counts from API (real data)
   const criticalCount = assetsByRisk?.critical || 0;
   const highCount = assetsByRisk?.high || 0;
   const mediumCount = assetsByRisk?.medium || 0;
   const lowCount = assetsByRisk?.low || 0;
-  const minimalCount = assetsByRisk?.minimal || 0;
+  const infoCount = assetsByRisk?.info || 0;
 
-  // Assets with risk scores
-  const assetsWithRisk = assets.filter(a => a.risk_score !== null && a.risk_score !== undefined);
-  const avgRiskScore = assetsWithRisk.length > 0 
-    ? assetsWithRisk.reduce((sum, a) => sum + (a.risk_score || 0), 0) / assetsWithRisk.length 
-    : 0;
+  // Use API-provided stats
+  const avgRiskScore = (overview?.average_risk_score as number) || 0;
+  const assetsWithScores = (overview?.assets_with_scores as number) || 0;
+  const assetsPending = (overview?.assets_pending_calculation as number) || 0;
 
-  // Top risky assets
-  const topRiskyAssets = assetsWithRisk.slice(0, 10);
+  // Top risky assets from dedicated endpoint
+  const topRiskyAssets = highRiskAssets.length > 0 ? highRiskAssets : assets.filter(a => a.risk_score !== null && a.risk_score !== undefined).slice(0, 10);
 
   return (
     <div className="space-y-8 animate-fade-in">
@@ -111,6 +134,39 @@ export default function RiskPage() {
         </div>
       ) : (
         <>
+          {/* Bulk Recalculate Action */}
+          <Card className="bg-muted/30">
+            <CardContent className="py-4">
+              <div className="flex items-center justify-between flex-wrap gap-4">
+                <div>
+                  <h3 className="font-medium">Risk Recalculation</h3>
+                  <p className="text-sm text-muted-foreground">
+                    {assetsPending > 0 
+                      ? `${assetsPending} assets pending risk calculation`
+                      : `${assetsWithScores} assets have risk scores calculated`}
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  {recalcResult && (
+                    <div className="text-sm">
+                      <span className="text-success">{recalcResult.success_count} updated</span>
+                      {recalcResult.error_count > 0 && (
+                        <span className="text-destructive ml-2">{recalcResult.error_count} errors</span>
+                      )}
+                    </div>
+                  )}
+                  <Button 
+                    onClick={handleRecalculateAll}
+                    disabled={recalculatingAll}
+                    variant="outline"
+                  >
+                    {recalculatingAll ? "Recalculating..." : "Recalculate All Risks"}
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
           {/* Risk Overview Cards */}
           <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-6 stagger-children">
             <Card className="border-l-4 border-l-destructive group hover:shadow-lg transition-all">
@@ -149,13 +205,13 @@ export default function RiskPage() {
                 <div className="text-xs text-muted-foreground">Assets at low risk</div>
               </CardContent>
             </Card>
-            <Card className="border-l-4 border-l-success group hover:shadow-lg transition-all">
+            <Card className="border-l-4 border-l-secondary group hover:shadow-lg transition-all">
               <CardHeader className="pb-2">
-                <CardDescription>Minimal Risk</CardDescription>
-                <CardTitle className="text-3xl font-mono text-success">{minimalCount}</CardTitle>
+                <CardDescription>Info Level</CardDescription>
+                <CardTitle className="text-3xl font-mono text-secondary">{infoCount}</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-xs text-muted-foreground">Well protected assets</div>
+                <div className="text-xs text-muted-foreground">Minimal risk assets</div>
               </CardContent>
             </Card>
             <Card className="border-l-4 border-l-primary group hover:shadow-lg transition-all">
@@ -164,10 +220,54 @@ export default function RiskPage() {
                 <CardTitle className="text-3xl font-mono">{avgRiskScore.toFixed(1)}</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-xs text-muted-foreground">Across all assets</div>
+                <div className="text-xs text-muted-foreground">Out of 100 max</div>
               </CardContent>
             </Card>
           </div>
+
+          {/* Findings by Severity (if available) */}
+          {findingsBySeverity && Object.keys(findingsBySeverity).length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Security Findings Summary</CardTitle>
+                <CardDescription>Open security findings by severity</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex flex-wrap gap-4">
+                  {findingsBySeverity.critical > 0 && (
+                    <div className="flex items-center gap-2">
+                      <Badge variant="error">Critical</Badge>
+                      <span className="font-mono font-bold">{findingsBySeverity.critical}</span>
+                    </div>
+                  )}
+                  {findingsBySeverity.high > 0 && (
+                    <div className="flex items-center gap-2">
+                      <Badge variant="error">High</Badge>
+                      <span className="font-mono font-bold">{findingsBySeverity.high}</span>
+                    </div>
+                  )}
+                  {findingsBySeverity.medium > 0 && (
+                    <div className="flex items-center gap-2">
+                      <Badge variant="warning">Medium</Badge>
+                      <span className="font-mono font-bold">{findingsBySeverity.medium}</span>
+                    </div>
+                  )}
+                  {findingsBySeverity.low > 0 && (
+                    <div className="flex items-center gap-2">
+                      <Badge variant="info">Low</Badge>
+                      <span className="font-mono font-bold">{findingsBySeverity.low}</span>
+                    </div>
+                  )}
+                  {findingsBySeverity.info > 0 && (
+                    <div className="flex items-center gap-2">
+                      <Badge variant="secondary">Info</Badge>
+                      <span className="font-mono font-bold">{findingsBySeverity.info}</span>
+                    </div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
           {/* Risk Distribution Visualization */}
           <Card>
@@ -182,9 +282,9 @@ export default function RiskPage() {
                   { level: "High", count: highCount, color: "bg-orange-500", textColor: "text-orange-500" },
                   { level: "Medium", count: mediumCount, color: "bg-warning", textColor: "text-warning" },
                   { level: "Low", count: lowCount, color: "bg-info", textColor: "text-info" },
-                  { level: "Minimal", count: minimalCount, color: "bg-success", textColor: "text-success" },
+                  { level: "Info", count: infoCount, color: "bg-secondary", textColor: "text-secondary" },
                 ].map((item) => {
-                  const total = criticalCount + highCount + mediumCount + lowCount + minimalCount;
+                  const total = criticalCount + highCount + mediumCount + lowCount + infoCount;
                   const percentage = total > 0 ? (item.count / total) * 100 : 0;
                   return (
                     <div key={item.level} className="space-y-2">
@@ -322,7 +422,7 @@ export default function RiskPage() {
             <CardHeader>
               <CardTitle>All Assets Risk Status</CardTitle>
               <CardDescription>
-                Complete list of assets with their risk assessment ({assetsWithRisk.length} with scores, {assets.length - assetsWithRisk.length} pending)
+                Complete list of assets with their risk assessment ({assetsWithScores} with scores, {assetsPending} pending)
               </CardDescription>
             </CardHeader>
             <CardContent>

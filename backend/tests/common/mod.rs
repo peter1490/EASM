@@ -62,8 +62,12 @@ pub fn create_test_router(app_state: AppState) -> Router {
         .route("/api/scans/:scan_id/evidence", get(handlers::evidence_handlers::list_evidence_by_scan))
         .route("/api/evidence/:id", get(handlers::evidence_handlers::get_evidence))
         .route("/api/evidence/:id/download", get(handlers::evidence_handlers::download_evidence))
-        // Risk scoring endpoint
-        .route("/api/risk/calculate", get(handlers::risk_handlers::calculate_risk))
+        // Risk scoring endpoints
+        .route("/api/risk/assets/:id", get(handlers::risk_handlers::get_asset_risk))
+        .route("/api/risk/assets/:id/recalculate", post(handlers::risk_handlers::recalculate_asset_risk))
+        .route("/api/risk/overview", get(handlers::risk_handlers::get_risk_overview))
+        .route("/api/risk/recalculate-all", post(handlers::risk_handlers::recalculate_all_risks))
+        .route("/api/risk/high-risk-assets", get(handlers::risk_handlers::get_high_risk_assets))
         // Port drift detection endpoints
         .route("/api/scans/:id/drift/detect", post(handlers::drift_handlers::detect_port_drift))
         .route("/api/scans/:id/drift/findings", get(handlers::drift_handlers::get_drift_findings))

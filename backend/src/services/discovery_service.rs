@@ -690,12 +690,8 @@ impl DiscoveryService {
                             );
                             
                             // Determine parent_id based on asset type
-                            // If this asset is a Certificate, it should be the parent of the org
-                            let org_parent_id = if asset.asset_type == AssetType::Certificate {
-                                Some(asset.id)
-                            } else {
-                                None
-                            };
+                            // The source asset (Domain, IP, or Certificate) is the parent of the discovered organization
+                            let org_parent_id = Some(asset.id);
                             
                             // Create Organization Asset with proper lineage
                             // Adjust confidence based on pivot score and depth
@@ -816,8 +812,41 @@ impl DiscoveryService {
                         
                         if !visited_domains.contains(&top_domain) && !domain_queue.iter().any(|(d, _, _)| d == &top_domain) {
                             tracing::info!("New top domain found from org '{}': {} (depth {})", org_value, top_domain, depth + 1);
-                            // Parent is the organization
-                            domain_queue.push_back((top_domain, parent_id, depth + 1));
+                            
+                            // To ensure proper hierarchy (Org -> Top Domain -> Subdomains), we need to ensure
+                            // the top domain asset exists and use its ID as the parent for subsequent discovery.
+                            // If the top_domain is the same as the current asset, use the current asset's ID.
+                            // Otherwise, create/merge the top_domain asset.
+                            
+                            let domain_parent_id = if top_domain == domain {
+                                Some(asset.id)
+                            } else {
+                                // Create/merge the top domain asset
+                                let top_domain_asset = AssetCreate {
+                                    asset_type: AssetType::Domain,
+                                    identifier: top_domain.clone(),
+                                    confidence: asset.confidence, // Inherit confidence
+                                    sources: asset.sources.clone(),
+                                    metadata: json!({
+                                        "organization": org_value,
+                                        "discovery_method": "org_pivot_parent",
+                                        "derived_from": domain
+                                    }),
+                                    seed_id,
+                                    parent_id, // Parent is the Organization
+                                };
+                                
+                                match self.asset_repo.create_or_merge(&top_domain_asset).await {
+                                    Ok(a) => Some(a.id),
+                                    Err(e) => {
+                                        tracing::warn!("Failed to create top domain asset {}: {}", top_domain, e);
+                                        None
+                                    }
+                                }
+                            };
+                            
+                            // Push to queue with the Top Domain's ID as parent for its children
+                            domain_queue.push_back((top_domain, domain_parent_id, depth + 1));
                             domains_added += 1;
                         }
                     }
@@ -1143,6 +1172,15 @@ impl DiscoveryService {
                 for subdomain in &subdomain_result.subdomains {
                     let confidence = self.calculate_domain_confidence(subdomain, domain, &subdomain_result.sources);
                     
+                    // Prevent self-referencing cycles if the subdomain is the same as the search domain
+                    // If we pass the domain's own ID as parent_id (which happens during recursive discovery),
+                    // we must not assign it to the domain itself. Passing None to create_or_merge preserves existing parent.
+                    let effective_parent_id = if subdomain == domain {
+                        None
+                    } else {
+                        parent_id
+                    };
+
                     let asset_create = AssetCreate {
                         asset_type: AssetType::Domain,
                         identifier: subdomain.clone(),
@@ -1154,7 +1192,7 @@ impl DiscoveryService {
                             "sources": subdomain_result.sources
                         }),
                         seed_id,
-                        parent_id,
+                        parent_id: effective_parent_id,
                     };
                     
                     match self.asset_repo.create_or_merge(&asset_create).await {

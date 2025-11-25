@@ -515,10 +515,18 @@ mod tests {
             updated_at: Utc::now(),
             seed_id: None,
             parent_id: None,
+            // Lifecycle tracking
+            first_seen_at: Some(Utc::now()),
+            last_seen_at: Some(Utc::now()),
+            last_discovery_run_id: None,
+            status: "active".to_string(),
+            discovery_method: Some("test".to_string()),
+            // Risk related fields
             importance: 0,
             risk_score: None,
             risk_level: None,
             last_risk_run: None,
+            // Security scan tracking
             last_scan_id: None,
             last_scan_status: None,
             last_scanned_at: None,

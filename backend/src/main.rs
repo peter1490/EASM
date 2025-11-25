@@ -55,6 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/assets/:id", get(handlers::asset_handlers::get_asset))
         .route("/api/assets/:id/path", get(handlers::asset_handlers::get_asset_path))
         .route("/api/assets/:id/importance", patch(handlers::asset_handlers::update_asset_importance))
+        .route("/api/assets/:id/findings", get(handlers::security_handlers::get_asset_findings))
+        .route("/api/assets/:id/scan", post(handlers::security_handlers::trigger_asset_scan))
         // Seed endpoints
         .route("/api/seeds", post(handlers::asset_handlers::create_seed))
         .route("/api/seeds", get(handlers::asset_handlers::list_seeds))
@@ -63,6 +65,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/discovery/run", post(handlers::discovery_handlers::run_discovery))
         .route("/api/discovery/stop", post(handlers::discovery_handlers::stop_discovery))
         .route("/api/discovery/status", get(handlers::discovery_handlers::discovery_status))
+        .route("/api/discovery/runs", get(handlers::discovery_handlers::list_discovery_runs))
+        .route("/api/discovery/runs/:id", get(handlers::discovery_handlers::get_discovery_run))
         // Evidence endpoints
         .route("/api/scans/:scan_id/evidence", post(handlers::evidence_handlers::upload_evidence))
         .route("/api/scans/:scan_id/evidence", get(handlers::evidence_handlers::list_evidence_by_scan))
@@ -86,6 +90,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Finding filter endpoints
         .route("/api/findings/filter", get(handlers::finding_handlers::filter_findings))
         .route("/api/findings/types", get(handlers::finding_handlers::get_finding_types))
+        // Security scan endpoints
+        .route("/api/security/scans", post(handlers::security_handlers::create_security_scan))
+        .route("/api/security/scans", get(handlers::security_handlers::list_security_scans))
+        .route("/api/security/scans/pending", get(handlers::security_handlers::list_pending_scans))
+        .route("/api/security/scans/:id", get(handlers::security_handlers::get_security_scan))
+        .route("/api/security/scans/:id/cancel", post(handlers::security_handlers::cancel_security_scan))
+        .route("/api/security/findings", get(handlers::security_handlers::list_security_findings))
+        .route("/api/security/findings/:id", get(handlers::security_handlers::get_security_finding))
+        .route("/api/security/findings/:id", patch(handlers::security_handlers::update_security_finding))
+        .route("/api/security/findings/:id/resolve", post(handlers::security_handlers::resolve_security_finding))
+        .route("/api/security/findings/summary", get(handlers::security_handlers::get_findings_summary))
         // Metrics and performance endpoints
         .route("/api/metrics", get(handlers::metrics_handlers::get_metrics))
         .route("/api/metrics/report", get(handlers::metrics_handlers::get_performance_report))

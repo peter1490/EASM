@@ -234,6 +234,8 @@ impl ScanService {
             metadata,
             seed_id: None,
             parent_id: None, // Don't override existing parent_id (handled by create_or_merge)
+            discovery_run_id: None,
+            discovery_method: Some("scan".to_string()),
         };
         
         let created_asset = self.asset_repo.create_or_merge(&asset).await?;
@@ -670,6 +672,8 @@ impl ScanService {
             }),
             seed_id: None,
             parent_id,
+            discovery_run_id: None,
+            discovery_method: Some("scan".to_string()),
         };
         
         self.asset_repo.create_or_merge(&asset).await
@@ -686,6 +690,8 @@ impl ScanService {
             }),
             seed_id: None,
             parent_id,
+            discovery_run_id: None,
+            discovery_method: Some("scan".to_string()),
         };
         
         self.asset_repo.create_or_merge(&asset).await
@@ -701,6 +707,8 @@ impl ScanService {
                 metadata: cert_info.clone(),
                 seed_id: None,
                 parent_id,
+                discovery_run_id: None,
+                discovery_method: Some("tls_scan".to_string()),
             };
             
             self.asset_repo.create_or_merge(&asset).await?;

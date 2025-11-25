@@ -1,16 +1,41 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+//! Discovery Service
+//! 
+//! Handles asset discovery from seeds. This service is purely focused on 
+//! **discovering** assets (passive reconnaissance), not scanning them.
+//! 
+//! The discovery flow:
+//! 1. User triggers a discovery run
+//! 2. Seeds are loaded and queued for processing
+//! 3. Each seed type is processed using appropriate external services
+//! 4. Discovered assets are stored with proper lineage and sources
+//! 5. Relationships between assets are recorded
+//! 
+//! Security scanning is handled separately by SecurityScanService.
+
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use uuid::Uuid;
 use serde_json::json;
+use chrono::Utc;
 
 use crate::{
     config::Settings,
     error::ApiError,
-    models::{Asset, AssetCreate, AssetType, Seed, SeedCreate, SeedType},
-    repositories::{AssetRepository, SeedRepository},
+    models::{
+        Asset, AssetCreate, AssetType, Seed, SeedCreate, SeedType,
+        DiscoveryRun, DiscoveryRunCreate, DiscoveryConfig, DiscoveryResult,
+        DiscoveryQueueItemCreate, QueueItemType, QueueItemStatus,
+        AssetSourceCreate, SourceType, AssetRelationshipCreate, RelationshipType,
+        TriggerType,
+    },
+    repositories::{
+        AssetRepository, SeedRepository,
+        DiscoveryRunRepository, DiscoveryQueueRepository,
+        AssetSourceRepository, AssetRelationshipRepository,
+    },
     services::{
         external::{
             ExternalServicesManager, DnsResolver, HttpAnalyzer, ShodanExtractedAssets
@@ -21,233 +46,95 @@ use crate::{
     utils::network::expand_cidr,
 };
 
-use super::ScanService;
-use crate::models::ScanCreate;
-
-/// Common CDN, cloud provider, and hosting organizations that should be filtered
-/// to prevent excessive false-positives in recursive discovery
+/// Common CDN, cloud provider, and hosting organizations to filter
 static COMMON_INFRASTRUCTURE_ORGS: &[&str] = &[
-    // CDN Providers
     "cloudflare", "akamai", "fastly", "cloudfront", "amazon cloudfront",
     "stackpath", "keycdn", "bunnycdn", "maxcdn",
-    
-    // Cloud Providers
     "amazon", "aws", "google", "google cloud", "microsoft", "azure",
     "digitalocean", "linode", "vultr", "ovh", "hetzner", "scaleway",
-    
-    // Hosting Providers
     "godaddy", "namecheap", "bluehost", "hostgator", "dreamhost",
-    "1&1", "ionos", "rackspace", "liquidweb",
-    
-    // Certificate Authorities
     "let's encrypt", "digicert", "comodo", "sectigo", "globalsign",
-    "verisign", "thawte", "geotrust", "rapidssl", "godaddy.com",
-    
-    // CDN/WAF Services
     "incapsula", "imperva", "sucuri", "wordfence", "barracuda",
-    
-    // Generic/Common
     "domain administrator", "domain admin", "privacy", "whois privacy",
     "contact privacy", "private", "registration private", "proxy",
-    
-    // Too broad/generic
     "inc", "llc", "ltd", "corporation", "corp", "company", "co.",
 ];
 
-/// Domains/organizations that contain these keywords should be skipped
-static SKIP_ORG_KEYWORDS: &[&str] = &[
-    "sale", "force", "salesforce", "adobe", "oracle", "sap",
-    "marketo", "hubspot", "mailchimp", "sendgrid",
-];
-
-/// Tracking context for recursive discovery to enforce limits
-#[derive(Debug, Clone)]
-struct RecursiveContext {
-    /// Current depth in the recursion tree
-    depth: u32,
-    /// Total assets discovered so far
-    total_assets: usize,
-    /// Organizations processed per domain (to limit pivots)
-    orgs_per_domain: HashMap<String, u32>,
-    /// Domains processed per org (to limit pivots)  
-    domains_per_org: HashMap<String, u32>,
-}
-
-/// Discovery run status tracking
+/// Discovery run status tracking (in-memory for real-time updates)
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryStatus {
-    #[serde(default)]
     pub is_running: bool,
-    #[serde(default)]
+    pub run_id: Option<Uuid>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(default)]
     pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(default)]
+    pub current_phase: String,
+    pub seeds_total: usize,
     pub seeds_processed: usize,
-    #[serde(default)]
     pub assets_discovered: usize,
-    #[serde(default)]
+    pub assets_updated: usize,
+    pub queue_pending: usize,
     pub errors: Vec<String>,
-    #[serde(default)]
-    pub task_id: Option<Uuid>,
-}
-
-/// Asset discovery result with confidence scoring
-#[derive(Debug, Clone)]
-pub struct DiscoveryResult {
-    pub assets: Vec<Asset>,
-    pub confidence_scores: HashMap<String, f64>,
-    pub sources: HashMap<String, Vec<String>>,
 }
 
 pub struct DiscoveryService {
+    // Repositories
     asset_repo: Arc<dyn AssetRepository + Send + Sync>,
     seed_repo: Arc<dyn SeedRepository + Send + Sync>,
+    discovery_run_repo: Arc<dyn DiscoveryRunRepository + Send + Sync>,
+    discovery_queue_repo: Arc<dyn DiscoveryQueueRepository + Send + Sync>,
+    asset_source_repo: Arc<dyn AssetSourceRepository + Send + Sync>,
+    asset_relationship_repo: Arc<dyn AssetRelationshipRepository + Send + Sync>,
+    
+    // External services
     external_services: Arc<ExternalServicesManager>,
     dns_resolver: Arc<DnsResolver>,
     http_analyzer: Arc<HttpAnalyzer>,
+    
+    // Utilities
     task_manager: Arc<TaskManager>,
     settings: Arc<Settings>,
-    discovery_status: Arc<Mutex<DiscoveryStatus>>,
-    scan_service: Arc<ScanService>,
     confidence_scorer: Arc<ConfidenceScorer>,
+    
+    // State
+    status: Arc<Mutex<DiscoveryStatus>>,
 }
 
 impl DiscoveryService {
     pub fn new(
         asset_repo: Arc<dyn AssetRepository + Send + Sync>,
         seed_repo: Arc<dyn SeedRepository + Send + Sync>,
+        discovery_run_repo: Arc<dyn DiscoveryRunRepository + Send + Sync>,
+        discovery_queue_repo: Arc<dyn DiscoveryQueueRepository + Send + Sync>,
+        asset_source_repo: Arc<dyn AssetSourceRepository + Send + Sync>,
+        asset_relationship_repo: Arc<dyn AssetRelationshipRepository + Send + Sync>,
         external_services: Arc<ExternalServicesManager>,
         dns_resolver: Arc<DnsResolver>,
         http_analyzer: Arc<HttpAnalyzer>,
         task_manager: Arc<TaskManager>,
         settings: Arc<Settings>,
-        scan_service: Arc<ScanService>,
     ) -> Self {
         Self {
             asset_repo,
             seed_repo,
+            discovery_run_repo,
+            discovery_queue_repo,
+            asset_source_repo,
+            asset_relationship_repo,
             external_services,
             dns_resolver,
             http_analyzer,
             task_manager,
             settings,
-            discovery_status: Arc::new(Mutex::new(DiscoveryStatus::default())),
-            scan_service,
             confidence_scorer: Arc::new(ConfidenceScorer::new()),
+            status: Arc::new(Mutex::new(DiscoveryStatus::default())),
         }
-    }
-    
-    /// Check if an organization should be filtered out to reduce false-positives
-    /// Returns true if the org should be skipped
-    fn should_filter_organization(&self, org: &str) -> bool {
-        let org_lower = org.to_lowercase();
-        
-        // Skip if empty or too short
-        if org_lower.trim().is_empty() || org_lower.len() < 3 {
-            return true;
-        }
-        
-        // Check against skip keywords (known problematic orgs)
-        for keyword in SKIP_ORG_KEYWORDS {
-            if org_lower.contains(keyword) {
-                return true;
-            }
-        }
-        
-        // Check against common infrastructure organizations
-        for infra_org in COMMON_INFRASTRUCTURE_ORGS {
-            // Exact match or contains for common orgs
-            if org_lower == *infra_org || org_lower.contains(infra_org) {
-                tracing::debug!("Filtering common infrastructure org: {}", org);
-                return true;
-            }
-        }
-        
-        // Filter overly generic organization names
-        let generic_only = org_lower.chars()
-            .filter(|c| c.is_alphabetic())
-            .collect::<String>();
-            
-        if generic_only.len() <= 3 {
-            // Too short after removing non-alphabetic chars
-            return true;
-        }
-        
-        false
-    }
-    
-    /// Calculate pivot relationship strength score (0.0 - 1.0)
-    /// Higher score = stronger relationship = more likely to be legitimate pivot
-    fn calculate_pivot_score(&self, org: &str, from_domain: &str, cert_has_san: bool, multiple_sources: bool) -> f64 {
-        let mut score: f64 = 0.5; // Base score
-        
-        // Bonus for certificate with SAN (shows it's an active cert for multiple domains)
-        if cert_has_san {
-            score += 0.15;
-        }
-        
-        // Bonus for multiple sources confirming the relationship
-        if multiple_sources {
-            score += 0.2;
-        }
-        
-        // Check if org name is similar to domain
-        let org_lower = org.to_lowercase();
-        let domain_parts: Vec<&str> = from_domain.split('.').collect();
-        
-        // Check if org contains domain name parts
-        if domain_parts.len() >= 2 {
-            let domain_base = domain_parts[domain_parts.len() - 2];
-            if org_lower.contains(domain_base) {
-                score += 0.15; // Strong signal that they're related
-            }
-        }
-        
-        // Penalty for very generic org names
-        if org.len() < 5 {
-            score -= 0.2;
-        }
-        
-        // Penalty if org is in common infrastructure list
-        if self.should_filter_organization(org) {
-            score -= 0.5; // Heavy penalty
-        }
-        
-        score.clamp(0.0, 1.0)
-    }
-    
-    /// Check if we should continue recursive discovery based on context and limits
-    fn should_continue_recursion(&self, ctx: &RecursiveContext) -> bool {
-        // Check depth limit
-        if ctx.depth >= self.settings.max_discovery_depth {
-            tracing::info!("Stopping recursion: reached max depth {} / {}", ctx.depth, self.settings.max_discovery_depth);
-            return false;
-        }
-        
-        // Check asset count limit
-        if ctx.total_assets >= self.settings.max_assets_per_discovery as usize {
-            tracing::info!("Stopping recursion: reached max assets {} / {}", ctx.total_assets, self.settings.max_assets_per_discovery);
-            return false;
-        }
-        
-        true
-    }
-    
-    /// Check if we can add another org pivot from a domain
-    fn can_add_org_pivot(&self, ctx: &RecursiveContext, domain: &str) -> bool {
-        let count = ctx.orgs_per_domain.get(domain).unwrap_or(&0);
-        *count < self.settings.max_orgs_per_domain
-    }
-    
-    /// Check if we can add another domain pivot from an org
-    fn can_add_domain_pivot(&self, ctx: &RecursiveContext, org: &str) -> bool {
-        let count = ctx.domains_per_org.get(org).unwrap_or(&0);
-        *count < self.settings.max_domains_per_org
     }
 
+    // ========================================================================
+    // SEED MANAGEMENT
+    // ========================================================================
+
     pub async fn create_seed(&self, seed_create: SeedCreate) -> Result<Seed, ApiError> {
-        // Validate seed based on type
         self.validate_seed(&seed_create)?;
         self.seed_repo.create(&seed_create).await
     }
@@ -260,1667 +147,6 @@ impl DiscoveryService {
         self.seed_repo.delete(*id).await
     }
 
-    pub async fn list_assets(
-        &self,
-        confidence_threshold: Option<f64>,
-        limit: Option<i64>,
-        offset: Option<i64>,
-    ) -> Result<Vec<Asset>, ApiError> {
-        self.asset_repo.list(confidence_threshold, limit, offset).await
-    }
-
-    pub async fn count_assets(
-        &self,
-        confidence_threshold: Option<f64>,
-    ) -> Result<i64, ApiError> {
-        self.asset_repo.count(confidence_threshold).await
-    }
-
-    pub async fn get_asset(&self, id: &Uuid) -> Result<Option<Asset>, ApiError> {
-        self.asset_repo.get_by_id(id).await
-    }
-
-    pub async fn get_asset_path(&self, id: &Uuid) -> Result<Vec<Asset>, ApiError> {
-        self.asset_repo.get_path(id).await
-    }
-
-    pub async fn create_or_merge_asset(&self, asset_create: AssetCreate) -> Result<Asset, ApiError> {
-        self.asset_repo.create_or_merge(&asset_create).await
-    }
-    
-    /// Update asset confidence based on scan results
-    /// This should be called after a scan completes to adjust confidence based on validation
-    pub async fn update_asset_confidence_from_scan(
-        &self,
-        asset_id: &Uuid,
-        scan_successful: bool,
-    ) -> Result<Asset, ApiError> {
-        // Get current asset
-        let asset = self.asset_repo.get_by_id(asset_id).await?
-            .ok_or_else(|| ApiError::NotFound("Asset not found".to_string()))?;
-        
-        // Calculate new confidence using the confidence scorer
-        let new_confidence = self.confidence_scorer.update_confidence_from_scan(
-            asset.confidence,
-            scan_successful,
-            asset.created_at,
-        );
-        
-        // Update the asset
-        self.asset_repo.update_confidence(asset_id, new_confidence).await
-    }
-
-    /// Get current discovery status
-    pub async fn get_discovery_status(&self) -> DiscoveryStatus {
-        self.discovery_status.lock().await.clone()
-    }
-
-    /// Run comprehensive asset discovery based on all seeds
-    pub async fn run_discovery(&self, confidence_threshold: Option<f64>) -> Result<(), ApiError> {
-        // Check if discovery is already running
-        {
-            let mut status = self.discovery_status.lock().await;
-            if status.is_running {
-                return Err(ApiError::Validation("Discovery is already running".to_string()));
-            }
-            
-            // Reset and start discovery
-            *status = DiscoveryStatus {
-                is_running: true,
-                started_at: Some(chrono::Utc::now()),
-                ..Default::default()
-            };
-        }
-
-        // Submit discovery task to TaskManager
-        let discovery_service = self.clone();
-        let task_metadata = json!({
-            "discovery_type": "comprehensive",
-            "started_at": chrono::Utc::now()
-        });
-        
-        let task_id = self.task_manager.submit_task(
-            TaskType::Discovery,
-            task_metadata,
-            move |ctx| {
-                let discovery_service = discovery_service.clone();
-                Box::pin(async move {
-                    discovery_service.run_discovery_with_context(ctx, confidence_threshold).await
-                })
-            }
-        ).await?;
-
-        // Update status with task_id
-        {
-            let mut status = self.discovery_status.lock().await;
-            status.task_id = Some(task_id);
-        }
-
-        Ok(())
-    }
-
-    /// Stop the running discovery task
-    pub async fn stop_discovery(&self) -> Result<(), ApiError> {
-        let task_id = {
-            let status = self.discovery_status.lock().await;
-            if !status.is_running {
-                return Err(ApiError::Validation("Discovery is not running".to_string()));
-            }
-            status.task_id
-        };
-
-        if let Some(id) = task_id {
-            self.task_manager.cancel_task(id).await?;
-            
-            // Update status immediately
-            let mut status = self.discovery_status.lock().await;
-            status.is_running = false;
-            status.completed_at = Some(chrono::Utc::now());
-            status.errors.push("Discovery stopped by user".to_string());
-        }
-
-        Ok(())
-    }
-
-    /// Discovery processing with task context
-    async fn run_discovery_with_context(&self, ctx: TaskContext, confidence_threshold: Option<f64>) -> Result<(), ApiError> {
-        tracing::info!("Starting comprehensive asset discovery with task context");
-        
-        // Ensure status is always reset, even on error
-        let result = self.run_discovery_internal(&ctx, confidence_threshold).await;
-        
-        // Mark discovery as completed (whether success or failure)
-        {
-            let mut status = self.discovery_status.lock().await;
-            status.is_running = false;
-            status.completed_at = Some(chrono::Utc::now());
-            
-            // Add error if failed
-            if let Err(ref e) = result {
-                status.errors.push(format!("Discovery failed: {}", e));
-            }
-        }
-        
-        result
-    }
-
-    /// Internal discovery implementation
-    async fn run_discovery_internal(&self, ctx: &TaskContext, confidence_threshold: Option<f64>) -> Result<(), ApiError> {
-        let seeds = self.seed_repo.list().await?;
-        let mut total_assets_discovered = 0;
-        let mut processed_seeds = 0;
-
-        ctx.update_progress(0.1, Some(format!("Found {} seeds to process", seeds.len()))).await?;
-
-        // Process seeds with concurrency control
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(self.settings.max_concurrent_scans as usize));
-        let mut tasks = Vec::new();
-        let total_seeds = seeds.len();
-
-        for (i, seed) in seeds.iter().enumerate() {
-            ctx.check_cancellation().await?;
-            
-            let discovery_service = self.clone();
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
-            let seed = seed.clone();
-            
-            let task = tokio::spawn(async move {
-                let _permit = permit;
-                discovery_service.process_seed(&seed, confidence_threshold).await
-            });
-            
-            tasks.push(task);
-            
-            // Update progress for task submission
-            let submission_progress = 0.1 + ((i as f32) / (total_seeds as f32)) * 0.2;
-            ctx.update_progress(submission_progress, Some(format!("Submitted {} of {} seed processing tasks", i + 1, total_seeds))).await?;
-        }
-
-        // Wait for all seed processing to complete
-        for (i, task) in tasks.into_iter().enumerate() {
-            ctx.check_cancellation().await?;
-            
-            match task.await {
-                Ok(Ok(result)) => {
-                    total_assets_discovered += result.assets.len();
-                    processed_seeds += 1;
-                    
-                    // Update status
-                    {
-                        let mut status = self.discovery_status.lock().await;
-                        status.seeds_processed = processed_seeds;
-                        status.assets_discovered = total_assets_discovered;
-                    }
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!("Seed processing failed: {}", e);
-                    let mut status = self.discovery_status.lock().await;
-                    status.errors.push(e.to_string());
-                }
-                Err(e) => {
-                    tracing::error!("Seed processing task failed: {}", e);
-                    let mut status = self.discovery_status.lock().await;
-                    status.errors.push(format!("Task error: {}", e));
-                }
-            }
-            
-            // Update progress for completed tasks
-            let completion_progress = 0.3 + ((i as f32) / (total_seeds as f32)) * 0.6;
-            ctx.update_progress(completion_progress, Some(format!("Completed {} of {} seed processing tasks", i + 1, total_seeds))).await?;
-        }
-
-        ctx.update_progress(0.95, Some("Finalizing discovery".to_string())).await?;
-
-        tracing::info!(
-            "Discovery completed: {} seeds processed, {} assets discovered",
-            processed_seeds,
-            total_assets_discovered
-        );
-
-        Ok(())
-    }
-
-
-
-    /// Process a single seed for asset discovery
-    async fn process_seed(&self, seed: &Seed, confidence_threshold: Option<f64>) -> Result<DiscoveryResult, ApiError> {
-        tracing::info!("Processing seed: {} ({})", seed.value, seed.seed_type);
-        
-        let timeout_duration = Duration::from_secs_f64(self.settings.subdomain_enum_timeout * 1440.0); // 1440 = 24 hours
-        
-        // Create root asset for the seed to establish lineage
-        let root_asset_type = match seed.seed_type {
-            SeedType::Domain => AssetType::Domain,
-            SeedType::Organization => AssetType::Organization,
-            SeedType::Asn => AssetType::Asn,
-            SeedType::Cidr => AssetType::Ip, // CIDR usually resolves to IPs, but we might want a CIDR type later. For now keep as is or map to what fits.
-            SeedType::Keyword => AssetType::Domain, // Keywords usually find domains
-        };
-
-        // For CIDR and Keyword we might not want a root asset if they don't map 1:1 to an asset type
-        // But for Domain, Org, ASN we definitely do.
-        let root_asset_id = if matches!(seed.seed_type, SeedType::Domain | SeedType::Organization | SeedType::Asn) {
-            let root_asset = AssetCreate {
-                asset_type: root_asset_type,
-                identifier: seed.value.clone(),
-                confidence: 1.0,
-                sources: json!(["seed"]),
-                metadata: json!({"seed_type": seed.seed_type}),
-                seed_id: Some(seed.id),
-                parent_id: None,
-            };
-            match self.asset_repo.create_or_merge(&root_asset).await {
-                Ok(asset) => Some(asset.id),
-                Err(e) => {
-                    tracing::error!("Failed to create root asset for seed {}: {}", seed.value, e);
-                    return Err(e);
-                }
-            }
-        } else {
-            None
-        };
-
-        let result = timeout(timeout_duration, async {
-            match seed.seed_type {
-                SeedType::Domain => self.discover_from_domain_recursive(&seed.value, confidence_threshold, Some(seed.id), root_asset_id).await,
-                SeedType::Organization => self.discover_from_organization_recursive(&seed.value, confidence_threshold, Some(seed.id), root_asset_id).await,
-                SeedType::Asn => self.discover_from_asn(&seed.value, Some(seed.id), root_asset_id).await,
-                SeedType::Cidr => self.discover_from_cidr(&seed.value, Some(seed.id), root_asset_id).await,
-                SeedType::Keyword => self.discover_from_keyword(&seed.value, Some(seed.id), root_asset_id).await,
-            }
-        }).await;
-
-        match result {
-            Ok(discovery_result) => {
-                match discovery_result {
-                    Ok(result) => {
-                        // Asset creation is now handled in the discovery functions
-                        // Store discovered assets and trigger scans for non-recursive seed types
-                        // Domain and Organization seeds handle saving and scanning internally during recursion
-                        if !matches!(seed.seed_type, SeedType::Domain | SeedType::Organization) {
-                            for asset in &result.assets {
-                                // Check if we should trigger a scan
-                                if let Some(threshold) = confidence_threshold {
-                                    if asset.confidence >= threshold {
-                                        // Only scan domains and IPs
-                                        if matches!(asset.asset_type, AssetType::Domain | AssetType::Ip) {
-                                            let scan_create = ScanCreate {
-                                                target: asset.identifier.clone(),
-                                                note: Some(format!("Auto-scan triggered by discovery (confidence: {:.2})", asset.confidence)),
-                                            };
-                                            
-                                            match self.scan_service.create_scan(scan_create).await {
-                                                Ok(scan) => tracing::info!("Triggered auto-scan {} for discovered asset {}", scan.id, asset.identifier),
-                                                Err(e) => tracing::warn!("Failed to trigger auto-scan for {}: {}", asset.identifier, e),
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        
-                        Ok(result)
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            Err(_) => {
-                Err(ApiError::ExternalService(format!(
-                    "Seed processing timeout for {} ({})",
-                    seed.value, seed.seed_type
-                )))
-            }
-        }
-    }
-
-    /// Recursively discover assets starting from a domain by pivoting on certificate organizations
-    async fn discover_from_domain_recursive(&self, root_domain: &str, confidence_threshold: Option<f64>, seed_id: Option<Uuid>, root_parent_id: Option<Uuid>) -> Result<DiscoveryResult, ApiError> {
-        let mut all_assets: Vec<Asset> = Vec::new();
-        let mut all_confidence: HashMap<String, f64> = HashMap::new();
-        let mut all_sources: HashMap<String, Vec<String>> = HashMap::new();
-
-        let mut visited_domains: HashSet<String> = HashSet::new();
-        let mut visited_orgs: HashSet<String> = HashSet::new();
-
-        // Initialize recursive context for tracking limits
-        let mut context = RecursiveContext {
-            depth: 0,
-            total_assets: 0,
-            orgs_per_domain: HashMap::new(),
-            domains_per_org: HashMap::new(),
-        };
-
-        let mut domain_queue: VecDeque<(String, Option<Uuid>, u32)> = VecDeque::new(); // Added depth tracking
-        let mut org_queue: VecDeque<(String, Option<Uuid>, u32)> = VecDeque::new(); // Added depth tracking
-        domain_queue.push_back((root_domain.to_string(), root_parent_id, 0));
-
-        loop {
-            // Check if we should continue recursion
-            if !self.should_continue_recursion(&context) {
-                tracing::info!("Stopping domain recursion at depth {}, {} assets discovered", context.depth, context.total_assets);
-                break;
-            }
-
-            if let Some((domain_value, parent_id, depth)) = domain_queue.pop_front() {
-                if !visited_domains.insert(domain_value.clone()) { continue; }
-
-                // Update context depth
-                context.depth = depth;
-                
-                tracing::debug!("Processing domain '{}' at depth {}", domain_value, depth);
-
-                // Discover from domain
-                let result = self.discover_from_domain(&domain_value, seed_id, parent_id).await?;
-                
-                // Assets are already saved by discover_from_domain
-                for asset in &result.assets {
-                    tracing::debug!("Discovered {:?} asset: {}", asset.asset_type, asset.identifier);
-                    
-                    // Check if we should trigger a scan
-                    if let Some(threshold) = confidence_threshold {
-                        if asset.confidence >= threshold {
-                            // Only scan domains and IPs
-                            if matches!(asset.asset_type, AssetType::Domain | AssetType::Ip) {
-                                let scan_create = ScanCreate {
-                                    target: asset.identifier.clone(),
-                                    note: Some(format!("Auto-scan triggered by discovery (confidence: {:.2})", asset.confidence)),
-                                };
-                                
-                                match self.scan_service.create_scan(scan_create).await {
-                                    Ok(scan) => tracing::info!("Triggered auto-scan {} for discovered asset {}", scan.id, asset.identifier),
-                                    Err(e) => tracing::warn!("Failed to trigger auto-scan for {}: {}", asset.identifier, e),
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Update asset count in context
-                context.total_assets += result.assets.len();
-
-                // Merge assets and extract organization pivots
-                for asset in &result.assets {
-                    all_assets.push(asset.clone());
-
-                    // Extract organization from certificate metadata for pivoting
-                    if let Some(org) = asset.metadata.get("organization").and_then(|v| v.as_str()) {
-                        let org_trimmed = org.trim();
-                        
-                        // Apply organization filtering
-                        if self.should_filter_organization(org_trimmed) {
-                            tracing::debug!("Filtered organization: {} (from domain: {})", org_trimmed, domain_value);
-                            continue;
-                        }
-                        
-                        if !org_trimmed.is_empty() && !visited_orgs.contains(org_trimmed) {
-                            // Check if we can add more org pivots from this domain
-                            if !self.can_add_org_pivot(&context, &domain_value) {
-                                tracing::debug!("Skipping org '{}': max orgs per domain reached for '{}'", org_trimmed, domain_value);
-                                continue;
-                            }
-                            
-                            // Calculate pivot score to determine if relationship is strong enough
-                            let cert_has_san = asset.metadata.get("san_domains")
-                                .and_then(|v| v.as_array())
-                                .map(|arr| arr.len() > 1)
-                                .unwrap_or(false);
-                            let multiple_sources = asset.sources.as_array()
-                                .map(|arr| arr.len() > 1)
-                                .unwrap_or(false);
-                            
-                            let pivot_score = self.calculate_pivot_score(
-                                org_trimmed, 
-                                &domain_value, 
-                                cert_has_san, 
-                                multiple_sources
-                            );
-                            
-                            // Only pivot if score is high enough (above min_pivot_confidence)
-                            if pivot_score < self.settings.min_pivot_confidence {
-                                tracing::debug!(
-                                    "Skipping weak pivot to org '{}' (score: {:.2}, threshold: {:.2})",
-                                    org_trimmed, pivot_score, self.settings.min_pivot_confidence
-                                );
-                                continue;
-                            }
-                            
-                            tracing::info!(
-                                "Following strong pivot to org '{}' (score: {:.2}) from domain '{}' at depth {}",
-                                org_trimmed, pivot_score, domain_value, depth
-                            );
-                            
-                            // Determine parent_id based on asset type
-                            // The source asset (Domain, IP, or Certificate) is the parent of the discovered organization
-                            let org_parent_id = Some(asset.id);
-                            
-                            // Create Organization Asset with proper lineage
-                            // Adjust confidence based on pivot score and depth
-                            let base_confidence = MethodConfidence::TLS_CERT_WITH_ORG.base * pivot_score;
-                            let org_confidence = {
-                                let factors = ConfidenceFactors {
-                                    base_confidence,
-                                    sources: vec!["certificate_pivot".to_string()],
-                                    distance_from_seed: (depth + 1) as usize,
-                                    ..Default::default()
-                                };
-                                self.confidence_scorer.calculate_confidence(&factors)
-                            };
-                            
-                            // Only create org asset if confidence is above threshold
-                            if org_confidence < self.settings.min_pivot_confidence {
-                                tracing::debug!(
-                                    "Skipping org '{}' due to low confidence: {:.2}",
-                                    org_trimmed, org_confidence
-                                );
-                                continue;
-                            }
-                            
-                            let org_asset = AssetCreate {
-                                asset_type: AssetType::Organization,
-                                identifier: org_trimmed.to_string(),
-                                confidence: org_confidence,
-                                sources: json!(["certificate_pivot"]),
-                                metadata: json!({
-                                    "source_domain": domain_value, 
-                                    "source_asset_type": format!("{:?}", asset.asset_type),
-                                    "pivot_score": pivot_score,
-                                    "discovery_depth": depth + 1
-                                }),
-                                seed_id,
-                                parent_id: org_parent_id,
-                            };
-                            
-                            // Create the organization asset and get its ID for the queue
-                            let org_id = match self.asset_repo.create_or_merge(&org_asset).await {
-                                Ok(a) => Some(a.id),
-                                Err(e) => {
-                                    tracing::warn!("Failed to create organization asset {}: {}", org_trimmed, e);
-                                    None
-                                }
-                            };
-
-                            if !org_queue.iter().any(|(o, _, _)| o == org_trimmed) {
-                                // Increment org pivot count for this domain
-                                *context.orgs_per_domain.entry(domain_value.clone()).or_insert(0) += 1;
-                                org_queue.push_back((org_trimmed.to_string(), org_id, depth + 1));
-                            }
-                        }
-                    }
-                }
-                for (k, v) in result.confidence_scores {
-                    match all_confidence.get_mut(&k) {
-                        Some(existing) => { if v > *existing { *existing = v; } }
-                        None => { all_confidence.insert(k, v); }
-                    }
-                }
-                for (k, mut v) in result.sources {
-                    all_sources.entry(k).and_modify(|existing| {
-                        for src in &v { if !existing.contains(src) { existing.push(src.clone()); } }
-                    }).or_insert_with(|| { v.sort(); v.dedup(); v });
-                }
-            } else if let Some((org_value, parent_id, depth)) = org_queue.pop_front() {
-                // Organization pivot
-                if !visited_orgs.insert(org_value.clone()) { continue; }
-
-                // Update context depth
-                context.depth = depth;
-                
-                tracing::debug!("Processing organization '{}' at depth {}", org_value, depth);
-
-                // Double-check filtering (should have been done earlier, but defensive check)
-                if self.should_filter_organization(&org_value) {
-                    tracing::debug!("Skipping filtered organization: {}", org_value);
-                    continue;
-                }
-
-                let result = self.discover_from_organization(&org_value, seed_id, parent_id).await?;
-
-                // Update asset count
-                context.total_assets += result.assets.len();
-
-                // Merge
-                let mut domains_added = 0u32;
-                for asset in &result.assets {
-                    // Queue newly found domains for further exploration
-                    if asset.asset_type == AssetType::Domain {
-                        let domain = asset.identifier.clone();
-                        let mut top_domain = String::new();
-
-                        // extract top domain and add to queue
-                        let parts: Vec<&str> = domain.split('.').collect();
-
-                        if parts.len() >= 2 {
-                            top_domain.push_str(format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]).as_str());
-                        }else{
-                            top_domain.push_str(domain.as_str());
-                        }
-                        
-                        // Check if we can add more domain pivots from this org
-                        if !self.can_add_domain_pivot(&context, &org_value) {
-                            tracing::debug!("Skipping domain '{}': max domains per org reached for '{}'", top_domain, org_value);
-                            continue;
-                        }
-                        
-                        // Check confidence threshold
-                        if asset.confidence < self.settings.min_pivot_confidence {
-                            tracing::debug!(
-                                "Skipping low confidence domain '{}' (confidence: {:.2}, threshold: {:.2})",
-                                top_domain, asset.confidence, self.settings.min_pivot_confidence
-                            );
-                            continue;
-                        }
-                        
-                        if !visited_domains.contains(&top_domain) && !domain_queue.iter().any(|(d, _, _)| d == &top_domain) {
-                            tracing::info!("New top domain found from org '{}': {} (depth {})", org_value, top_domain, depth + 1);
-                            
-                            // To ensure proper hierarchy (Org -> Top Domain -> Subdomains), we need to ensure
-                            // the top domain asset exists and use its ID as the parent for subsequent discovery.
-                            // If the top_domain is the same as the current asset, use the current asset's ID.
-                            // Otherwise, create/merge the top_domain asset.
-                            
-                            let domain_parent_id = if top_domain == domain {
-                                Some(asset.id)
-                            } else {
-                                // Create/merge the top domain asset
-                                let top_domain_asset = AssetCreate {
-                                    asset_type: AssetType::Domain,
-                                    identifier: top_domain.clone(),
-                                    confidence: asset.confidence, // Inherit confidence
-                                    sources: asset.sources.clone(),
-                                    metadata: json!({
-                                        "organization": org_value,
-                                        "discovery_method": "org_pivot_parent",
-                                        "derived_from": domain
-                                    }),
-                                    seed_id,
-                                    parent_id, // Parent is the Organization
-                                };
-                                
-                                match self.asset_repo.create_or_merge(&top_domain_asset).await {
-                                    Ok(a) => Some(a.id),
-                                    Err(e) => {
-                                        tracing::warn!("Failed to create top domain asset {}: {}", top_domain, e);
-                                        None
-                                    }
-                                }
-                            };
-                            
-                            // Push to queue with the Top Domain's ID as parent for its children
-                            domain_queue.push_back((top_domain, domain_parent_id, depth + 1));
-                            domains_added += 1;
-                        }
-                    }
-                    all_assets.push(asset.clone());
-                }
-                
-                // Update domain pivot count for this org
-                if domains_added > 0 {
-                    *context.domains_per_org.entry(org_value.clone()).or_insert(0) += domains_added;
-                }
-                for (k, v) in result.confidence_scores {
-                    match all_confidence.get_mut(&k) {
-                        Some(existing) => { if v > *existing { *existing = v; } }
-                        None => { all_confidence.insert(k, v); }
-                    }
-                }
-                for (k, mut v) in result.sources {
-                    all_sources.entry(k).and_modify(|existing| {
-                        for src in &v { if !existing.contains(src) { existing.push(src.clone()); } }
-                    }).or_insert_with(|| { v.sort(); v.dedup(); v });
-                }
-            } else {
-                break;
-            }
-        }
-
-        Ok(DiscoveryResult {
-            assets: all_assets,
-            confidence_scores: all_confidence,
-            sources: all_sources,
-        })
-    }
-
-    /// Recursively discover assets starting from an organization by pivoting to domains then back to organizations
-    async fn discover_from_organization_recursive(&self, root_org: &str, confidence_threshold: Option<f64>, seed_id: Option<Uuid>, root_parent_id: Option<Uuid>) -> Result<DiscoveryResult, ApiError> {
-        let mut all_assets: Vec<Asset> = Vec::new();
-        let mut all_confidence: HashMap<String, f64> = HashMap::new();
-        let mut all_sources: HashMap<String, Vec<String>> = HashMap::new();
-
-        let mut visited_domains: HashSet<String> = HashSet::new();
-        let mut visited_orgs: HashSet<String> = HashSet::new();
-
-        // Initialize recursive context for tracking limits
-        let mut context = RecursiveContext {
-            depth: 0,
-            total_assets: 0,
-            orgs_per_domain: HashMap::new(),
-            domains_per_org: HashMap::new(),
-        };
-
-        let mut domain_queue: VecDeque<(String, Option<Uuid>, u32)> = VecDeque::new(); // Added depth tracking
-        let mut org_queue: VecDeque<(String, Option<Uuid>, u32)> = VecDeque::new(); // Added depth tracking
-        org_queue.push_back((root_org.to_string(), root_parent_id, 0));
-
-        loop {
-            // Check if we should continue recursion
-            if !self.should_continue_recursion(&context) {
-                tracing::info!("Stopping organization recursion at depth {}, {} assets discovered", context.depth, context.total_assets);
-                break;
-            }
-
-            if let Some((domain_value, parent_id, depth)) = domain_queue.pop_front() {
-                if !visited_domains.insert(domain_value.clone()) { continue; }
-
-                // Update context depth
-                context.depth = depth;
-                
-                tracing::debug!("Processing domain '{}' at depth {} (from org recursion)", domain_value, depth);
-
-                let result = self.discover_from_domain(&domain_value, seed_id, parent_id).await?;
-
-                // Update asset count
-                context.total_assets += result.assets.len();
-
-                // Assets are already saved
-                for asset in &result.assets {
-                    // Check if we should trigger a scan
-                    if let Some(threshold) = confidence_threshold {
-                        if asset.confidence >= threshold {
-                            // Only scan domains and IPs
-                            if matches!(asset.asset_type, AssetType::Domain | AssetType::Ip) {
-                                let scan_create = ScanCreate {
-                                    target: asset.identifier.clone(),
-                                    note: Some(format!("Auto-scan triggered by discovery (confidence: {:.2})", asset.confidence)),
-                                };
-                                
-                                match self.scan_service.create_scan(scan_create).await {
-                                    Ok(scan) => tracing::info!("Triggered auto-scan {} for discovered asset {}", scan.id, asset.identifier),
-                                    Err(e) => tracing::warn!("Failed to trigger auto-scan for {}: {}", asset.identifier, e),
-                                }
-                            }
-                        }
-                    }
-
-                    all_assets.push(asset.clone());
-                    
-                    // Extract organization from certificate metadata for pivoting
-                    if let Some(org) = asset.metadata.get("organization").and_then(|v| v.as_str()) {
-                        let org_trimmed = org.trim();
-                        
-                        // Apply organization filtering
-                        if self.should_filter_organization(org_trimmed) {
-                            tracing::debug!("Filtered organization: {} (from domain: {})", org_trimmed, domain_value);
-                            continue;
-                        }
-                        
-                        if !org_trimmed.is_empty() && !visited_orgs.contains(org_trimmed) && !org_queue.iter().any(|(o, _, _)| o == org_trimmed) {
-                            // Check if we can add more org pivots from this domain
-                            if !self.can_add_org_pivot(&context, &domain_value) {
-                                tracing::debug!("Skipping org '{}': max orgs per domain reached for '{}'", org_trimmed, domain_value);
-                                continue;
-                            }
-                            
-                            // Calculate pivot score
-                            let cert_has_san = asset.metadata.get("san_domains")
-                                .and_then(|v| v.as_array())
-                                .map(|arr| arr.len() > 1)
-                                .unwrap_or(false);
-                            let multiple_sources = asset.sources.as_array()
-                                .map(|arr| arr.len() > 1)
-                                .unwrap_or(false);
-                            
-                            let pivot_score = self.calculate_pivot_score(
-                                org_trimmed, 
-                                &domain_value, 
-                                cert_has_san, 
-                                multiple_sources
-                            );
-                            
-                            // Only pivot if score is high enough
-                            if pivot_score < self.settings.min_pivot_confidence {
-                                tracing::debug!(
-                                    "Skipping weak pivot to org '{}' (score: {:.2}, threshold: {:.2})",
-                                    org_trimmed, pivot_score, self.settings.min_pivot_confidence
-                                );
-                                continue;
-                            }
-                            
-                            tracing::info!(
-                                "Following strong pivot to org '{}' (score: {:.2}) from domain '{}' at depth {}",
-                                org_trimmed, pivot_score, domain_value, depth
-                            );
-                            
-                            // Determine parent_id based on asset type
-                            let org_parent_id = if asset.asset_type == AssetType::Certificate {
-                                Some(asset.id)
-                            } else {
-                                None
-                            };
-                            
-                            // Create Organization asset with proper lineage
-                            let base_confidence = MethodConfidence::TLS_CERT_WITH_ORG.base * pivot_score;
-                            let org_confidence = {
-                                let factors = ConfidenceFactors {
-                                    base_confidence,
-                                    sources: vec!["certificate_pivot".to_string()],
-                                    distance_from_seed: (depth + 1) as usize,
-                                    ..Default::default()
-                                };
-                                self.confidence_scorer.calculate_confidence(&factors)
-                            };
-                            
-                            // Only create org asset if confidence is above threshold
-                            if org_confidence < self.settings.min_pivot_confidence {
-                                tracing::debug!(
-                                    "Skipping org '{}' due to low confidence: {:.2}",
-                                    org_trimmed, org_confidence
-                                );
-                                continue;
-                            }
-                            
-                            let org_asset = AssetCreate {
-                                asset_type: AssetType::Organization,
-                                identifier: org_trimmed.to_string(),
-                                confidence: org_confidence,
-                                sources: json!(["certificate_pivot"]),
-                                metadata: json!({
-                                    "source_domain": domain_value, 
-                                    "source_asset_type": format!("{:?}", asset.asset_type),
-                                    "pivot_score": pivot_score,
-                                    "discovery_depth": depth + 1
-                                }),
-                                seed_id,
-                                parent_id: org_parent_id,
-                            };
-                            let org_id = match self.asset_repo.create_or_merge(&org_asset).await {
-                                Ok(a) => Some(a.id),
-                                Err(e) => {
-                                    tracing::warn!("Failed to create organization asset {}: {}", org_trimmed, e);
-                                    None
-                                }
-                            };
-                            
-                            // Increment org pivot count for this domain
-                            *context.orgs_per_domain.entry(domain_value.clone()).or_insert(0) += 1;
-                            org_queue.push_back((org_trimmed.to_string(), org_id, depth + 1));
-                        }
-                    }
-                }
-            } else if let Some((org_value, parent_id, depth)) = org_queue.pop_front() {
-                if !visited_orgs.insert(org_value.clone()) { continue; }
-
-                // Update context depth
-                context.depth = depth;
-                
-                tracing::debug!("Processing organization '{}' at depth {} (from org recursion)", org_value, depth);
-
-                // Double-check filtering
-                if self.should_filter_organization(&org_value) {
-                    tracing::debug!("Skipping filtered organization: {}", org_value);
-                    continue;
-                }
-
-                let result = self.discover_from_organization(&org_value, seed_id, parent_id).await?;
-
-                // Update asset count
-                context.total_assets += result.assets.len();
-
-                let mut domains_added = 0u32;
-                for asset in &result.assets {
-                    // Check if we should trigger a scan
-                    if let Some(threshold) = confidence_threshold {
-                        if asset.confidence >= threshold {
-                            // Only scan domains and IPs
-                            if matches!(asset.asset_type, AssetType::Domain | AssetType::Ip) {
-                                let scan_create = ScanCreate {
-                                    target: asset.identifier.clone(),
-                                    note: Some(format!("Auto-scan triggered by discovery (confidence: {:.2})", asset.confidence)),
-                                };
-                                
-                                match self.scan_service.create_scan(scan_create).await {
-                                    Ok(scan) => tracing::info!("Triggered auto-scan {} for discovered asset {}", scan.id, asset.identifier),
-                                    Err(e) => tracing::warn!("Failed to trigger auto-scan for {}: {}", asset.identifier, e),
-                                }
-                            }
-                        }
-                    }
-
-                    if asset.asset_type == AssetType::Domain {
-                        let domain = asset.identifier.clone();
-                        let mut top_domain = String::new();
-
-                        let parts: Vec<&str> = domain.split('.').collect();
-
-                        if parts.len() >= 2 {
-                            top_domain.push_str(format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]).as_str());
-                        }else{
-                            top_domain.push_str(domain.as_str());
-                        }
-                        
-                        // Check if we can add more domain pivots from this org
-                        if !self.can_add_domain_pivot(&context, &org_value) {
-                            tracing::debug!("Skipping domain '{}': max domains per org reached for '{}'", top_domain, org_value);
-                            continue;
-                        }
-                        
-                        // Check confidence threshold
-                        if asset.confidence < self.settings.min_pivot_confidence {
-                            tracing::debug!(
-                                "Skipping low confidence domain '{}' (confidence: {:.2}, threshold: {:.2})",
-                                top_domain, asset.confidence, self.settings.min_pivot_confidence
-                            );
-                            continue;
-                        }
-                        
-                        if !visited_domains.contains(&top_domain) && !domain_queue.iter().any(|(d, _, _)| d == &top_domain) {
-                            tracing::info!("New top domain found from org '{}': {} (depth {})", org_value, top_domain, depth + 1);
-                            domain_queue.push_back((top_domain, parent_id, depth + 1));
-                            domains_added += 1;
-                        }
-                    }
-                    all_assets.push(asset.clone());
-                }
-                
-                // Update domain pivot count for this org
-                if domains_added > 0 {
-                    *context.domains_per_org.entry(org_value.clone()).or_insert(0) += domains_added;
-                }
-                for (k, v) in result.confidence_scores {
-                    match all_confidence.get_mut(&k) {
-                        Some(existing) => { if v > *existing { *existing = v; } }
-                        None => { all_confidence.insert(k, v); }
-                    }
-                }
-                for (k, mut v) in result.sources {
-                    all_sources.entry(k).and_modify(|existing| {
-                        for src in &v { if !existing.contains(src) { existing.push(src.clone()); } }
-                    }).or_insert_with(|| { v.sort(); v.dedup(); v });
-                }
-            } else {
-                break;
-            }
-        }
-
-        Ok(DiscoveryResult { assets: all_assets, confidence_scores: all_confidence, sources: all_sources })
-    }
-
-    /// Discover assets from a domain seed
-    async fn discover_from_domain(&self, domain: &str, seed_id: Option<Uuid>, parent_id: Option<Uuid>) -> Result<DiscoveryResult, ApiError> {
-        let mut assets: Vec<Asset> = Vec::new();
-        let mut confidence_scores = HashMap::new();
-        let mut sources = HashMap::new();
-
-        // Step 1: Get comprehensive Shodan data first (extracts IPs, domains, ASNs, orgs, certs)
-        let mut shodan_extracted = ShodanExtractedAssets::default();
-        match self.external_services.get_shodan_comprehensive_data(domain).await {
-            Ok(extracted) => {
-                tracing::info!(
-                    "Comprehensive Shodan extraction for {}: {} domains, {} IPs, {} ASNs, {} orgs, {} certs",
-                    domain, extracted.domains.len(), extracted.ips.len(), 
-                    extracted.asns.len(), extracted.organizations.len(), extracted.certificates.len()
-                );
-                shodan_extracted = extracted;
-            }
-            Err(e) => {
-                tracing::debug!("Shodan comprehensive extraction not available for {}: {}", domain, e);
-            }
-        }
-
-        // Step 2: Subdomain enumeration (includes Shodan + all other sources)
-        match self.external_services.enumerate_subdomains(domain).await {
-            Ok(subdomain_result) => {
-                for subdomain in &subdomain_result.subdomains {
-                    let confidence = self.calculate_domain_confidence(subdomain, domain, &subdomain_result.sources);
-                    
-                    // Prevent self-referencing cycles if the subdomain is the same as the search domain
-                    // If we pass the domain's own ID as parent_id (which happens during recursive discovery),
-                    // we must not assign it to the domain itself. Passing None to create_or_merge preserves existing parent.
-                    let effective_parent_id = if subdomain == domain {
-                        None
-                    } else {
-                        parent_id
-                    };
-
-                    let asset_create = AssetCreate {
-                        asset_type: AssetType::Domain,
-                        identifier: subdomain.clone(),
-                        confidence,
-                        sources: json!(subdomain_result.sources.keys().collect::<Vec<_>>()),
-                        metadata: json!({
-                            "parent_domain": domain,
-                            "discovery_method": "subdomain_enumeration",
-                            "sources": subdomain_result.sources
-                        }),
-                        seed_id,
-                        parent_id: effective_parent_id,
-                    };
-                    
-                    match self.asset_repo.create_or_merge(&asset_create).await {
-                        Ok(asset) => {
-                            confidence_scores.insert(subdomain.clone(), confidence);
-                            sources.insert(subdomain.clone(), subdomain_result.sources.keys().cloned().collect());
-                            assets.push(asset);
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to store subdomain {}: {}", subdomain, e);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Subdomain enumeration failed for {}: {}", domain, e);
-            }
-        }
-
-        // Step 3: Process IPs extracted from Shodan
-        for ip in &shodan_extracted.ips {
-            // Calculate confidence using the confidence scorer
-            let confidence = {
-                let factors = ConfidenceFactors {
-                    base_confidence: MethodConfidence::SHODAN_ASN.base,
-                    sources: vec!["shodan".to_string()],
-                    distance_from_seed: 1,
-                    ..Default::default()
-                };
-                self.confidence_scorer.calculate_confidence(&factors)
-            };
-            let asset_create = AssetCreate {
-                asset_type: AssetType::Ip,
-                identifier: ip.clone(),
-                confidence,
-                sources: json!(["shodan"]),
-                metadata: json!({
-                    "discovered_from": domain,
-                    "discovery_method": "shodan_comprehensive",
-                    "source": "shodan_domain_search"
-                }),
-                seed_id,
-                parent_id,
-            };
-            
-            match self.asset_repo.create_or_merge(&asset_create).await {
-                Ok(asset) => {
-                    confidence_scores.insert(ip.clone(), confidence);
-                    sources.insert(ip.clone(), vec!["shodan".to_string()]);
-                    assets.push(asset);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to store Shodan IP {}: {}", ip, e);
-                }
-            }
-        }
-
-        // Step 4: Process certificates extracted from Shodan
-        for cert in &shodan_extracted.certificates {
-            if let Some(ref org) = cert.organization {
-                let confidence = self.confidence_scorer.calculate_certificate_confidence(true, vec!["shodan".to_string()]);
-                let cert_asset = AssetCreate {
-                    asset_type: AssetType::Certificate,
-                    identifier: cert.subject.clone(),
-                    confidence,
-                    sources: json!(["shodan"]),
-                    metadata: json!({
-                        "organization": org,
-                        "issuer": cert.issuer,
-                        "san_domains": cert.domains,
-                        "discovered_from": domain,
-                        "discovery_method": "shodan_comprehensive"
-                    }),
-                    seed_id,
-                    parent_id,
-                };
-                
-                match self.asset_repo.create_or_merge(&cert_asset).await {
-                    Ok(asset) => {
-                        confidence_scores.insert(cert.subject.clone(), confidence);
-                        sources.insert(cert.subject.clone(), vec!["shodan".to_string()]);
-                        assets.push(asset);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to store certificate {}: {}", cert.subject, e);
-                    }
-                }
-            }
-        }
-
-        // Step 5: DNS resolution for discovered domains
-        // We use the assets we just saved (which have IDs) to link the IPs
-        let domain_assets: Vec<_> = assets.iter()
-            .filter(|asset| asset.asset_type == AssetType::Domain)
-            .cloned()
-            .collect();
-            
-        for asset in domain_assets {
-            match self.dns_resolver.resolve_hostname(&asset.identifier).await {
-                Ok(ips) => {
-                    for ip in ips {
-                        let ip_confidence = self.calculate_ip_confidence(&ip.to_string(), &asset.identifier);
-                        let ip_asset = AssetCreate {
-                            asset_type: AssetType::Ip,
-                            identifier: ip.to_string(),
-                            confidence: ip_confidence,
-                            sources: json!(["dns_resolution"]),
-                            metadata: json!({
-                                "resolved_from": asset.identifier,
-                                "discovery_method": "dns_resolution"
-                            }),
-                            seed_id,
-                            parent_id: Some(asset.id), // Link to the domain asset!
-                        };
-                        
-                        match self.asset_repo.create_or_merge(&ip_asset).await {
-                            Ok(saved_ip) => {
-                                confidence_scores.insert(ip.to_string(), ip_confidence);
-                                sources.insert(ip.to_string(), vec!["dns_resolution".to_string()]);
-                                assets.push(saved_ip);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to store resolved IP {}: {}", ip, e);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!("DNS resolution failed for {}: {}", asset.identifier, e);
-                }
-            }
-        }
-
-        // Step 6: Certificate analysis for HTTPS domains
-        let domain_assets_for_certs: Vec<_> = assets.iter()
-            .filter(|asset| asset.asset_type == AssetType::Domain)
-            .cloned()
-            .collect();
-            
-        for asset in domain_assets_for_certs {
-            match self.http_analyzer.get_tls_certificate_info(&asset.identifier, 443).await {
-                Ok(cert_result) => {
-                    if !cert_result.certificate_chain.is_empty() {
-                        let cert_info = &cert_result.certificate_chain[0];
-                        
-                        // Create certificate asset
-                        if let Some(org) = &cert_info.organization {
-                            let cert_confidence = self.calculate_certificate_confidence(org, domain);
-                            let cert_asset = AssetCreate {
-                                asset_type: AssetType::Certificate,
-                                identifier: cert_info.subject.clone(),
-                                confidence: cert_confidence,
-                                sources: json!(["tls_certificate"]),
-                                metadata: json!({
-                                    "organization": org,
-                                    "issuer": cert_info.issuer,
-                                    "san_domains": cert_info.san_domains,
-                                    "discovered_from": asset.identifier,
-                                    "discovery_method": "tls_certificate"
-                                }),
-                                seed_id,
-                                parent_id: Some(asset.id), // Link to the domain asset
-                            };
-                            
-                            match self.asset_repo.create_or_merge(&cert_asset).await {
-                                Ok(saved_cert) => {
-                                    confidence_scores.insert(cert_info.subject.clone(), cert_confidence);
-                                    sources.insert(cert_info.subject.clone(), vec!["tls_certificate".to_string()]);
-                                    assets.push(saved_cert);
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Failed to store certificate from TLS {}: {}", cert_info.subject, e);
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!("Certificate analysis failed for {}: {}", asset.identifier, e);
-                }
-            }
-        }
-
-        Ok(DiscoveryResult {
-            assets,
-            confidence_scores,
-            sources,
-        })
-    }
-
-    /// Discover assets from an organization seed
-    /// Uses comprehensive Shodan extraction for ALL asset types, then queries crt.sh for additional domains
-    /// Discover assets from an organization seed
-    /// Uses comprehensive Shodan extraction for ALL asset types, then queries crt.sh for additional domains
-    async fn discover_from_organization(&self, org: &str, seed_id: Option<Uuid>, parent_id: Option<Uuid>) -> Result<DiscoveryResult, ApiError> {
-        let mut assets: Vec<Asset> = Vec::new();
-        let mut confidence_scores = HashMap::new();
-        let mut sources = HashMap::new();
-
-        // PRIORITY 1: Comprehensive Shodan search - extracts IPs, domains, ASNs, certs, etc.
-        tracing::info!("Searching organization '{}' using Shodan (PRIMARY - Comprehensive)", org);
-        match self.external_services.search_shodan_org_comprehensive(org).await {
-            Ok(extracted) => {
-                tracing::info!(
-                    "✓ Shodan comprehensive extraction for '{}': {} IPs, {} domains, {} ASNs, {} orgs, {} certs",
-                    org, extracted.ips.len(), extracted.domains.len(), 
-                    extracted.asns.len(), extracted.organizations.len(), extracted.certificates.len()
-                );
-                
-                // Process IPs
-                for ip in &extracted.ips {
-                    let confidence = {
-                        let factors = ConfidenceFactors {
-                            base_confidence: MethodConfidence::SHODAN_ORG.base,
-                            sources: vec!["shodan".to_string()],
-                            distance_from_seed: 1,
-                            ..Default::default()
-                        };
-                        self.confidence_scorer.calculate_confidence(&factors)
-                    };
-                    let asset_create = AssetCreate {
-                        asset_type: AssetType::Ip,
-                        identifier: ip.clone(),
-                        confidence,
-                        sources: json!(["shodan"]),
-                        metadata: json!({
-                            "organization": org,
-                            "discovery_method": "shodan_org_comprehensive"
-                        }),
-                        seed_id,
-                        parent_id,
-                    };
-                    match self.asset_repo.create_or_merge(&asset_create).await {
-                        Ok(asset) => {
-                            confidence_scores.insert(ip.clone(), confidence);
-                            sources.insert(ip.clone(), vec!["shodan".to_string()]);
-                            assets.push(asset);
-                        }
-                        Err(e) => tracing::warn!("Failed to store IP {}: {}", ip, e),
-                    }
-                }
-                
-                // Process domains found in Shodan
-                for domain in &extracted.domains {
-                    let confidence = {
-                        let factors = ConfidenceFactors {
-                            base_confidence: MethodConfidence::SUBDOMAIN_ENUM.base,
-                            sources: vec!["shodan".to_string()],
-                            distance_from_seed: 1,
-                            ..Default::default()
-                        };
-                        self.confidence_scorer.calculate_confidence(&factors)
-                    };
-                    let asset_create = AssetCreate {
-                        asset_type: AssetType::Domain,
-                        identifier: domain.clone(),
-                        confidence,
-                        sources: json!(["shodan"]),
-                        metadata: json!({
-                            "organization": org,
-                            "discovery_method": "shodan_org_comprehensive"
-                        }),
-                        seed_id,
-                        parent_id,
-                    };
-                    match self.asset_repo.create_or_merge(&asset_create).await {
-                        Ok(asset) => {
-                            confidence_scores.insert(domain.clone(), confidence);
-                            sources.insert(domain.clone(), vec!["shodan".to_string()]);
-                            assets.push(asset);
-                        }
-                        Err(e) => tracing::warn!("Failed to store domain {}: {}", domain, e),
-                    }
-                }
-                
-                // Process certificates
-                for cert in &extracted.certificates {
-                    if let Some(ref cert_org) = cert.organization {
-                        let confidence = self.confidence_scorer.calculate_certificate_confidence(true, vec!["shodan".to_string()]);
-                        let cert_asset = AssetCreate {
-                            asset_type: AssetType::Certificate,
-                            identifier: cert.subject.clone(),
-                            confidence,
-                            sources: json!(["shodan"]),
-                            metadata: json!({
-                                "organization": cert_org,
-                                "issuer": cert.issuer,
-                                "san_domains": cert.domains,
-                                "discovered_from": org,
-                                "discovery_method": "shodan_org_comprehensive"
-                            }),
-                            seed_id,
-                            parent_id,
-                        };
-                        match self.asset_repo.create_or_merge(&cert_asset).await {
-                            Ok(asset) => {
-                                confidence_scores.insert(cert.subject.clone(), confidence);
-                                sources.insert(cert.subject.clone(), vec!["shodan".to_string()]);
-                                assets.push(asset);
-                            }
-                            Err(e) => tracing::warn!("Failed to store cert {}: {}", cert.subject, e),
-                        }
-                    }
-                }
-                
-                // Log discovered ASNs for potential recursive discovery
-                if !extracted.asns.is_empty() {
-                    tracing::info!("Discovered ASNs from organization '{}': {:?} (available for recursive discovery)", 
-                        org, extracted.asns);
-                }
-                
-                // Log discovered related organizations
-                if !extracted.organizations.is_empty() {
-                    tracing::info!("Discovered related organizations: {:?} (available for recursive discovery)", 
-                        extracted.organizations);
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Shodan comprehensive organization search failed for {}: {}", org, e);
-            }
-        }
-
-        // ALWAYS query crt.sh for additional domain coverage
-        tracing::info!("Searching organization '{}' using crt.sh for additional domain coverage", org);
-        match self.external_services.search_crtsh_by_organization(org).await {
-            Ok(domains) => {
-                tracing::info!("Found {} domains from crt.sh for organization '{}'", domains.len(), org);
-                for domain in domains {
-                    let confidence = self.calculate_crtsh_org_confidence(&domain, org);
-
-                    let asset_create = AssetCreate {
-                        asset_type: AssetType::Domain,
-                        identifier: domain.clone(),
-                        confidence,
-                        sources: json!(["crt.sh"]),
-                        metadata: json!({
-                            "organization": org,
-                            "discovery_method": "crtsh_org_search"
-                        }),
-                        seed_id,
-                        parent_id,
-                    };
-
-                    match self.asset_repo.create_or_merge(&asset_create).await {
-                        Ok(asset) => {
-                            confidence_scores.insert(domain.clone(), confidence);
-                            sources.insert(domain, vec!["crt.sh".to_string()]);
-                            assets.push(asset);
-                        }
-                        Err(e) => tracing::warn!("Failed to store domain from crt.sh {}: {}", domain, e),
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("crt.sh organization search failed for {}: {}", org, e);
-            }
-        }
-
-        tracing::info!(
-            "Organization discovery complete for '{}': {} total assets found (IPs + Domains + Certificates)",
-            org,
-            assets.len()
-        );
-
-        Ok(DiscoveryResult {
-            assets,
-            confidence_scores,
-            sources,
-        })
-    }
-
-    /// Discover assets from an ASN seed
-    /// Uses comprehensive Shodan extraction to find ALL asset types associated with the ASN
-    /// Discover assets from an ASN seed
-    /// Uses comprehensive Shodan extraction to find ALL asset types associated with the ASN
-    async fn discover_from_asn(&self, asn: &str, seed_id: Option<Uuid>, parent_id: Option<Uuid>) -> Result<DiscoveryResult, ApiError> {
-        let mut assets: Vec<Asset> = Vec::new();
-        let mut confidence_scores = HashMap::new();
-        let mut sources = HashMap::new();
-
-        // Use comprehensive Shodan search for ASN
-        tracing::info!("Searching ASN '{}' using Shodan (Comprehensive)", asn);
-        match self.external_services.search_shodan_asn_comprehensive(asn).await {
-            Ok(extracted) => {
-                tracing::info!(
-                    "✓ Shodan comprehensive extraction for ASN '{}': {} IPs, {} domains, {} orgs, {} certs",
-                    asn, extracted.ips.len(), extracted.domains.len(), 
-                    extracted.organizations.len(), extracted.certificates.len()
-                );
-                
-                // Process IPs
-                for ip in &extracted.ips {
-                    let confidence = {
-                        let factors = ConfidenceFactors {
-                            base_confidence: MethodConfidence::SHODAN_ASN.base,
-                            sources: vec!["shodan".to_string()],
-                            distance_from_seed: 1,
-                            ..Default::default()
-                        };
-                        self.confidence_scorer.calculate_confidence(&factors)
-                    };
-                    let asset_create = AssetCreate {
-                        asset_type: AssetType::Ip,
-                        identifier: ip.clone(),
-                        confidence,
-                        sources: json!(["shodan"]),
-                        metadata: json!({
-                            "asn": asn,
-                            "discovery_method": "shodan_asn_comprehensive"
-                        }),
-                        seed_id,
-                        parent_id,
-                    };
-                    match self.asset_repo.create_or_merge(&asset_create).await {
-                         Ok(asset) => {
-                            confidence_scores.insert(ip.clone(), confidence);
-                            sources.insert(ip.clone(), vec!["shodan".to_string()]);
-                            assets.push(asset);
-                         },
-                         Err(e) => tracing::warn!("Failed to store IP {}: {}", ip, e),
-                    }
-                }
-                
-                // Process domains
-                for domain in &extracted.domains {
-                    let confidence = {
-                        let factors = ConfidenceFactors {
-                            base_confidence: MethodConfidence::SHODAN_ORG.base,
-                            sources: vec!["shodan".to_string()],
-                            distance_from_seed: 1,
-                            ..Default::default()
-                        };
-                        self.confidence_scorer.calculate_confidence(&factors)
-                    };
-                    let asset_create = AssetCreate {
-                        asset_type: AssetType::Domain,
-                        identifier: domain.clone(),
-                        confidence,
-                        sources: json!(["shodan"]),
-                        metadata: json!({
-                            "asn": asn,
-                            "discovery_method": "shodan_asn_comprehensive"
-                        }),
-                        seed_id,
-                        parent_id,
-                    };
-                    match self.asset_repo.create_or_merge(&asset_create).await {
-                         Ok(asset) => {
-                            confidence_scores.insert(domain.clone(), confidence);
-                            sources.insert(domain.clone(), vec!["shodan".to_string()]);
-                            assets.push(asset);
-                         },
-                         Err(e) => tracing::warn!("Failed to store domain {}: {}", domain, e),
-                    }
-                }
-                
-                // Process certificates
-                for cert in &extracted.certificates {
-                    let has_org = cert.organization.is_some();
-                    let confidence = self.confidence_scorer.calculate_certificate_confidence(has_org, vec!["shodan".to_string()]);
-                    let cert_asset = AssetCreate {
-                        asset_type: AssetType::Certificate,
-                        identifier: cert.subject.clone(),
-                        confidence,
-                        sources: json!(["shodan"]),
-                        metadata: json!({
-                            "asn": asn,
-                            "organization": cert.organization,
-                            "issuer": cert.issuer,
-                            "san_domains": cert.domains,
-                            "discovery_method": "shodan_asn_comprehensive"
-                        }),
-                        seed_id,
-                        parent_id,
-                    };
-                    match self.asset_repo.create_or_merge(&cert_asset).await {
-                         Ok(asset) => {
-                            confidence_scores.insert(cert.subject.clone(), confidence);
-                            sources.insert(cert.subject.clone(), vec!["shodan".to_string()]);
-                            assets.push(asset);
-                         },
-                         Err(e) => tracing::warn!("Failed to store cert {}: {}", cert.subject, e),
-                    }
-                }
-                
-                // Log discovered organizations for potential recursive discovery
-                if !extracted.organizations.is_empty() {
-                    tracing::info!("Discovered organizations from ASN '{}': {:?} (available for recursive discovery)", 
-                        asn, extracted.organizations);
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Shodan comprehensive ASN search failed for {}: {}", asn, e);
-            }
-        }
-
-        Ok(DiscoveryResult {
-            assets,
-            confidence_scores,
-            sources,
-        })
-    }
-
-    /// Discover assets from a CIDR seed
-    async fn discover_from_cidr(&self, cidr: &str, seed_id: Option<Uuid>, parent_id: Option<Uuid>) -> Result<DiscoveryResult, ApiError> {
-        let mut assets: Vec<Asset> = Vec::new();
-        let mut confidence_scores = HashMap::new();
-        let mut sources = HashMap::new();
-
-        // Expand CIDR range
-        let ips = expand_cidr(cidr)?;
-        let max_hosts = self.settings.max_cidr_hosts as usize;
-        
-        if ips.len() > max_hosts {
-            return Err(ApiError::Validation(format!(
-                "CIDR range {} contains {} hosts, exceeding limit of {}",
-                cidr, ips.len(), max_hosts
-            )));
-        }
-
-        // Create IP assets for CIDR range
-        for ip in ips {
-            let confidence = {
-                let factors = ConfidenceFactors {
-                    base_confidence: MethodConfidence::CIDR_EXPANSION.base,
-                    sources: vec!["cidr_expansion".to_string()],
-                    distance_from_seed: 1,
-                    ..Default::default()
-                };
-                self.confidence_scorer.calculate_confidence(&factors)
-            };
-            
-            let asset_create = AssetCreate {
-                asset_type: AssetType::Ip,
-                identifier: ip.to_string(),
-                confidence,
-                sources: json!(["cidr_expansion"]),
-                metadata: json!({
-                    "cidr": cidr,
-                    "discovery_method": "cidr_expansion"
-                }),
-                seed_id,
-                parent_id,
-            };
-            
-            match self.asset_repo.create_or_merge(&asset_create).await {
-                 Ok(asset) => {
-                    confidence_scores.insert(ip.to_string(), confidence);
-                    sources.insert(ip.to_string(), vec!["cidr_expansion".to_string()]);
-                    assets.push(asset);
-                 },
-                 Err(e) => tracing::warn!("Failed to store IP {}: {}", ip, e),
-            }
-        }
-
-        Ok(DiscoveryResult {
-            assets,
-            confidence_scores,
-            sources,
-        })
-    }
-
-    /// Discover assets from a keyword seed
-    /// Uses comprehensive Shodan extraction to find ALL asset types matching the keyword
-    /// Discover assets from a keyword seed
-    /// Uses comprehensive Shodan extraction to find ALL asset types matching the keyword
-    async fn discover_from_keyword(&self, keyword: &str, seed_id: Option<Uuid>, parent_id: Option<Uuid>) -> Result<DiscoveryResult, ApiError> {
-        let mut assets: Vec<Asset> = Vec::new();
-        let mut confidence_scores = HashMap::new();
-        let mut sources = HashMap::new();
-
-        // Use comprehensive Shodan search for keyword
-        tracing::info!("Searching keyword '{}' using Shodan (Comprehensive)", keyword);
-        match self.external_services.search_shodan_comprehensive(keyword).await {
-            Ok(extracted) => {
-                tracing::info!(
-                    "✓ Shodan comprehensive extraction for keyword '{}': {} IPs, {} domains, {} ASNs, {} orgs, {} certs",
-                    keyword, extracted.ips.len(), extracted.domains.len(), 
-                    extracted.asns.len(), extracted.organizations.len(), extracted.certificates.len()
-                );
-                
-                // Process IPs
-                for ip in &extracted.ips {
-                    let confidence = {
-                        let factors = ConfidenceFactors {
-                            base_confidence: MethodConfidence::KEYWORD_SEARCH.base,
-                            sources: vec!["shodan".to_string(), "keyword_search".to_string()],
-                            distance_from_seed: 1,
-                            ..Default::default()
-                        };
-                        self.confidence_scorer.calculate_confidence(&factors)
-                    };
-                    let asset_create = AssetCreate {
-                        asset_type: AssetType::Ip,
-                        identifier: ip.clone(),
-                        confidence,
-                        sources: json!(["shodan"]),
-                        metadata: json!({
-                            "keyword": keyword,
-                            "discovery_method": "shodan_keyword_comprehensive"
-                        }),
-                        seed_id,
-                        parent_id,
-                    };
-                    match self.asset_repo.create_or_merge(&asset_create).await {
-                         Ok(asset) => {
-                            confidence_scores.insert(ip.clone(), confidence);
-                            sources.insert(ip.clone(), vec!["shodan".to_string()]);
-                            assets.push(asset);
-                         },
-                         Err(e) => tracing::warn!("Failed to store IP {}: {}", ip, e),
-                    }
-                }
-                
-                // Process domains
-                for domain in &extracted.domains {
-                    let confidence = {
-                        let factors = ConfidenceFactors {
-                            base_confidence: MethodConfidence::KEYWORD_SEARCH.base,
-                            sources: vec!["shodan".to_string(), "keyword_search".to_string()],
-                            distance_from_seed: 1,
-                            ..Default::default()
-                        };
-                        self.confidence_scorer.calculate_confidence(&factors)
-                    };
-                    let asset_create = AssetCreate {
-                        asset_type: AssetType::Domain,
-                        identifier: domain.clone(),
-                        confidence,
-                        sources: json!(["shodan"]),
-                        metadata: json!({
-                            "keyword": keyword,
-                            "discovery_method": "shodan_keyword_comprehensive"
-                        }),
-                        seed_id,
-                        parent_id,
-                    };
-                    match self.asset_repo.create_or_merge(&asset_create).await {
-                         Ok(asset) => {
-                            confidence_scores.insert(domain.clone(), confidence);
-                            sources.insert(domain.clone(), vec!["shodan".to_string()]);
-                            assets.push(asset);
-                         },
-                         Err(e) => tracing::warn!("Failed to store domain {}: {}", domain, e),
-                    }
-                }
-                
-                // Process certificates
-                for cert in &extracted.certificates {
-                    let confidence = {
-                        let factors = ConfidenceFactors {
-                            base_confidence: MethodConfidence::KEYWORD_SEARCH.base,
-                            sources: vec!["shodan".to_string(), "keyword_search".to_string()],
-                            distance_from_seed: 1,
-                            ..Default::default()
-                        };
-                        self.confidence_scorer.calculate_confidence(&factors)
-                    };
-                    let cert_asset = AssetCreate {
-                        asset_type: AssetType::Certificate,
-                        identifier: cert.subject.clone(),
-                        confidence,
-                        sources: json!(["shodan"]),
-                        metadata: json!({
-                            "keyword": keyword,
-                            "organization": cert.organization,
-                            "issuer": cert.issuer,
-                            "san_domains": cert.domains,
-                            "discovery_method": "shodan_keyword_comprehensive"
-                        }),
-                        seed_id,
-                        parent_id,
-                    };
-                    match self.asset_repo.create_or_merge(&cert_asset).await {
-                         Ok(asset) => {
-                            confidence_scores.insert(cert.subject.clone(), confidence);
-                            sources.insert(cert.subject.clone(), vec!["shodan".to_string()]);
-                            assets.push(asset);
-                         },
-                         Err(e) => tracing::warn!("Failed to store cert {}: {}", cert.subject, e),
-                    }
-                }
-                
-                // Log discovered ASNs and organizations for potential recursive discovery
-                if !extracted.asns.is_empty() {
-                    tracing::info!("Discovered ASNs from keyword '{}': {:?}", keyword, extracted.asns);
-                }
-                if !extracted.organizations.is_empty() {
-                    tracing::info!("Discovered organizations from keyword '{}': {:?}", keyword, extracted.organizations);
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Shodan comprehensive keyword search failed for {}: {}", keyword, e);
-            }
-        }
-
-        Ok(DiscoveryResult {
-            assets,
-            confidence_scores,
-            sources,
-        })
-    }
-
-    // Confidence scoring algorithms using the new confidence scorer
-    fn calculate_domain_confidence(&self, domain: &str, parent_domain: &str, sources: &HashMap<String, Vec<String>>) -> f64 {
-        self.confidence_scorer.calculate_domain_confidence(domain, parent_domain, sources)
-    }
-
-    fn calculate_ip_confidence(&self, _ip: &str, _resolved_from: &str) -> f64 {
-        self.confidence_scorer.calculate_ip_confidence(vec!["dns_resolution".to_string()])
-    }
-
-    fn calculate_certificate_confidence(&self, org: &str, _domain: &str) -> f64 {
-        let has_org = !org.is_empty();
-        self.confidence_scorer.calculate_certificate_confidence(has_org, vec!["tls_certificate".to_string()])
-    }
-
-    fn calculate_crtsh_org_confidence(&self, _domain: &str, _organization: &str) -> f64 {
-        // crt.sh organization search has medium confidence
-        let factors = ConfidenceFactors {
-            base_confidence: MethodConfidence::CRTSH_ORG.base,
-            sources: vec!["crt.sh".to_string(), "org_search".to_string()],
-            ..Default::default()
-        };
-        self.confidence_scorer.calculate_confidence(&factors)
-    }
-
-    /// Validate seed based on its type
     fn validate_seed(&self, seed: &SeedCreate) -> Result<(), ApiError> {
         match seed.seed_type {
             SeedType::Domain => {
@@ -1929,7 +155,8 @@ impl DiscoveryService {
                 }
             }
             SeedType::Asn => {
-                if !seed.value.starts_with("AS") && seed.value.parse::<u32>().is_err() {
+                let value = seed.value.trim_start_matches("AS");
+                if value.parse::<u32>().is_err() {
                     return Err(ApiError::Validation("Invalid ASN format".to_string()));
                 }
             }
@@ -1949,25 +176,981 @@ impl DiscoveryService {
                 }
             }
         }
-        
         Ok(())
+    }
+
+    // ========================================================================
+    // ASSET MANAGEMENT
+    // ========================================================================
+
+    pub async fn list_assets(
+        &self,
+        confidence_threshold: Option<f64>,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> Result<Vec<Asset>, ApiError> {
+        self.asset_repo.list(confidence_threshold, limit, offset).await
+    }
+
+    pub async fn count_assets(&self, confidence_threshold: Option<f64>) -> Result<i64, ApiError> {
+        self.asset_repo.count(confidence_threshold).await
+    }
+
+    pub async fn get_asset(&self, id: &Uuid) -> Result<Option<Asset>, ApiError> {
+        self.asset_repo.get_by_id(id).await
+    }
+
+    pub async fn get_asset_path(&self, id: &Uuid) -> Result<Vec<Asset>, ApiError> {
+        self.asset_repo.get_path(id).await
+    }
+
+    // ========================================================================
+    // DISCOVERY RUN MANAGEMENT
+    // ========================================================================
+
+    pub async fn get_discovery_status(&self) -> DiscoveryStatus {
+        self.status.lock().await.clone()
+    }
+
+    pub async fn get_discovery_run(&self, id: &Uuid) -> Result<Option<DiscoveryRun>, ApiError> {
+        self.discovery_run_repo.get_by_id(id).await
+    }
+
+    pub async fn list_discovery_runs(&self, limit: i64, offset: i64) -> Result<Vec<DiscoveryRun>, ApiError> {
+        self.discovery_run_repo.list(limit, offset).await
+    }
+
+    /// Start a new discovery run
+    pub async fn run_discovery(&self, config: Option<DiscoveryConfig>) -> Result<DiscoveryRun, ApiError> {
+        // Check if discovery is already running
+        {
+            let status = self.status.lock().await;
+            if status.is_running {
+                return Err(ApiError::Validation("Discovery is already running".to_string()));
+            }
+        }
+
+        // Create a new discovery run
+        let run_create = DiscoveryRunCreate {
+            trigger_type: Some(TriggerType::Manual),
+            config: config.as_ref().map(|c| serde_json::to_value(c).unwrap_or(json!({}))),
+        };
+        
+        let run = self.discovery_run_repo.create(&run_create).await?;
+        let run_id = run.id;
+
+        // Update status
+        {
+            let mut status = self.status.lock().await;
+            status.is_running = true;
+            status.run_id = Some(run_id);
+            status.started_at = Some(Utc::now());
+            status.current_phase = "Initializing".to_string();
+            status.errors.clear();
+        }
+
+        // Submit discovery task to TaskManager
+        let discovery_service = self.clone();
+        let config_arc = Arc::new(config);
+        
+        let task_metadata = json!({
+            "discovery_run_id": run_id,
+            "started_at": Utc::now()
+        });
+        
+        self.task_manager.submit_task(
+            TaskType::Discovery,
+            task_metadata,
+            move |ctx| {
+                let discovery_service = discovery_service.clone();
+                let config_clone = (*config_arc).clone();
+                Box::pin(async move {
+                    discovery_service.execute_discovery(ctx, run_id, config_clone).await
+                })
+            }
+        ).await?;
+
+        Ok(run)
+    }
+
+    /// Stop the running discovery
+    pub async fn stop_discovery(&self) -> Result<(), ApiError> {
+        let run_id = {
+            let status = self.status.lock().await;
+            if !status.is_running {
+                return Err(ApiError::Validation("Discovery is not running".to_string()));
+            }
+            status.run_id
+        };
+
+        if let Some(id) = run_id {
+            // Mark run as cancelled
+            self.discovery_run_repo.update_status(&id, "cancelled", Some("Stopped by user")).await?;
+            
+            // Update status
+            let mut status = self.status.lock().await;
+            status.is_running = false;
+            status.completed_at = Some(Utc::now());
+            status.current_phase = "Cancelled".to_string();
+        }
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // DISCOVERY EXECUTION
+    // ========================================================================
+
+    /// Main discovery execution loop
+    async fn execute_discovery(
+        &self, 
+        ctx: TaskContext, 
+        run_id: Uuid, 
+        config: Option<DiscoveryConfig>
+    ) -> Result<(), ApiError> {
+        tracing::info!("Starting discovery run {}", run_id);
+        
+        // Mark run as started
+        self.discovery_run_repo.start(&run_id).await?;
+        
+        let result = self.execute_discovery_internal(&ctx, run_id, config).await;
+        
+        // Finalize discovery run
+        {
+            let mut status = self.status.lock().await;
+            status.is_running = false;
+            status.completed_at = Some(Utc::now());
+            
+            match &result {
+                Ok(_) => {
+                    status.current_phase = "Completed".to_string();
+                    self.discovery_run_repo.complete(&run_id).await?;
+                }
+                Err(e) => {
+                    status.current_phase = "Failed".to_string();
+                    status.errors.push(e.to_string());
+                    self.discovery_run_repo.fail(&run_id, &e.to_string()).await?;
+                }
+            }
+        }
+        
+        result
+    }
+
+    async fn execute_discovery_internal(
+        &self, 
+        ctx: &TaskContext, 
+        run_id: Uuid, 
+        config: Option<DiscoveryConfig>
+    ) -> Result<(), ApiError> {
+        // Load seeds
+        let seeds = self.seed_repo.list().await?;
+        let seed_count = seeds.len();
+        
+        {
+            let mut status = self.status.lock().await;
+            status.seeds_total = seed_count;
+            status.current_phase = "Loading seeds".to_string();
+        }
+        
+        ctx.update_progress(0.05, Some(format!("Found {} seeds", seed_count))).await?;
+
+        if seeds.is_empty() {
+            tracing::info!("No seeds to process");
+            return Ok(());
+        }
+
+        // Phase 1: Queue all seeds for processing
+        {
+            let mut status = self.status.lock().await;
+            status.current_phase = "Queuing seeds".to_string();
+        }
+        
+        for seed in &seeds {
+            ctx.check_cancellation().await?;
+            
+            let item_type = match seed.seed_type {
+                SeedType::Domain => QueueItemType::Domain,
+                SeedType::Organization => QueueItemType::Organization,
+                SeedType::Asn => QueueItemType::Asn,
+                SeedType::Cidr => QueueItemType::Cidr,
+                SeedType::Keyword => QueueItemType::Domain, // Keywords search for domains
+            };
+            
+            let item = DiscoveryQueueItemCreate {
+                discovery_run_id: run_id,
+                item_type,
+                item_value: seed.value.clone(),
+                parent_asset_id: None,
+                seed_id: Some(seed.id),
+                depth: 0,
+                priority: 10, // Seeds have highest priority
+            };
+            
+            self.discovery_queue_repo.enqueue(&item).await?;
+        }
+
+        ctx.update_progress(0.1, Some("Seeds queued".to_string())).await?;
+
+        // Phase 2: Process queue
+        {
+            let mut status = self.status.lock().await;
+            status.current_phase = "Processing discovery queue".to_string();
+        }
+
+        let max_depth = config.as_ref()
+            .and_then(|c| c.max_depth)
+            .unwrap_or(self.settings.max_discovery_depth);
+
+        let mut total_result = DiscoveryResult::default();
+        let mut processed = 0;
+
+        loop {
+            ctx.check_cancellation().await?;
+
+            // Get pending count
+            let pending = self.discovery_queue_repo.get_pending_count(&run_id).await?;
+            
+            {
+                let mut status = self.status.lock().await;
+                status.queue_pending = pending as usize;
+            }
+
+            if pending == 0 {
+                break;
+            }
+
+            // Dequeue batch
+            let batch = self.discovery_queue_repo.dequeue(&run_id, 10).await?;
+            
+            if batch.is_empty() {
+                break;
+            }
+
+            // Process batch
+            for item in batch {
+                ctx.check_cancellation().await?;
+
+                // Skip if over depth limit
+                if item.depth > max_depth as i32 {
+                    self.discovery_queue_repo.skip_item(&item.id).await?;
+                    continue;
+                }
+
+                // Process the queue item
+                let result = self.process_queue_item(
+                    run_id,
+                    &item.item_type,
+                    &item.item_value,
+                    item.seed_id,
+                    item.parent_asset_id,
+                    item.depth,
+                ).await;
+
+                match result {
+                    Ok(item_result) => {
+                        self.discovery_queue_repo.complete_item(&item.id).await?;
+                        total_result.merge(item_result);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to process queue item {}: {}", item.item_value, e);
+                        self.discovery_queue_repo.fail_item(&item.id, &e.to_string()).await?;
+                        total_result.warnings.push(format!("{}: {}", item.item_value, e));
+                    }
+                }
+
+                processed += 1;
+
+                // Update progress
+                let progress = 0.1 + (0.8 * (processed as f32 / (processed + pending as usize) as f32));
+                ctx.update_progress(progress, Some(format!("Processed {} items", processed))).await?;
+
+                // Update status
+                {
+                    let mut status = self.status.lock().await;
+                    status.seeds_processed = processed.min(seed_count);
+                    status.assets_discovered = total_result.assets_created.len();
+                    status.assets_updated = total_result.assets_updated.len();
+                }
+            }
+        }
+
+        // Update discovery run with final counts
+        self.discovery_run_repo.update_progress(
+            &run_id,
+            seed_count as i32,
+            total_result.assets_created.len() as i32,
+            total_result.assets_updated.len() as i32,
+        ).await?;
+
+        ctx.update_progress(0.95, Some("Finalizing".to_string())).await?;
+
+        tracing::info!(
+            "Discovery run {} completed: {} seeds, {} new assets, {} updated",
+            run_id, seed_count, total_result.assets_created.len(), total_result.assets_updated.len()
+        );
+
+        Ok(())
+    }
+
+    /// Process a single queue item
+    async fn process_queue_item(
+        &self,
+        run_id: Uuid,
+        item_type: &str,
+        item_value: &str,
+        seed_id: Option<Uuid>,
+        parent_asset_id: Option<Uuid>,
+        depth: i32,
+    ) -> Result<DiscoveryResult, ApiError> {
+        tracing::debug!("Processing {} '{}' at depth {}", item_type, item_value, depth);
+
+        match item_type {
+            "domain" => self.discover_from_domain(run_id, item_value, seed_id, parent_asset_id, depth).await,
+            "organization" => self.discover_from_organization(run_id, item_value, seed_id, parent_asset_id, depth).await,
+            "asn" => self.discover_from_asn(run_id, item_value, seed_id, parent_asset_id, depth).await,
+            "cidr" => self.discover_from_cidr(run_id, item_value, seed_id, parent_asset_id, depth).await,
+            "ip" => self.discover_from_ip(run_id, item_value, seed_id, parent_asset_id, depth).await,
+            _ => {
+                tracing::warn!("Unknown item type: {}", item_type);
+                Ok(DiscoveryResult::default())
+            }
+        }
+    }
+
+    // ========================================================================
+    // DISCOVERY BY TYPE
+    // ========================================================================
+
+    /// Discover assets from a domain
+    async fn discover_from_domain(
+        &self,
+        run_id: Uuid,
+        domain: &str,
+        seed_id: Option<Uuid>,
+        parent_asset_id: Option<Uuid>,
+        depth: i32,
+    ) -> Result<DiscoveryResult, ApiError> {
+        let mut result = DiscoveryResult::default();
+
+        // Create the domain asset first (if it's not from a seed)
+        let domain_asset = self.create_or_update_asset(
+            run_id,
+            AssetType::Domain,
+            domain,
+            SourceType::Seed,
+            1.0, // Full confidence for seed domains
+            seed_id,
+            parent_asset_id,
+            Some(json!({ "discovery_depth": depth })),
+        ).await?;
+
+        if domain_asset.1 { // was created
+            result.assets_created.push(domain_asset.0);
+        } else {
+            result.assets_updated.push(domain_asset.0);
+        }
+
+        let domain_asset_id = domain_asset.0;
+
+        // Step 1: Subdomain enumeration from multiple sources
+        match self.external_services.enumerate_subdomains(domain).await {
+            Ok(subdomain_result) => {
+                for subdomain in &subdomain_result.subdomains {
+                    if subdomain == domain {
+                        continue; // Skip the main domain
+                    }
+
+                    let confidence = self.calculate_subdomain_confidence(&subdomain_result.sources);
+                    
+                    let asset = self.create_or_update_asset(
+                        run_id,
+                        AssetType::Domain,
+                        subdomain,
+                        SourceType::Shodan, // Primary source
+                        confidence,
+                        seed_id,
+                        Some(domain_asset_id),
+                        Some(json!({
+                            "parent_domain": domain,
+                            "sources": subdomain_result.sources.keys().collect::<Vec<_>>()
+                        })),
+                    ).await?;
+
+                    if asset.1 {
+                        result.assets_created.push(asset.0);
+                    } else {
+                        result.assets_updated.push(asset.0);
+                    }
+
+                    // Create relationship
+                    self.create_relationship(
+                        run_id,
+                        domain_asset_id,
+                        asset.0,
+                        RelationshipType::HasSubdomain,
+                        confidence,
+                    ).await?;
+                }
+            }
+            Err(e) => {
+                result.warnings.push(format!("Subdomain enumeration failed: {}", e));
+            }
+        }
+
+        // Step 2: DNS resolution
+        match self.dns_resolver.resolve_hostname(domain).await {
+            Ok(ips) => {
+                for ip in ips {
+                    let ip_str = ip.to_string();
+                    let confidence = self.confidence_scorer.calculate_ip_confidence(vec!["dns_resolution".to_string()]);
+                    
+                    let asset = self.create_or_update_asset(
+                        run_id,
+                        AssetType::Ip,
+                        &ip_str,
+                        SourceType::DnsResolution,
+                        confidence,
+                        seed_id,
+                        Some(domain_asset_id),
+                        Some(json!({ "resolved_from": domain })),
+                    ).await?;
+
+                    if asset.1 {
+                        result.assets_created.push(asset.0);
+                    } else {
+                        result.assets_updated.push(asset.0);
+                    }
+
+                    // Create relationship
+                    self.create_relationship(
+                        run_id,
+                        domain_asset_id,
+                        asset.0,
+                        RelationshipType::ResolvesTo,
+                        confidence,
+                    ).await?;
+                }
+            }
+            Err(e) => {
+                tracing::debug!("DNS resolution failed for {}: {}", domain, e);
+            }
+        }
+
+        // Step 3: TLS Certificate analysis (for pivoting)
+        match self.http_analyzer.get_tls_certificate_info(domain, 443).await {
+            Ok(cert_result) => {
+                if !cert_result.certificate_chain.is_empty() {
+                    let cert_info = &cert_result.certificate_chain[0];
+                    
+                    let confidence = self.confidence_scorer.calculate_certificate_confidence(
+                        cert_info.organization.is_some(),
+                        vec!["tls_certificate".to_string()],
+                    );
+
+                    let cert_asset = self.create_or_update_asset(
+                        run_id,
+                        AssetType::Certificate,
+                        &cert_info.subject,
+                        SourceType::TlsCertificate,
+                        confidence,
+                        seed_id,
+                        Some(domain_asset_id),
+                        Some(json!({
+                            "organization": cert_info.organization,
+                            "issuer": cert_info.issuer,
+                            "san_domains": cert_info.san_domains,
+                        })),
+                    ).await?;
+
+                    if cert_asset.1 {
+                        result.assets_created.push(cert_asset.0);
+                    } else {
+                        result.assets_updated.push(cert_asset.0);
+                    }
+
+                    self.create_relationship(
+                        run_id,
+                        domain_asset_id,
+                        cert_asset.0,
+                        RelationshipType::HasCertificate,
+                        confidence,
+                    ).await?;
+
+                    // Queue organization for discovery if found and depth allows
+                    if let Some(ref org) = cert_info.organization {
+                        if !self.should_filter_organization(org) && depth < self.settings.max_discovery_depth as i32 {
+                            self.queue_for_discovery(
+                                run_id,
+                                QueueItemType::Organization,
+                                org,
+                                seed_id,
+                                Some(cert_asset.0),
+                                depth + 1,
+                                5, // Lower priority for pivot
+                            ).await?;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!("TLS certificate analysis failed for {}: {}", domain, e);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Discover assets from an organization
+    async fn discover_from_organization(
+        &self,
+        run_id: Uuid,
+        org: &str,
+        seed_id: Option<Uuid>,
+        parent_asset_id: Option<Uuid>,
+        depth: i32,
+    ) -> Result<DiscoveryResult, ApiError> {
+        let mut result = DiscoveryResult::default();
+
+        // Skip common infrastructure orgs
+        if self.should_filter_organization(org) {
+            tracing::debug!("Filtered organization: {}", org);
+            return Ok(result);
+        }
+
+        // Create organization asset
+        let org_asset = self.create_or_update_asset(
+            run_id,
+            AssetType::Organization,
+            org,
+            SourceType::Seed,
+            0.8,
+            seed_id,
+            parent_asset_id,
+            Some(json!({ "discovery_depth": depth })),
+        ).await?;
+
+        if org_asset.1 {
+            result.assets_created.push(org_asset.0);
+        } else {
+            result.assets_updated.push(org_asset.0);
+        }
+
+        let org_asset_id = org_asset.0;
+
+        // Search Shodan for organization
+        match self.external_services.search_shodan_org_comprehensive(org).await {
+            Ok(extracted) => {
+                // Process IPs
+                for ip in &extracted.ips {
+                    let asset = self.create_or_update_asset(
+                        run_id,
+                        AssetType::Ip,
+                        ip,
+                        SourceType::Shodan,
+                        0.7,
+                        seed_id,
+                        Some(org_asset_id),
+                        Some(json!({ "organization": org })),
+                    ).await?;
+
+                    if asset.1 {
+                        result.assets_created.push(asset.0);
+                    }
+
+                    self.create_relationship(run_id, org_asset_id, asset.0, RelationshipType::BelongsToOrg, 0.7).await?;
+                }
+
+                // Process domains - queue for further discovery
+                for domain in &extracted.domains {
+                    let asset = self.create_or_update_asset(
+                        run_id,
+                        AssetType::Domain,
+                        domain,
+                        SourceType::Shodan,
+                        0.6,
+                        seed_id,
+                        Some(org_asset_id),
+                        Some(json!({ "organization": org })),
+                    ).await?;
+
+                    if asset.1 {
+                        result.assets_created.push(asset.0);
+
+                        // Queue for deeper discovery if within depth limit
+                        if depth < self.settings.max_discovery_depth as i32 {
+                            self.queue_for_discovery(
+                                run_id,
+                                QueueItemType::Domain,
+                                domain,
+                                seed_id,
+                                Some(asset.0),
+                                depth + 1,
+                                3,
+                            ).await?;
+                        }
+                    }
+
+                    self.create_relationship(run_id, org_asset_id, asset.0, RelationshipType::BelongsToOrg, 0.6).await?;
+                }
+            }
+            Err(e) => {
+                result.warnings.push(format!("Shodan org search failed: {}", e));
+            }
+        }
+
+        // Also search crt.sh for domains
+        match self.external_services.search_crtsh_by_organization(org).await {
+            Ok(domains) => {
+                for domain in domains.iter().take(50) { // Limit to prevent explosion
+                    let asset = self.create_or_update_asset(
+                        run_id,
+                        AssetType::Domain,
+                        domain,
+                        SourceType::Crtsh,
+                        0.6,
+                        seed_id,
+                        Some(org_asset_id),
+                        Some(json!({ "organization": org, "source": "crt.sh" })),
+                    ).await?;
+
+                    if asset.1 {
+                        result.assets_created.push(asset.0);
+                    }
+
+                    self.create_relationship(run_id, org_asset_id, asset.0, RelationshipType::BelongsToOrg, 0.6).await?;
+                }
+            }
+            Err(e) => {
+                tracing::debug!("crt.sh org search failed: {}", e);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Discover assets from an ASN
+    async fn discover_from_asn(
+        &self,
+        run_id: Uuid,
+        asn: &str,
+        seed_id: Option<Uuid>,
+        parent_asset_id: Option<Uuid>,
+        depth: i32,
+    ) -> Result<DiscoveryResult, ApiError> {
+        let mut result = DiscoveryResult::default();
+
+        // Create ASN asset
+        let asn_asset = self.create_or_update_asset(
+            run_id,
+            AssetType::Asn,
+            asn,
+            SourceType::Seed,
+            1.0,
+            seed_id,
+            parent_asset_id,
+            Some(json!({ "discovery_depth": depth })),
+        ).await?;
+
+        if asn_asset.1 {
+            result.assets_created.push(asn_asset.0);
+        }
+
+        let asn_asset_id = asn_asset.0;
+
+        // Search Shodan for ASN
+        match self.external_services.search_shodan_asn_comprehensive(asn).await {
+            Ok(extracted) => {
+                for ip in &extracted.ips {
+                    let asset = self.create_or_update_asset(
+                        run_id,
+                        AssetType::Ip,
+                        ip,
+                        SourceType::Shodan,
+                        0.8,
+                        seed_id,
+                        Some(asn_asset_id),
+                        Some(json!({ "asn": asn })),
+                    ).await?;
+
+                    if asset.1 {
+                        result.assets_created.push(asset.0);
+                    }
+
+                    self.create_relationship(run_id, asn_asset_id, asset.0, RelationshipType::BelongsToAsn, 0.8).await?;
+                }
+
+                for domain in &extracted.domains {
+                    let asset = self.create_or_update_asset(
+                        run_id,
+                        AssetType::Domain,
+                        domain,
+                        SourceType::Shodan,
+                        0.7,
+                        seed_id,
+                        Some(asn_asset_id),
+                        Some(json!({ "asn": asn })),
+                    ).await?;
+
+                    if asset.1 {
+                        result.assets_created.push(asset.0);
+                    }
+                }
+            }
+            Err(e) => {
+                result.warnings.push(format!("Shodan ASN search failed: {}", e));
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Discover assets from a CIDR range
+    async fn discover_from_cidr(
+        &self,
+        run_id: Uuid,
+        cidr: &str,
+        seed_id: Option<Uuid>,
+        _parent_asset_id: Option<Uuid>,
+        _depth: i32,
+    ) -> Result<DiscoveryResult, ApiError> {
+        let mut result = DiscoveryResult::default();
+
+        let ips = expand_cidr(cidr)?;
+        let max_hosts = self.settings.max_cidr_hosts as usize;
+
+        if ips.len() > max_hosts {
+            return Err(ApiError::Validation(format!(
+                "CIDR range {} has {} hosts, exceeding limit of {}",
+                cidr, ips.len(), max_hosts
+            )));
+        }
+
+        for ip in ips {
+            let ip_str = ip.to_string();
+            let asset = self.create_or_update_asset(
+                run_id,
+                AssetType::Ip,
+                &ip_str,
+                SourceType::CidrExpansion,
+                0.9, // High confidence for CIDR expansion
+                seed_id,
+                None,
+                Some(json!({ "cidr": cidr })),
+            ).await?;
+
+            if asset.1 {
+                result.assets_created.push(asset.0);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Discover information about an IP (reverse DNS, etc.)
+    async fn discover_from_ip(
+        &self,
+        run_id: Uuid,
+        ip: &str,
+        seed_id: Option<Uuid>,
+        parent_asset_id: Option<Uuid>,
+        _depth: i32,
+    ) -> Result<DiscoveryResult, ApiError> {
+        let mut result = DiscoveryResult::default();
+
+        // Create or get IP asset
+        let ip_asset = self.create_or_update_asset(
+            run_id,
+            AssetType::Ip,
+            ip,
+            SourceType::Seed,
+            1.0,
+            seed_id,
+            parent_asset_id,
+            None,
+        ).await?;
+
+        if ip_asset.1 {
+            result.assets_created.push(ip_asset.0);
+        }
+
+        let ip_asset_id = ip_asset.0;
+
+        // Reverse DNS lookup
+        if let Ok(ip_addr) = ip.parse() {
+            match self.dns_resolver.reverse_lookup(&ip_addr).await {
+                Ok(hostnames) => {
+                    for hostname in hostnames {
+                        let asset = self.create_or_update_asset(
+                            run_id,
+                            AssetType::Domain,
+                            &hostname,
+                            SourceType::ReverseDns,
+                            0.7,
+                            seed_id,
+                            Some(ip_asset_id),
+                            Some(json!({ "reverse_resolved_from": ip })),
+                        ).await?;
+
+                        if asset.1 {
+                            result.assets_created.push(asset.0);
+                        }
+
+                        self.create_relationship(
+                            run_id,
+                            ip_asset_id,
+                            asset.0,
+                            RelationshipType::ReverseResolvesTo,
+                            0.7,
+                        ).await?;
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("Reverse DNS failed for {}: {}", ip, e);
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    // ========================================================================
+    // HELPER METHODS
+    // ========================================================================
+
+    /// Create or update an asset and record its source
+    async fn create_or_update_asset(
+        &self,
+        run_id: Uuid,
+        asset_type: AssetType,
+        identifier: &str,
+        source_type: SourceType,
+        confidence: f64,
+        seed_id: Option<Uuid>,
+        parent_id: Option<Uuid>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<(Uuid, bool), ApiError> { // Returns (asset_id, was_created)
+        let asset_create = AssetCreate {
+            asset_type: asset_type.clone(),
+            identifier: identifier.to_string(),
+            confidence,
+            sources: json!([source_type.to_string()]),
+            metadata: metadata.unwrap_or(json!({})),
+            seed_id,
+            parent_id,
+            discovery_run_id: Some(run_id),
+            discovery_method: Some(source_type.to_string()),
+        };
+
+        // Check if asset exists
+        let existing = self.asset_repo.get_by_identifier(asset_type.clone(), identifier).await?;
+        let was_created = existing.is_none();
+
+        let asset = self.asset_repo.create_or_merge(&asset_create).await?;
+
+        // Record the source
+        let source_create = AssetSourceCreate {
+            asset_id: asset.id,
+            discovery_run_id: Some(run_id),
+            source_type,
+            source_confidence: confidence,
+            raw_data: None,
+        };
+        self.asset_source_repo.create(&source_create).await?;
+
+        Ok((asset.id, was_created))
+    }
+
+    /// Create a relationship between assets
+    async fn create_relationship(
+        &self,
+        run_id: Uuid,
+        source_id: Uuid,
+        target_id: Uuid,
+        rel_type: RelationshipType,
+        confidence: f64,
+    ) -> Result<Uuid, ApiError> {
+        let rel_create = AssetRelationshipCreate {
+            source_asset_id: source_id,
+            target_asset_id: target_id,
+            relationship_type: rel_type,
+            confidence,
+            metadata: None,
+            discovery_run_id: Some(run_id),
+        };
+
+        let rel = self.asset_relationship_repo.create_or_update(&rel_create).await?;
+        Ok(rel.id)
+    }
+
+    /// Queue an item for discovery
+    async fn queue_for_discovery(
+        &self,
+        run_id: Uuid,
+        item_type: QueueItemType,
+        item_value: &str,
+        seed_id: Option<Uuid>,
+        parent_asset_id: Option<Uuid>,
+        depth: i32,
+        priority: i32,
+    ) -> Result<(), ApiError> {
+        let item = DiscoveryQueueItemCreate {
+            discovery_run_id: run_id,
+            item_type,
+            item_value: item_value.to_string(),
+            parent_asset_id,
+            seed_id,
+            depth,
+            priority,
+        };
+
+        self.discovery_queue_repo.enqueue(&item).await?;
+        Ok(())
+    }
+
+    /// Check if an organization should be filtered out
+    fn should_filter_organization(&self, org: &str) -> bool {
+        let org_lower = org.to_lowercase();
+        
+        if org_lower.trim().is_empty() || org_lower.len() < 3 {
+            return true;
+        }
+
+        for infra_org in COMMON_INFRASTRUCTURE_ORGS {
+            if org_lower.contains(infra_org) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Calculate confidence for subdomain discovery
+    fn calculate_subdomain_confidence(&self, sources: &HashMap<String, Vec<String>>) -> f64 {
+        let source_count = sources.len();
+        let base = 0.5;
+        let boost = (source_count as f64 - 1.0) * 0.1;
+        (base + boost).min(0.9)
     }
 }
 
-// Implement Clone for DiscoveryService to enable Arc sharing in background tasks
+// Implement Clone for async task spawning
 impl Clone for DiscoveryService {
     fn clone(&self) -> Self {
         Self {
             asset_repo: Arc::clone(&self.asset_repo),
             seed_repo: Arc::clone(&self.seed_repo),
+            discovery_run_repo: Arc::clone(&self.discovery_run_repo),
+            discovery_queue_repo: Arc::clone(&self.discovery_queue_repo),
+            asset_source_repo: Arc::clone(&self.asset_source_repo),
+            asset_relationship_repo: Arc::clone(&self.asset_relationship_repo),
             external_services: Arc::clone(&self.external_services),
             dns_resolver: Arc::clone(&self.dns_resolver),
             http_analyzer: Arc::clone(&self.http_analyzer),
             task_manager: Arc::clone(&self.task_manager),
             settings: Arc::clone(&self.settings),
-            discovery_status: Arc::clone(&self.discovery_status),
-            scan_service: Arc::clone(&self.scan_service),
             confidence_scorer: Arc::clone(&self.confidence_scorer),
+            status: Arc::clone(&self.status),
         }
     }
 }

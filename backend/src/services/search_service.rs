@@ -25,6 +25,10 @@ pub struct IndexedAsset {
     pub confidence: f64,
     pub sources: Value,
     pub metadata: Value,
+    pub importance: i32,
+    pub risk_score: Option<f64>,
+    pub risk_level: Option<String>,
+    pub last_risk_run: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -107,6 +111,10 @@ impl ElasticsearchService {
                     "confidence": { "type": "float" },
                     "sources": { "type": "object" },
                     "metadata": { "type": "object" },
+                    "importance": { "type": "integer" },
+                    "risk_score": { "type": "float" },
+                    "risk_level": { "type": "keyword" },
+                    "last_risk_run": { "type": "date" },
                     "created_at": { "type": "date" },
                     "updated_at": { "type": "date" }
                 }
@@ -189,6 +197,10 @@ impl ElasticsearchService {
             confidence: asset.confidence,
             sources: asset.sources.clone(),
             metadata: asset.metadata.clone(),
+            importance: asset.importance,
+            risk_score: asset.risk_score,
+            risk_level: asset.risk_level.clone(),
+            last_risk_run: asset.last_risk_run.map(|d| d.to_rfc3339()),
             created_at: asset.created_at.to_rfc3339(),
             updated_at: asset.updated_at.to_rfc3339(),
         }
@@ -503,6 +515,10 @@ mod tests {
             updated_at: Utc::now(),
             seed_id: None,
             parent_id: None,
+            importance: 0,
+            risk_score: None,
+            risk_level: None,
+            last_risk_run: None,
             last_scan_id: None,
             last_scan_status: None,
             last_scanned_at: None,

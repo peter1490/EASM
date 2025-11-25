@@ -262,6 +262,10 @@ mod tests {
             Ok(self.findings.get(scan_id).cloned().unwrap_or_default())
         }
 
+        async fn list_by_asset(&self, _asset_identifier: &str) -> Result<Vec<Finding>, ApiError> {
+            Ok(Vec::new())
+        }
+
         async fn list_by_type(&self, _finding_type: &str) -> Result<Vec<Finding>, ApiError> {
             Ok(Vec::new())
         }

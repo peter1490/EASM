@@ -2,10 +2,20 @@ use std::sync::Arc;
 use crate::{
     config::Settings,
     database::DatabasePool,
-    repositories::{ScanRepository, FindingRepository, AssetRepository, EvidenceRepository, SeedRepository},
-    services::{ScanService, DiscoveryService, TaskManager, DriftService, DriftServiceImpl, SearchService, ElasticsearchService, MetricsService},
+    repositories::{
+        ScanRepository, FindingRepository, AssetRepository, EvidenceRepository, SeedRepository, UserRepository,
+        scan_repo::SqlxScanRepository,
+        finding_repo::SqlxFindingRepository,
+        asset_repo::SqlxAssetRepository,
+        evidence_repo::SqlxEvidenceRepository,
+        seed_repo::SqlxSeedRepository,
+        user_repo::SqlxUserRepository,
+    },
+    services::{ScanService, DiscoveryService, TaskManager, DriftService, DriftServiceImpl, SearchService, ElasticsearchService, MetricsService, AuthService, RiskService},
     services::external::{ExternalServicesManager, DnsResolver, HttpAnalyzer},
 };
+use axum_extra::extract::cookie::Key;
+use axum::extract::FromRef;
 
 pub mod config;
 pub mod database;
@@ -16,6 +26,7 @@ pub mod models;
 pub mod repositories;
 pub mod services;
 pub mod utils;
+pub mod auth;
 
 /// Shared application state containing all dependencies
 #[derive(Clone)]
@@ -28,14 +39,25 @@ pub struct AppState {
     pub drift_service: Arc<dyn DriftService + Send + Sync>,
     pub search_service: Option<Arc<dyn SearchService + Send + Sync>>,
     pub metrics_service: Arc<MetricsService>,
+    pub auth_service: Arc<AuthService>,
+    pub risk_service: Arc<RiskService>, // Added
     pub scan_repository: Arc<dyn ScanRepository + Send + Sync>,
     pub finding_repository: Arc<dyn FindingRepository + Send + Sync>,
     pub asset_repository: Arc<dyn AssetRepository + Send + Sync>,
     pub evidence_repository: Arc<dyn EvidenceRepository + Send + Sync>,
     pub seed_repository: Arc<dyn SeedRepository + Send + Sync>,
+    pub user_repository: Arc<dyn UserRepository + Send + Sync>,
     // Add convenience accessors for handlers
     pub scan_repo: Arc<dyn ScanRepository + Send + Sync>,
     pub finding_repo: Arc<dyn FindingRepository + Send + Sync>,
+    pub key: Key,
+}
+
+// Implement FromRef to allow extracting Key from AppState
+impl FromRef<AppState> for Key {
+    fn from_ref(state: &AppState) -> Self {
+        state.key.clone()
+    }
 }
 
 impl AppState {
@@ -49,21 +71,27 @@ impl AppState {
     pub async fn new_with_pool(config: Settings, db_pool: DatabasePool) -> Result<Self, crate::error::ApiError> {
         let config_arc = Arc::new(config.clone());
         
+        // Create cookie key
+        let key = Key::from(config.auth_secret.as_bytes());
+        
         // Create repositories
         let scan_repository: Arc<dyn ScanRepository + Send + Sync> = Arc::new(
-            crate::repositories::SqlxScanRepository::new(db_pool.clone())
+            SqlxScanRepository::new(db_pool.clone())
         );
         let finding_repository: Arc<dyn FindingRepository + Send + Sync> = Arc::new(
-            crate::repositories::SqlxFindingRepository::new(db_pool.clone())
+            SqlxFindingRepository::new(db_pool.clone())
         );
         let asset_repository: Arc<dyn AssetRepository + Send + Sync> = Arc::new(
-            crate::repositories::SqlxAssetRepository::new(db_pool.clone())
+            SqlxAssetRepository::new(db_pool.clone())
         );
         let evidence_repository: Arc<dyn EvidenceRepository + Send + Sync> = Arc::new(
-            crate::repositories::SqlxEvidenceRepository::new(db_pool.clone())
+            SqlxEvidenceRepository::new(db_pool.clone())
         );
         let seed_repository: Arc<dyn SeedRepository + Send + Sync> = Arc::new(
-            crate::repositories::SqlxSeedRepository::new(db_pool.clone())
+            SqlxSeedRepository::new(db_pool.clone())
+        );
+        let user_repository: Arc<dyn UserRepository + Send + Sync> = Arc::new(
+            SqlxUserRepository::new(db_pool.clone())
         );
         
         // Create external services and utilities
@@ -146,6 +174,18 @@ impl AppState {
         
         // Create metrics service
         let metrics_service = Arc::new(MetricsService::new());
+
+        // Create auth service
+        let auth_service = Arc::new(AuthService::new(
+            config_arc.clone(),
+            user_repository.clone(),
+        ).await?);
+
+        // Create risk service
+        let risk_service = Arc::new(RiskService::new(
+            asset_repository.clone(),
+            finding_repository.clone(),
+        ));
         
         Ok(Self {
             config: config_arc,
@@ -156,14 +196,18 @@ impl AppState {
             drift_service,
             search_service,
             metrics_service,
+            auth_service,
+            risk_service,
             scan_repository: scan_repository.clone(),
             finding_repository: finding_repository.clone(),
             asset_repository,
             evidence_repository,
             seed_repository,
+            user_repository,
             // Add convenience accessors for handlers
             scan_repo: scan_repository,
             finding_repo: finding_repository,
+            key,
         })
     }
 }

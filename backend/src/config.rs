@@ -34,6 +34,9 @@ where
 /// Matches the Python backend configuration exactly
 #[derive(Debug, Clone, Deserialize)]
 pub struct Settings {
+    // Environment
+    pub environment: String,
+    
     // Database
     pub database_url: String,
     
@@ -57,6 +60,25 @@ pub struct Settings {
     pub api_key_header: String,
     #[serde(deserialize_with = "deserialize_comma_separated")]
     pub api_keys: Vec<String>,
+    
+    // Authentication (OIDC/SAML)
+    pub auth_secret: String, // For session signing
+    pub auth_session_expiry_seconds: u64,
+    
+    // Google OIDC
+    pub google_client_id: Option<String>,
+    pub google_client_secret: Option<String>,
+    pub google_discovery_url: Option<String>,
+    pub google_redirect_uri: Option<String>,
+    #[serde(deserialize_with = "deserialize_comma_separated")]
+    pub google_allowed_domains: Vec<String>,
+
+    // Keycloak (OIDC for now as SAML crate support is mixed)
+    pub keycloak_client_id: Option<String>,
+    pub keycloak_client_secret: Option<String>,
+    pub keycloak_discovery_url: Option<String>,
+    pub keycloak_redirect_uri: Option<String>,
+    pub keycloak_realm: Option<String>,
     
     // Logging
     pub log_level: String,
@@ -130,6 +152,7 @@ impl Settings {
         }
 
         let mut builder = config::Config::builder()
+            .set_default("environment", "production")?
             // Database defaults
             .set_default("database_url", "postgresql://easm:easm@localhost:5432/easm")?
             .set_default("elasticsearch_url", None::<String>)?
@@ -150,6 +173,20 @@ impl Settings {
             .set_default("api_key_header", "X-API-Key")?
             .set_default("api_keys", "")?
             
+            // Auth defaults
+            .set_default("auth_secret", "changeme_super_secret_session_key_must_be_at_least_64_bytes_long_for_security_reasons_so_here_is_a_very_long_string_!!")?
+            .set_default("auth_session_expiry_seconds", 86400u64)? // 24 hours
+            .set_default("google_client_id", None::<String>)?
+            .set_default("google_client_secret", None::<String>)?
+            .set_default("google_discovery_url", Some("https://accounts.google.com".to_string()))?
+            .set_default("google_redirect_uri", Some("http://localhost:3000/api/auth/callback/google".to_string()))?
+            .set_default("google_allowed_domains", "")?
+            .set_default("keycloak_client_id", None::<String>)?
+            .set_default("keycloak_client_secret", None::<String>)?
+            .set_default("keycloak_discovery_url", None::<String>)?
+            .set_default("keycloak_redirect_uri", Some("http://localhost:3000/api/auth/callback/keycloak".to_string()))?
+            .set_default("keycloak_realm", None::<String>)?
+
             // Logging defaults
             .set_default("log_level", "INFO")?
             .set_default("log_format", "json")?
@@ -220,6 +257,7 @@ impl Settings {
         }
 
         // String overrides (UPPERCASE only, special-case database_url to also consider lowercase for tests)
+        if let Some(v) = read_env("ENVIRONMENT") { builder = builder.set_override("environment", v)?; }
         if let Some(v) = read_env("DATABASE_URL").or_else(|| std::env::var("database_url").ok()) { builder = builder.set_override("database_url", v)?; }
         if let Some(v) = read_env("ELASTICSEARCH_URL") { builder = builder.set_override("elasticsearch_url", v)?; }
         if let Some(v) = read_env("ELASTICSEARCH_ASSET_INDEX") { builder = builder.set_override("elasticsearch_asset_index", v)?; }
@@ -234,6 +272,20 @@ impl Settings {
         if let Some(v) = read_env("CORS_ALLOW_ORIGINS") { builder = builder.set_override("cors_allow_origins", v)?; }
         if let Some(v) = read_env("API_KEY_HEADER") { builder = builder.set_override("api_key_header", v)?; }
         if let Some(v) = read_env("API_KEYS") { builder = builder.set_override("api_keys", v)?; }
+        
+        // Auth overrides
+        if let Some(v) = read_env("AUTH_SECRET") { builder = builder.set_override("auth_secret", v)?; }
+        if let Some(v) = read_env("GOOGLE_CLIENT_ID") { builder = builder.set_override("google_client_id", v)?; }
+        if let Some(v) = read_env("GOOGLE_CLIENT_SECRET") { builder = builder.set_override("google_client_secret", v)?; }
+        if let Some(v) = read_env("GOOGLE_DISCOVERY_URL") { builder = builder.set_override("google_discovery_url", v)?; }
+        if let Some(v) = read_env("GOOGLE_REDIRECT_URI") { builder = builder.set_override("google_redirect_uri", v)?; }
+        if let Some(v) = read_env("GOOGLE_ALLOWED_DOMAINS") { builder = builder.set_override("google_allowed_domains", v)?; }
+        if let Some(v) = read_env("KEYCLOAK_CLIENT_ID") { builder = builder.set_override("keycloak_client_id", v)?; }
+        if let Some(v) = read_env("KEYCLOAK_CLIENT_SECRET") { builder = builder.set_override("keycloak_client_secret", v)?; }
+        if let Some(v) = read_env("KEYCLOAK_DISCOVERY_URL") { builder = builder.set_override("keycloak_discovery_url", v)?; }
+        if let Some(v) = read_env("KEYCLOAK_REDIRECT_URI") { builder = builder.set_override("keycloak_redirect_uri", v)?; }
+        if let Some(v) = read_env("KEYCLOAK_REALM") { builder = builder.set_override("keycloak_realm", v)?; }
+
         if let Some(v) = read_env("LOG_LEVEL") { builder = builder.set_override("log_level", v)?; }
         if let Some(v) = read_env("LOG_FORMAT") { builder = builder.set_override("log_format", v)?; }
         if let Some(v) = read_env("SQL_LOG_LEVEL") { builder = builder.set_override("sql_log_level", v)?; }
@@ -260,6 +312,7 @@ impl Settings {
         if let Some(v) = read_env("RATE_LIMIT_WINDOW_SECONDS").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("rate_limit_window_seconds", v)?; }
         if let Some(v) = read_env("MAX_CONCURRENT_SCANS").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("max_concurrent_scans", v)?; }
         if let Some(v) = read_env("SCAN_QUEUE_CHECK_INTERVAL").and_then(|s| s.parse::<f64>().ok()) { builder = builder.set_override("scan_queue_check_interval", v)?; }
+        if let Some(v) = read_env("AUTH_SESSION_EXPIRY_SECONDS").and_then(|s| s.parse::<u64>().ok()) { builder = builder.set_override("auth_session_expiry_seconds", v)?; }
 
         // Boolean overrides
         if let Some(v) = parse_bool_env("ENABLE_WAYBACK") { builder = builder.set_override("enable_wayback", v)?; }

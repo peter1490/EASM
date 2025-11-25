@@ -22,6 +22,9 @@ pub enum ApiError {
     
     #[error("Configuration error: {0}")]
     Config(#[from] config::ConfigError),
+
+    #[error("Configuration error: {0}")]
+    Configuration(String),
     
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -52,6 +55,9 @@ pub enum ApiError {
     
     #[error("Internal server error: {0}")]
     Internal(String),
+
+    #[error("Unknown error: {0}")]
+    Anyhow(#[from] anyhow::Error),
 }
 
 impl ApiError {
@@ -146,6 +152,14 @@ impl IntoResponse for ApiError {
                 );
                 (StatusCode::INTERNAL_SERVER_ERROR, "Configuration error", "CONFIG_ERROR")
             }
+            ApiError::Configuration(ref msg) => {
+                tracing::error!(
+                    error_id = %error_id,
+                    error = %msg,
+                    "configuration error occurred"
+                );
+                (StatusCode::INTERNAL_SERVER_ERROR, msg.as_str(), "CONFIG_ERROR")
+            }
             ApiError::Io(ref err) => {
                 tracing::error!(
                     error_id = %error_id,
@@ -225,6 +239,14 @@ impl IntoResponse for ApiError {
                     "internal server error occurred"
                 );
                 (StatusCode::INTERNAL_SERVER_ERROR, msg.as_str(), "INTERNAL_ERROR")
+            }
+            ApiError::Anyhow(ref err) => {
+                tracing::error!(
+                    error_id = %error_id,
+                    error = %err,
+                    "unexpected error occurred"
+                );
+                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error", "INTERNAL_ERROR")
             }
         };
 

@@ -257,7 +257,7 @@ impl DiscoveryService {
     }
 
     pub async fn delete_seed(&self, id: &Uuid) -> Result<(), ApiError> {
-        self.seed_repo.delete(id).await
+        self.seed_repo.delete(*id).await
     }
 
     pub async fn list_assets(

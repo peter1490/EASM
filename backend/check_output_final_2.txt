@@ -1,0 +1,196 @@
+     Locking 10 packages to latest compatible versions
+      Adding aead v0.5.2
+      Adding aes v0.8.4
+      Adding aes-gcm v0.10.3
+      Adding cipher v0.4.4
+      Adding ctr v0.9.2
+      Adding ghash v0.5.1
+      Adding inout v0.1.4
+      Adding opaque-debug v0.3.1
+      Adding polyval v0.6.2
+      Adding universal-hash v0.5.1
+   Compiling cookie v0.18.1
+    Checking sqlx-core v0.7.4
+    Checking oauth2 v4.4.2
+    Checking blake2 v0.10.6
+    Checking argon2 v0.5.3
+    Checking openidconnect v3.5.0
+    Checking axum-extra v0.9.6
+    Checking sqlx-postgres v0.7.4
+    Checking sqlx v0.7.4
+    Checking rust-backend v0.1.0 (/Users/pbalivet/Documents/DEV/Others/EASM/backend)
+error: error returned from database: password authentication failed for user "easm"
+  --> src/repositories/user_repo.rs:60:20
+   |
+60 |           let user = sqlx::query_as!(
+   |  ____________________^
+61 | |             User,
+62 | |             "SELECT id, email, created_at, updated_at, last_login_at, password_hash FROM users WHERE email = $1",
+63 | |             email
+64 | |         )
+   | |_________^
+   |
+   = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query_as` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error returned from database: password authentication failed for user "easm"
+  --> src/repositories/user_repo.rs:73:20
+   |
+73 |           let user = sqlx::query_as!(
+   |  ____________________^
+74 | |             User,
+75 | |             "SELECT id, email, created_at, updated_at, last_login_at, password_hash FROM users WHERE id = $1",
+76 | |             id
+77 | |         )
+   | |_________^
+   |
+   = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query_as` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error returned from database: password authentication failed for user "easm"
+  --> src/repositories/user_repo.rs:86:20
+   |
+86 |   ...   let user = sqlx::query_as!(
+   |  __________________^
+87 | | ...       User,
+88 | | ...       "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email, created_at, updated_at, last_login_at, password_...
+89 | | ...       email,
+90 | | ...       password_hash
+91 | | ...   )
+   | |_______^
+   |
+   = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query_as` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error returned from database: password authentication failed for user "easm"
+   --> src/repositories/user_repo.rs:100:9
+    |
+100 | /         sqlx::query!(
+101 | |             "UPDATE users SET last_login_at = NOW() WHERE id = $1",
+102 | |             user_id
+103 | |         )
+    | |_________^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error returned from database: password authentication failed for user "easm"
+   --> src/repositories/user_repo.rs:112:24
+    |
+112 |   ...   let identity = sqlx::query_as!(
+    |  ______________________^
+113 | | ...       Identity,
+114 | | ...       "SELECT id, user_id, provider, provider_id, email, created_at, last_login_at FROM identities WHERE provider = $1 AND provider_i...
+115 | | ...       provider,
+116 | | ...       provider_id
+117 | | ...   )
+    | |_______^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query_as` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error returned from database: password authentication failed for user "easm"
+   --> src/repositories/user_repo.rs:126:24
+    |
+126 |   ...   let identity = sqlx::query_as!(
+    |  ______________________^
+127 | | ...       Identity,
+128 | | ...       "INSERT INTO identities (user_id, provider, provider_id, email) VALUES ($1, $2, $3, $4) RETURNING id, user_id, provider, provid...
+129 | | ...       user_id,
+...   |
+132 | | ...       email
+133 | | ...   )
+    | |_______^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query_as` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error returned from database: password authentication failed for user "easm"
+   --> src/repositories/user_repo.rs:142:21
+    |
+142 |           let roles = sqlx::query!(
+    |  _____________________^
+143 | |             "SELECT role FROM user_roles WHERE user_id = $1",
+144 | |             user_id
+145 | |         )
+    | |_________^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error returned from database: password authentication failed for user "easm"
+   --> src/repositories/user_repo.rs:160:9
+    |
+160 | /         sqlx::query!(
+161 | |             "INSERT INTO user_roles (user_id, role, assigned_by) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+162 | |             user_id,
+163 | |             role_str,
+164 | |             assigned_by
+165 | |         )
+    | |_________^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error returned from database: password authentication failed for user "easm"
+   --> src/repositories/user_repo.rs:175:9
+    |
+175 | /         sqlx::query!(
+176 | |             "DELETE FROM user_roles WHERE user_id = $1 AND role = $2",
+177 | |             user_id,
+178 | |             role_str
+179 | |         )
+    | |_________^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error returned from database: password authentication failed for user "easm"
+   --> src/repositories/user_repo.rs:188:21
+    |
+188 |           let users = sqlx::query_as!(
+    |  _____________________^
+189 | |             User,
+190 | |             "SELECT id, email, created_at, updated_at, last_login_at, password_hash FROM users ORDER BY created_at DESC"
+191 | |         )
+    | |_________^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query_as` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `Redirect`
+ --> src/handlers/auth_handlers.rs:3:16
+  |
+3 |     response::{Redirect, IntoResponse},
+  |                ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `Extension`
+ --> src/middleware/auth.rs:6:5
+  |
+6 |     Extension,
+  |     ^^^^^^^^^
+
+warning: unused import: `crate::config::Settings`
+ --> src/middleware/auth.rs:8:5
+  |
+8 | use crate::config::Settings;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Postgres` and `Transaction`
+ --> src/repositories/user_repo.rs:2:20
+  |
+2 | use sqlx::{PgPool, Postgres, Transaction};
+  |                    ^^^^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> src/services/auth_service.rs:6:22
+  |
+6 | use anyhow::{Result, Context};
+  |                      ^^^^^^^
+
+warning: unused import: `hash_password`
+  --> src/services/auth_service.rs:10:28
+   |
+10 | use crate::utils::crypto::{hash_password, verify_password};
+   |                            ^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> src/auth/identity_provider.rs:9:5
+  |
+9 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: `rust-backend` (lib) generated 7 warnings
+error: could not compile `rust-backend` (lib) due to 10 previous errors; 7 warnings emitted

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, State, Extension},
     response::Json,
 };
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use crate::{
     error::ApiError,
     models::{Asset, Seed, SeedCreate},
     AppState,
+    auth::{context::UserContext, rbac::Role},
 };
 
 #[derive(Debug, Deserialize)]
@@ -26,6 +27,11 @@ pub struct AssetListResponse {
     pub total_count: i64,
     pub limit: i64,
     pub offset: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateImportanceRequest {
+    pub importance: i32,
 }
 
 pub async fn create_seed(
@@ -91,4 +97,22 @@ pub async fn get_asset_path(
 ) -> Result<Json<Vec<Asset>>, ApiError> {
     let path = app_state.discovery_service.get_asset_path(&id).await?;
     Ok(Json(path))
+}
+
+pub async fn update_asset_importance(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateImportanceRequest>,
+) -> Result<Json<Asset>, ApiError> {
+    if !user.has_role(Role::Analyst) && !user.has_role(Role::Operator) && !user.has_role(Role::Admin) {
+         return Err(ApiError::Authorization("Analyst role or higher required".to_string()));
+    }
+    
+    if payload.importance < 0 || payload.importance > 5 {
+        return Err(ApiError::Validation("Importance must be between 0 and 5".to_string()));
+    }
+
+    let asset = app_state.asset_repository.update_importance(&id, payload.importance).await?;
+    Ok(Json(asset))
 }

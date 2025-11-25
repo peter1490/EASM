@@ -54,6 +54,12 @@ pub struct Asset {
     pub updated_at: DateTime<Utc>,
     pub seed_id: Option<Uuid>,
     pub parent_id: Option<Uuid>,
+    // Risk related fields
+    #[serde(default)]
+    pub importance: i32,
+    pub risk_score: Option<f64>,
+    pub risk_level: Option<String>,
+    pub last_risk_run: Option<DateTime<Utc>>,
     // Optional fields for frontend compatibility (not in DB yet)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_scan_id: Option<String>,
@@ -78,6 +84,14 @@ pub struct AssetRow {
     #[sqlx(default)]
     pub parent_id: Option<Uuid>,
     #[sqlx(default)]
+    pub importance: i32,
+    #[sqlx(default)]
+    pub risk_score: Option<f64>,
+    #[sqlx(default)]
+    pub risk_level: Option<String>,
+    #[sqlx(default)]
+    pub last_risk_run: Option<DateTime<Utc>>,
+    #[sqlx(default)]
     pub last_scan_id: Option<Uuid>,
     #[sqlx(default)]
     pub last_scan_status: Option<String>, // Using String since ScanStatus enum might need sqlx Type impl
@@ -98,6 +112,10 @@ impl From<AssetRow> for Asset {
             updated_at: row.updated_at,
             seed_id: row.seed_id,
             parent_id: row.parent_id,
+            importance: row.importance,
+            risk_score: row.risk_score,
+            risk_level: row.risk_level,
+            last_risk_run: row.last_risk_run,
             last_scan_id: row.last_scan_id.map(|id| id.to_string()),
             last_scan_status: row.last_scan_status,
             last_scanned_at: row.last_scanned_at,
@@ -105,12 +123,15 @@ impl From<AssetRow> for Asset {
     }
 }
 
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Seed {
     pub id: Uuid,
     pub seed_type: SeedType,
     pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -128,4 +149,5 @@ pub struct AssetCreate {
 pub struct SeedCreate {
     pub seed_type: SeedType,
     pub value: String,
+    pub note: Option<String>,
 }

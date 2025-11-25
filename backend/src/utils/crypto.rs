@@ -272,3 +272,36 @@ mod tests {
         assert!(true);
     }
 }
+
+// Password hashing utilities
+use argon2::{
+    password_hash::{
+        rand_core::OsRng,
+        PasswordHash, PasswordHasher, PasswordVerifier, SaltString
+    },
+    Argon2
+};
+
+pub fn hash_password(password: &str) -> Result<String, ApiError> {
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    
+    let password_hash = argon2.hash_password(password.as_bytes(), &salt)
+        .map_err(|e| ApiError::Internal(format!("Failed to hash password: {}", e)))?
+        .to_string();
+        
+    Ok(password_hash)
+}
+
+pub fn verify_password(password: &str, password_hash: &str) -> Result<bool, ApiError> {
+    let parsed_hash = PasswordHash::new(password_hash)
+        .map_err(|e| ApiError::Internal(format!("Invalid password hash: {}", e)))?;
+        
+    let result = Argon2::default().verify_password(password.as_bytes(), &parsed_hash);
+    
+    match result {
+        Ok(_) => Ok(true),
+        Err(argon2::password_hash::Error::Password) => Ok(false),
+        Err(e) => Err(ApiError::Internal(format!("Password verification error: {}", e))),
+    }
+}

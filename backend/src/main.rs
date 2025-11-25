@@ -1,9 +1,9 @@
 use axum::{
-    routing::{get, post, delete},
+    routing::{get, post, delete, patch},
     Router,
+    Extension,
 };
 use std::net::SocketAddr;
-
 use tokio::signal;
 
 use rust_backend::{AppState, config, handlers, middleware};
@@ -18,19 +18,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Starting Rust EASM Backend v{}", env!("CARGO_PKG_VERSION"));
 
-    // Create application state with dependency injection
+    // Create application state with dependency injection (Key is created inside)
     let app_state = AppState::new(config.clone()).await?;
 
     // Create CORS layer with configuration
     let cors_layer = middleware::create_cors_layer(config.cors_allow_origins.clone());
 
-    // Build our application with routes
-    let app = Router::new()
+    // Public routes (Health + Auth)
+    let public_routes = Router::new()
         // Health check endpoints
         .route("/api/health", get(handlers::health_check))
         .route("/api/health/simple", get(handlers::health_check_simple))
         .route("/api/health/ready", get(handlers::readiness_check))
         .route("/api/health/live", get(handlers::liveness_check))
+        // Auth endpoints
+        .route("/api/auth/google/login", get(handlers::auth_handlers::login_google))
+        .route("/api/auth/google/callback", get(handlers::auth_handlers::callback_google))
+        .route("/api/auth/keycloak/login", get(handlers::auth_handlers::login_keycloak))
+        .route("/api/auth/keycloak/callback", get(handlers::auth_handlers::callback_keycloak))
+        .route("/api/auth/login", post(handlers::auth_handlers::login_local))
+        .route("/api/auth/logout", post(handlers::auth_handlers::logout));
+
+    // Protected routes (require API key or session)
+    let protected_routes = Router::new()
+        // Me endpoint
+        .route("/api/auth/me", get(handlers::auth_handlers::get_me))
+        // Admin endpoints
+        .route("/api/admin/users", get(handlers::admin_handlers::list_users))
+        .route("/api/admin/users/:id/roles", post(handlers::admin_handlers::update_user_role))
         // Scan endpoints
         .route("/api/scans", post(handlers::scan_handlers::create_scan))
         .route("/api/scans", get(handlers::scan_handlers::list_scans))
@@ -39,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/assets", get(handlers::asset_handlers::list_assets))
         .route("/api/assets/:id", get(handlers::asset_handlers::get_asset))
         .route("/api/assets/:id/path", get(handlers::asset_handlers::get_asset_path))
+        .route("/api/assets/:id/importance", patch(handlers::asset_handlers::update_asset_importance))
         // Seed endpoints
         .route("/api/seeds", post(handlers::asset_handlers::create_seed))
         .route("/api/seeds", get(handlers::asset_handlers::list_seeds))
@@ -55,8 +71,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Static file serving for evidence files
         .route("/api/static/evidence/*file", get(handlers::serve_evidence_file))
         .route("/api/static/health", get(handlers::static_files_health_check))
-        // Risk scoring endpoint
-        .route("/api/risk/calculate", get(handlers::risk_handlers::calculate_risk))
+        // Risk scoring endpoints (UPDATED)
+        .route("/api/risk/assets/:id", get(handlers::risk_handlers::get_asset_risk)) // New
+        .route("/api/risk/assets/:id/recalculate", post(handlers::risk_handlers::recalculate_asset_risk)) // New
+        .route("/api/risk/overview", get(handlers::risk_handlers::get_risk_overview)) // New
         // Port drift detection endpoints
         .route("/api/scans/:id/drift/detect", post(handlers::drift_handlers::detect_port_drift))
         .route("/api/scans/:id/drift/findings", get(handlers::drift_handlers::get_drift_findings))
@@ -74,8 +92,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/metrics/health", get(handlers::metrics_handlers::get_health_metrics))
         .route("/api/metrics/endpoint/*endpoint", get(handlers::metrics_handlers::get_endpoint_metrics))
         .route("/api/metrics/clear", post(handlers::metrics_handlers::clear_metrics))
+        // Add auth middleware
+        .route_layer(axum::middleware::from_fn_with_state(app_state.clone(), middleware::auth::auth_middleware));
+
+    // Build our application with routes
+    let app = Router::new()
+        .merge(public_routes)
+        .merge(protected_routes)
         .with_state(app_state)
-        // Apply middleware layers
+        // Apply middleware layers (global)
         .layer(axum::middleware::from_fn(middleware::performance_middleware))
         .layer(axum::middleware::from_fn(middleware::security_headers_middleware))
         .layer(axum::middleware::from_fn(middleware::request_logging_middleware))

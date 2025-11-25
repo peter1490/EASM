@@ -2,48 +2,50 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { createScan, listScans, type Scan, type ScanOptions } from "@/app/api";
+import { 
+  getMetrics, 
+  getDiscoveryStatus, 
+  getSecurityFindingsSummary,
+  getRiskOverview,
+  listScans, 
+  type Scan, 
+  type SystemMetrics,
+  type DiscoveryStatus,
+} from "@/app/api";
 import Button from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import Badge from "@/components/ui/Badge";
-import Input from "@/components/ui/Input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/Table";
 import EmptyState from "@/components/ui/EmptyState";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import Header from "@/components/Header";
-
-type OptionKey = keyof Required<Pick<ScanOptions,
-  | "enumerate_subdomains"
-  | "resolve_dns"
-  | "reverse_dns"
-  | "scan_common_ports"
-  | "http_probe"
-  | "tls_info"
->>;
-
-const OPTION_ENTRIES: Array<[OptionKey, string]> = [
-  ["enumerate_subdomains", "Enumerate subdomains"],
-  ["resolve_dns", "Resolve DNS"],
-  ["reverse_dns", "Reverse DNS"],
-  ["scan_common_ports", "Scan ports"],
-  ["http_probe", "HTTP probe"],
-  ["tls_info", "TLS info"],
-];
+import { useAuth } from "@/context/AuthContext";
 
 export default function Dashboard() {
+  const { user } = useAuth();
   const [scans, setScans] = useState<Scan[]>([]);
-  const [target, setTarget] = useState("");
-  const [note, setNote] = useState("");
-  const [opts, setOpts] = useState<ScanOptions>({});
+  const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
+  const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus | null>(null);
+  const [findingsSummary, setFindingsSummary] = useState<Record<string, number>>({});
+  const [riskOverview, setRiskOverview] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [error, setError] = useState<string | null>(null);
-  const [showAdvanced, setShowAdvanced] = useState(false);
 
-  async function refresh() {
+  async function loadData() {
     try {
-      const data = await listScans();
-      setScans(data);
+      const [scansData, metricsData, discoveryData, findingsData, riskData] = await Promise.all([
+        listScans(),
+        getMetrics(),
+        getDiscoveryStatus(),
+        getSecurityFindingsSummary(),
+        getRiskOverview(),
+      ]);
+      setScans(scansData);
+      setMetrics(metricsData);
+      setDiscoveryStatus(discoveryData);
+      setFindingsSummary(findingsData.by_severity || {});
+      setRiskOverview(riskData);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -52,179 +54,242 @@ export default function Dashboard() {
   }
 
   useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, 2000);
+    loadData();
+    const id = setInterval(loadData, 5000);
     return () => clearInterval(id);
   }, []);
 
-  async function onCreate() {
-    if (!target.trim()) return;
-    setError(null);
-    setCreating(true);
-    try {
-      await createScan(target.trim(), note.trim() || undefined, opts);
-      setTarget("");
-      setNote("");
-      await refresh();
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setCreating(false);
-    }
-  }
+  // Security findings breakdown
+  const criticalFindings = findingsSummary.critical || 0;
+  const highFindings = findingsSummary.high || 0;
+  const totalSecurityFindings = Object.values(findingsSummary).reduce((a, b) => a + b, 0);
 
-  const stats = {
-    total: scans.length,
-    completed: scans.filter(s => s.status === "completed").length,
-    running: scans.filter(s => s.status !== "completed" && s.status !== "failed").length,
-    findings: scans.reduce((acc, s) => acc + (s.findings_count ?? s.findings?.length ?? 0), 0),
-  };
+  // Risk breakdown
+  const assetsByRisk = riskOverview?.assets_by_level as Record<string, number> | undefined;
+  const criticalRiskAssets = assetsByRisk?.critical || 0;
+  const highRiskAssets = assetsByRisk?.high || 0;
 
   const recentScans = scans.slice(0, 5);
 
   return (
     <div className="space-y-8 animate-fade-in">
       <Header 
-        title="Dashboard" 
-        description="Monitor and manage your attack surface scans"
+        title={`Welcome back, ${user?.email?.split('@')[0] || 'User'}`}
+        description="Your External Attack Surface Management overview"
       />
 
+      {/* Discovery Status Alert */}
+      {discoveryStatus?.running && (
+        <Card className="border-primary/50 bg-gradient-to-r from-primary/5 via-info/5 to-primary/5 glow-primary">
+          <CardContent className="py-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <div className="relative">
+                  <div className="h-12 w-12 rounded-xl bg-primary/20 flex items-center justify-center">
+                    <LoadingSpinner size="md" />
+                  </div>
+                  <div className="absolute -top-1 -right-1 h-3 w-3 bg-primary rounded-full animate-pulse" />
+                </div>
+                <div>
+                  <div className="font-semibold text-primary">Discovery in Progress</div>
+                  <div className="text-sm text-muted-foreground">
+                    {discoveryStatus.assets_discovered} assets discovered • {discoveryStatus.seeds_processed} seeds processed
+                  </div>
+                </div>
+              </div>
+              <Link href="/discovery">
+                <Button variant="outline" size="sm">View Details →</Button>
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Critical Alerts */}
+      {(criticalFindings > 0 || highFindings > 0 || criticalRiskAssets > 0) && (
+        <Card className="border-destructive/50 bg-gradient-to-r from-destructive/5 to-orange-500/5">
+          <CardContent className="py-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-8">
+                <div className="text-center">
+                  <div className="text-3xl font-bold font-mono text-destructive">{criticalFindings + highFindings}</div>
+                  <div className="text-xs text-muted-foreground">Critical/High Findings</div>
+                </div>
+                <div className="h-10 w-px bg-border" />
+                <div className="text-center">
+                  <div className="text-3xl font-bold font-mono text-orange-500">{criticalRiskAssets + highRiskAssets}</div>
+                  <div className="text-xs text-muted-foreground">High Risk Assets</div>
+                </div>
+              </div>
+              <Link href="/security">
+                <Button variant="destructive" size="sm">Review Findings →</Button>
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Stats Cards */}
-      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
-        <Card>
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4 stagger-children">
+        <Card className="group hover:shadow-lg transition-all hover:border-primary/30">
           <CardHeader className="pb-3">
-            <CardDescription>Total Scans</CardDescription>
-            <CardTitle className="text-3xl">{stats.total}</CardTitle>
+            <CardDescription>Total Assets</CardDescription>
+            <CardTitle className="text-4xl font-mono">{metrics?.total_assets || 0}</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-xs text-muted-foreground">
-              All scan operations
-            </div>
+            <Link href="/assets" className="text-xs text-primary hover:underline inline-flex items-center gap-1 group-hover:gap-2 transition-all">
+              View all assets <span>→</span>
+            </Link>
           </CardContent>
         </Card>
         
-        <Card>
+        <Card className="group hover:shadow-lg transition-all hover:border-warning/30">
           <CardHeader className="pb-3">
-            <CardDescription>Completed</CardDescription>
-            <CardTitle className="text-3xl text-success">{stats.completed}</CardTitle>
+            <CardDescription>Security Findings</CardDescription>
+            <CardTitle className="text-4xl font-mono text-warning">{totalSecurityFindings}</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-xs text-muted-foreground">
-              Successfully finished
-            </div>
+            <Link href="/security" className="text-xs text-primary hover:underline inline-flex items-center gap-1 group-hover:gap-2 transition-all">
+              View findings <span>→</span>
+            </Link>
           </CardContent>
         </Card>
         
-        <Card>
+        <Card className="group hover:shadow-lg transition-all hover:border-info/30">
           <CardHeader className="pb-3">
             <CardDescription>Active Scans</CardDescription>
-            <CardTitle className="text-3xl text-warning">{stats.running}</CardTitle>
+            <CardTitle className="text-4xl font-mono text-info">{metrics?.active_scans || 0}</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-xs text-muted-foreground">
-              Currently scanning
-            </div>
+            <Link href="/discovery" className="text-xs text-primary hover:underline inline-flex items-center gap-1 group-hover:gap-2 transition-all">
+              Manage scans <span>→</span>
+            </Link>
           </CardContent>
         </Card>
         
-        <Card>
+        <Card className="group hover:shadow-lg transition-all hover:border-success/30">
           <CardHeader className="pb-3">
-            <CardDescription>Total Findings</CardDescription>
-            <CardTitle className="text-3xl text-info">{stats.findings}</CardTitle>
+            <CardDescription>System Health</CardDescription>
+            <CardTitle className="text-4xl font-mono text-success flex items-center gap-2">
+              <div className="h-3 w-3 rounded-full bg-success animate-pulse" />
+              OK
+            </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-xs text-muted-foreground">
-              Discovered vulnerabilities
-            </div>
+            <Link href="/settings" className="text-xs text-primary hover:underline inline-flex items-center gap-1 group-hover:gap-2 transition-all">
+              View status <span>→</span>
+            </Link>
           </CardContent>
         </Card>
       </div>
 
-      {/* Create New Scan */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Create New Scan</CardTitle>
-          <CardDescription>
-            Start a new security scan for a domain, IP address, or CIDR range
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-4 md:grid-cols-2">
-            <Input
-              label="Target"
-              placeholder="example.com, 1.2.3.4, or 10.0.0.0/24"
-              value={target}
-              onChange={(e) => setTarget(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && onCreate()}
-            />
-            <Input
-              label="Note (optional)"
-              placeholder="Add a description for this scan"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && onCreate()}
-            />
-          </div>
+      {/* Quick Actions */}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        {[
+          { href: "/discovery", icon: "🔄", title: "Run Discovery", desc: "Find new assets", color: "from-primary/10 to-primary/5" },
+          { href: "/security", icon: "🛡️", title: "Security Scan", desc: "Scan for vulnerabilities", color: "from-destructive/10 to-destructive/5" },
+          { href: "/risk", icon: "⚠️", title: "Risk Dashboard", desc: "View risk scores", color: "from-warning/10 to-warning/5" },
+          { href: "/search", icon: "🔎", title: "Global Search", desc: "Find assets & findings", color: "from-info/10 to-info/5" },
+        ].map((action) => (
+          <Link key={action.href} href={action.href}>
+            <Card className={`hover:border-primary/50 transition-all cursor-pointer h-full bg-gradient-to-br ${action.color} hover:shadow-lg group`}>
+              <CardContent className="pt-6">
+                <div className="flex items-center gap-4">
+                  <div className="h-12 w-12 rounded-xl bg-card flex items-center justify-center text-2xl shadow-sm group-hover:scale-110 transition-transform">
+                    {action.icon}
+                  </div>
+                  <div>
+                    <div className="font-semibold">{action.title}</div>
+                    <div className="text-sm text-muted-foreground">{action.desc}</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </Link>
+        ))}
+      </div>
 
-          <div>
-            <button
-              onClick={() => setShowAdvanced(!showAdvanced)}
-              className="text-sm text-primary hover:underline mb-3"
-            >
-              {showAdvanced ? "Hide" : "Show"} Advanced Options
-            </button>
-            
-            {showAdvanced && (
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-3 p-4 bg-muted rounded-lg">
-                {OPTION_ENTRIES.map(([key, label]) => {
-                  const current = (opts as Record<string, unknown>)[key];
-                  const checked = typeof current === "boolean" ? current : true;
-                  return (
-                    <label key={key} className="flex items-center gap-2 text-sm cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={(e) => setOpts((o) => ({ ...o, [key]: e.target.checked }))}
-                        className="h-4 w-4 rounded border-border text-primary focus:ring-2 focus:ring-ring"
-                      />
-                      <span>{label}</span>
-                    </label>
-                  );
-                })}
+      {/* Security Findings Summary */}
+      <div className="grid gap-6 md:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle>Security Findings by Severity</CardTitle>
+                <CardDescription>Breakdown of vulnerabilities found</CardDescription>
               </div>
-            )}
-          </div>
-
-          {error && (
-            <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
-              {error}
+              <Link href="/security">
+                <Button variant="outline" size="sm">View All →</Button>
+              </Link>
             </div>
-          )}
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {[
+                { level: "Critical", count: findingsSummary.critical || 0, color: "bg-destructive" },
+                { level: "High", count: findingsSummary.high || 0, color: "bg-orange-500" },
+                { level: "Medium", count: findingsSummary.medium || 0, color: "bg-warning" },
+                { level: "Low", count: findingsSummary.low || 0, color: "bg-info" },
+                { level: "Info", count: findingsSummary.info || 0, color: "bg-secondary" },
+              ].map((item) => {
+                const percentage = totalSecurityFindings > 0 ? (item.count / totalSecurityFindings) * 100 : 0;
+                return (
+                  <div key={item.level} className="flex items-center gap-4">
+                    <div className="w-16 text-sm font-medium">{item.level}</div>
+                    <div className="flex-1 h-2.5 bg-muted rounded-full overflow-hidden">
+                      <div 
+                        className={`h-full ${item.color} transition-all duration-700 ease-out`}
+                        style={{ width: `${percentage}%` }}
+                      />
+                    </div>
+                    <div className="w-10 text-sm text-right font-mono">{item.count}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
 
-          <div className="flex gap-3">
-            <Button
-              onClick={onCreate}
-              disabled={!target.trim()}
-              loading={creating}
-              size="lg"
-            >
-              Start Scan
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setTarget("");
-                setNote("");
-                setOpts({});
-                setError(null);
-              }}
-              disabled={creating}
-            >
-              Clear
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle>Risk Distribution</CardTitle>
+                <CardDescription>Assets by risk level</CardDescription>
+              </div>
+              <Link href="/risk">
+                <Button variant="outline" size="sm">View All →</Button>
+              </Link>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {[
+                { level: "Critical", count: assetsByRisk?.critical || 0, color: "bg-destructive" },
+                { level: "High", count: assetsByRisk?.high || 0, color: "bg-orange-500" },
+                { level: "Medium", count: assetsByRisk?.medium || 0, color: "bg-warning" },
+                { level: "Low", count: assetsByRisk?.low || 0, color: "bg-info" },
+                { level: "Minimal", count: assetsByRisk?.minimal || 0, color: "bg-success" },
+              ].map((item) => {
+                const total = Object.values(assetsByRisk || {}).reduce((a, b) => a + b, 0);
+                const percentage = total > 0 ? (item.count / total) * 100 : 0;
+                return (
+                  <div key={item.level} className="flex items-center gap-4">
+                    <div className="w-16 text-sm font-medium">{item.level}</div>
+                    <div className="flex-1 h-2.5 bg-muted rounded-full overflow-hidden">
+                      <div 
+                        className={`h-full ${item.color} transition-all duration-700 ease-out`}
+                        style={{ width: `${percentage}%` }}
+                      />
+                    </div>
+                    <div className="w-10 text-sm text-right font-mono">{item.count}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
 
       {/* Recent Scans */}
       <Card>
@@ -232,9 +297,7 @@ export default function Dashboard() {
           <div className="flex items-center justify-between">
             <div>
               <CardTitle>Recent Scans</CardTitle>
-              <CardDescription>
-                Latest scan operations and their status
-              </CardDescription>
+              <CardDescription>Latest scan operations and their status</CardDescription>
             </div>
             <Link href="/assets">
               <Button variant="outline" size="sm">View All Assets →</Button>
@@ -250,7 +313,12 @@ export default function Dashboard() {
             <EmptyState
               icon="🔍"
               title="No scans yet"
-              description="Create your first scan above to start discovering your attack surface"
+              description="Run discovery or create a scan to start discovering your attack surface"
+              action={
+                <Link href="/discovery">
+                  <Button>Start Discovery</Button>
+                </Link>
+              }
             />
           ) : (
             <Table>
@@ -266,9 +334,7 @@ export default function Dashboard() {
               <TableBody>
                 {recentScans.map((scan) => (
                   <TableRow key={scan.id}>
-                    <TableCell className="font-medium font-mono">
-                      {scan.target}
-                    </TableCell>
+                    <TableCell className="font-medium font-mono">{scan.target}</TableCell>
                     <TableCell>
                       <Badge 
                         variant={
@@ -282,7 +348,7 @@ export default function Dashboard() {
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-2">
-                        <span className="font-medium">
+                        <span className="font-mono font-medium">
                           {scan.findings_count ?? scan.findings?.length ?? 0}
                         </span>
                         <span className="text-xs text-muted-foreground">findings</span>
@@ -293,9 +359,7 @@ export default function Dashboard() {
                     </TableCell>
                     <TableCell className="text-right">
                       <Link href={`/scan/${scan.id}`}>
-                        <Button variant="ghost" size="sm">
-                          View Details →
-                        </Button>
+                        <Button variant="ghost" size="sm">View Details →</Button>
                       </Link>
                     </TableCell>
                   </TableRow>
@@ -305,6 +369,39 @@ export default function Dashboard() {
           )}
         </CardContent>
       </Card>
+
+      {/* System Health */}
+      {metrics && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle>System Health</CardTitle>
+                <CardDescription>Backend performance metrics</CardDescription>
+              </div>
+              <Link href="/settings">
+                <Button variant="outline" size="sm">Full Report →</Button>
+              </Link>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-4 md:grid-cols-4">
+              {[
+                { label: "CPU Usage", value: `${metrics.cpu_usage_percent.toFixed(1)}%`, icon: "⚡" },
+                { label: "Memory", value: `${((metrics.memory_usage.used_bytes / metrics.memory_usage.total_bytes) * 100).toFixed(1)}%`, icon: "💾" },
+                { label: "Requests/sec", value: metrics.requests_per_second.toFixed(2), icon: "🚀" },
+                { label: "Uptime", value: `${Math.floor(metrics.uptime_seconds / 3600)}h`, icon: "⏱️" },
+              ].map((stat, idx) => (
+                <div key={idx} className="p-4 bg-muted/50 rounded-xl text-center">
+                  <div className="text-2xl mb-1">{stat.icon}</div>
+                  <div className="text-2xl font-bold font-mono">{stat.value}</div>
+                  <div className="text-xs text-muted-foreground">{stat.label}</div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

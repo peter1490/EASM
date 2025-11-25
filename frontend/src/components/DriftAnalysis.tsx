@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { detectDrift, getDriftFindings, type DriftFinding } from "@/app/api";
+import { detectDrift, getDriftFindings, type Finding } from "@/app/api";
 import Button from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import Badge from "@/components/ui/Badge";
@@ -12,8 +12,32 @@ interface DriftAnalysisProps {
   scanId: string;
 }
 
+// Extract drift data from finding.data
+interface DriftData {
+  state: "new" | "missing" | "changed";
+  port: number;
+  protocol: string;
+  previous_state?: string;
+  current_state: string;
+  asset_identifier?: string;
+}
+
+function extractDriftData(finding: Finding): DriftData | null {
+  const data = finding.data as Record<string, unknown>;
+  if (!data.state || !data.port) return null;
+  
+  return {
+    state: data.state as DriftData["state"],
+    port: Number(data.port),
+    protocol: (data.protocol as string) || "tcp",
+    previous_state: data.previous_state as string | undefined,
+    current_state: (data.current_state as string) || "unknown",
+    asset_identifier: data.asset_identifier as string | undefined,
+  };
+}
+
 export default function DriftAnalysis({ scanId }: DriftAnalysisProps) {
-  const [findings, setFindings] = useState<DriftFinding[]>([]);
+  const [findings, setFindings] = useState<Finding[]>([]);
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -34,6 +58,7 @@ export default function DriftAnalysis({ scanId }: DriftAnalysisProps) {
 
   useEffect(() => {
     loadFindings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanId]);
 
   async function runAnalysis() {
@@ -50,10 +75,15 @@ export default function DriftAnalysis({ scanId }: DriftAnalysisProps) {
     }
   }
 
+  // Parse drift data from findings
+  const driftFindings = findings
+    .map(f => ({ finding: f, drift: extractDriftData(f) }))
+    .filter((x): x is { finding: Finding; drift: DriftData } => x.drift !== null);
+
   const stats = {
-    new: findings.filter(f => f.state === "new").length,
-    missing: findings.filter(f => f.state === "missing").length,
-    changed: findings.filter(f => f.state === "changed").length,
+    new: driftFindings.filter(f => f.drift.state === "new").length,
+    missing: driftFindings.filter(f => f.drift.state === "missing").length,
+    changed: driftFindings.filter(f => f.drift.state === "changed").length,
   };
 
   if (loading && !ranAnalysis) {
@@ -76,7 +106,7 @@ export default function DriftAnalysis({ scanId }: DriftAnalysisProps) {
               disabled={analyzing}
               loading={analyzing}
             >
-              {findings.length > 0 ? "Re-run Analysis" : "Run Analysis"}
+              {driftFindings.length > 0 ? "Re-run Analysis" : "Run Analysis"}
             </Button>
           </div>
         </CardHeader>
@@ -87,7 +117,7 @@ export default function DriftAnalysis({ scanId }: DriftAnalysisProps) {
              </div>
           )}
 
-          {findings.length > 0 ? (
+          {driftFindings.length > 0 ? (
             <div className="space-y-6">
               {/* Summary Stats */}
               <div className="grid grid-cols-3 gap-4">
@@ -118,32 +148,32 @@ export default function DriftAnalysis({ scanId }: DriftAnalysisProps) {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">
-                    {findings.map((finding) => (
+                    {driftFindings.map(({ finding, drift }) => (
                       <tr key={finding.id} className="bg-card hover:bg-muted/30">
                         <td className="px-4 py-3">
                           <Badge 
                             variant={
-                              finding.state === "new" ? "success" :
-                              finding.state === "missing" ? "error" :
+                              drift.state === "new" ? "success" :
+                              drift.state === "missing" ? "error" :
                               "warning"
                             }
                           >
-                            {finding.state.toUpperCase()}
+                            {drift.state.toUpperCase()}
                           </Badge>
                         </td>
-                        <td className="px-4 py-3 font-mono">{finding.port}</td>
-                        <td className="px-4 py-3 text-muted-foreground">{finding.protocol}</td>
+                        <td className="px-4 py-3 font-mono">{drift.port}</td>
+                        <td className="px-4 py-3 text-muted-foreground">{drift.protocol}</td>
                         <td className="px-4 py-3">
-                          {finding.state === "changed" ? (
+                          {drift.state === "changed" ? (
                             <span>
-                              {finding.previous_state || "unknown"} → <span className="font-medium">{finding.current_state}</span>
+                              {drift.previous_state || "unknown"} → <span className="font-medium">{drift.current_state}</span>
                             </span>
                           ) : (
-                            <span className="text-muted-foreground">{finding.current_state}</span>
+                            <span className="text-muted-foreground">{drift.current_state}</span>
                           )}
                         </td>
                         <td className="px-4 py-3 text-muted-foreground text-xs">
-                          {new Date(finding.detected_at).toLocaleString()}
+                          {new Date(finding.created_at).toLocaleString()}
                         </td>
                       </tr>
                     ))}
@@ -166,4 +196,3 @@ export default function DriftAnalysis({ scanId }: DriftAnalysisProps) {
     </div>
   );
 }
-

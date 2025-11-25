@@ -15,11 +15,19 @@ const Input = forwardRef<HTMLInputElement, InputProps>(({ className = "", label,
       )}
       <input
         ref={ref}
-        className={`flex h-10 w-full rounded-lg border border-border bg-input px-3 py-2 text-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent disabled:cursor-not-allowed disabled:opacity-50 ${error ? "border-destructive focus:ring-destructive" : ""} ${className}`}
+        className={`
+          w-full h-10 px-3 rounded-lg border border-border bg-input text-foreground
+          placeholder:text-muted-foreground text-sm
+          focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary
+          disabled:opacity-50 disabled:cursor-not-allowed
+          transition-all duration-200
+          ${error ? "border-destructive focus:ring-destructive/30 focus:border-destructive" : ""}
+          ${className}
+        `}
         {...props}
       />
       {error && (
-        <p className="mt-1.5 text-sm text-destructive">{error}</p>
+        <p className="mt-1.5 text-xs text-destructive">{error}</p>
       )}
     </div>
   );
@@ -28,4 +36,3 @@ const Input = forwardRef<HTMLInputElement, InputProps>(({ className = "", label,
 Input.displayName = "Input";
 
 export default Input;
-

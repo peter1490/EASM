@@ -163,7 +163,9 @@ export default function AssetDiscoveryGraph({ assetId }: AssetDiscoveryGraphProp
             setLoading(true);
             setError(null);
             try {
-                const response = await fetch(`http://localhost:8000/api/assets/${assetId}/path`);
+                const response = await fetch(`http://localhost:8000/api/assets/${assetId}/path`, {
+                    credentials: 'include',
+                });
                 if (!response.ok) {
                     throw new Error('Failed to fetch asset path');
                 }

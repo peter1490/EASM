@@ -1,90 +1,63 @@
-import { HTMLAttributes, forwardRef } from "react";
+import { HTMLAttributes, TdHTMLAttributes, ThHTMLAttributes, forwardRef } from "react";
 
-type TableProps = HTMLAttributes<HTMLTableElement>;
-
-const Table = forwardRef<HTMLTableElement, TableProps>(({ className = "", children, ...props }, ref) => {
-  return (
-    <div className="w-full overflow-auto rounded-lg border border-border">
-      <table ref={ref} className={`w-full text-sm ${className}`} {...props}>
-        {children}
-      </table>
+const Table = forwardRef<HTMLTableElement, HTMLAttributes<HTMLTableElement>>(
+  ({ className = "", ...props }, ref) => (
+    <div className="w-full overflow-auto">
+      <table
+        ref={ref}
+        className={`w-full caption-bottom text-sm ${className}`}
+        {...props}
+      />
     </div>
-  );
-});
-
+  )
+);
 Table.displayName = "Table";
 
-type TableHeaderProps = HTMLAttributes<HTMLTableSectionElement>;
-
-const TableHeader = forwardRef<HTMLTableSectionElement, TableHeaderProps>(({ className = "", children, ...props }, ref) => {
-  return (
-    <thead ref={ref} className={`bg-muted ${className}`} {...props}>
-      {children}
-    </thead>
-  );
-});
-
+const TableHeader = forwardRef<HTMLTableSectionElement, HTMLAttributes<HTMLTableSectionElement>>(
+  ({ className = "", ...props }, ref) => (
+    <thead ref={ref} className={`border-b border-border bg-muted/30 ${className}`} {...props} />
+  )
+);
 TableHeader.displayName = "TableHeader";
 
-type TableBodyProps = HTMLAttributes<HTMLTableSectionElement>;
-
-const TableBody = forwardRef<HTMLTableSectionElement, TableBodyProps>(({ className = "", children, ...props }, ref) => {
-  return (
-    <tbody ref={ref} className={`[&_tr:last-child]:border-0 ${className}`} {...props}>
-      {children}
-    </tbody>
-  );
-});
-
+const TableBody = forwardRef<HTMLTableSectionElement, HTMLAttributes<HTMLTableSectionElement>>(
+  ({ className = "", ...props }, ref) => (
+    <tbody ref={ref} className={`divide-y divide-border ${className}`} {...props} />
+  )
+);
 TableBody.displayName = "TableBody";
 
-type TableRowProps = HTMLAttributes<HTMLTableRowElement>;
-
-const TableRow = forwardRef<HTMLTableRowElement, TableRowProps>(({ className = "", children, ...props }, ref) => {
-  return (
+const TableRow = forwardRef<HTMLTableRowElement, HTMLAttributes<HTMLTableRowElement>>(
+  ({ className = "", ...props }, ref) => (
     <tr
       ref={ref}
-      className={`border-b border-border transition-colors hover:bg-muted/50 ${className}`}
+      className={`transition-colors hover:bg-muted/50 ${className}`}
       {...props}
-    >
-      {children}
-    </tr>
-  );
-});
-
+    />
+  )
+);
 TableRow.displayName = "TableRow";
 
-type TableHeadProps = HTMLAttributes<HTMLTableCellElement>;
-
-const TableHead = forwardRef<HTMLTableCellElement, TableHeadProps>(({ className = "", children, ...props }, ref) => {
-  return (
+const TableHead = forwardRef<HTMLTableCellElement, ThHTMLAttributes<HTMLTableCellElement>>(
+  ({ className = "", ...props }, ref) => (
     <th
       ref={ref}
-      className={`h-12 px-4 text-left align-middle font-semibold text-foreground [&:has([role=checkbox])]:pr-0 ${className}`}
+      className={`h-11 px-4 text-left align-middle font-medium text-muted-foreground text-xs uppercase tracking-wider ${className}`}
       {...props}
-    >
-      {children}
-    </th>
-  );
-});
-
+    />
+  )
+);
 TableHead.displayName = "TableHead";
 
-type TableCellProps = HTMLAttributes<HTMLTableCellElement>;
-
-const TableCell = forwardRef<HTMLTableCellElement, TableCellProps>(({ className = "", children, ...props }, ref) => {
-  return (
+const TableCell = forwardRef<HTMLTableCellElement, TdHTMLAttributes<HTMLTableCellElement>>(
+  ({ className = "", ...props }, ref) => (
     <td
       ref={ref}
-      className={`p-4 align-middle [&:has([role=checkbox])]:pr-0 ${className}`}
+      className={`px-4 py-3 align-middle ${className}`}
       {...props}
-    >
-      {children}
-    </td>
-  );
-});
-
+    />
+  )
+);
 TableCell.displayName = "TableCell";
 
 export { Table, TableHeader, TableBody, TableRow, TableHead, TableCell };
-

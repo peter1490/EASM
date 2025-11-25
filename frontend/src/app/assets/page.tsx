@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
-import { getDiscoveryStatus, listAssets, type Asset, type AssetListResponse, type DiscoveryStatus, createScan } from "@/app/api";
+import { getDiscoveryStatus, listAssets, type Asset, type DiscoveryStatus, createScan } from "@/app/api";
 import Button from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import Badge from "@/components/ui/Badge";

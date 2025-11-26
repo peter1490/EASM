@@ -1,16 +1,16 @@
+use crate::{
+    auth::{context::UserContext, rbac::Role},
+    error::ApiError,
+    models::asset::Asset,
+    services::RiskRecalculationResult,
+    AppState,
+};
 use axum::{
-    extract::{Path, State, Extension, Query},
+    extract::{Extension, Path, Query, State},
     response::Json,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::{
-    error::ApiError,
-    AppState,
-    models::asset::Asset,
-    services::RiskRecalculationResult,
-    auth::{context::UserContext, rbac::Role},
-};
 
 #[derive(Debug, Serialize)]
 pub struct RiskOverviewResponse {
@@ -34,7 +34,10 @@ pub async fn get_asset_risk(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Asset>, ApiError> {
     // Just return the asset, it includes risk fields
-    let asset = app_state.asset_repository.get_by_id(&id).await?
+    let asset = app_state
+        .asset_repository
+        .get_by_id(&id)
+        .await?
         .ok_or_else(|| ApiError::NotFound(format!("Asset {} not found", id)))?;
     Ok(Json(asset))
 }
@@ -45,8 +48,13 @@ pub async fn recalculate_asset_risk(
     Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Asset>, ApiError> {
-    if !user.has_role(Role::Analyst) && !user.has_role(Role::Operator) && !user.has_role(Role::Admin) {
-         return Err(ApiError::Authorization("Analyst role or higher required".to_string()));
+    if !user.has_role(Role::Analyst)
+        && !user.has_role(Role::Operator)
+        && !user.has_role(Role::Admin)
+    {
+        return Err(ApiError::Authorization(
+            "Analyst role or higher required".to_string(),
+        ));
     }
 
     let asset = app_state.risk_service.calculate_asset_risk(id).await?;
@@ -59,7 +67,9 @@ pub async fn recalculate_all_risks(
     Extension(user): Extension<UserContext>,
 ) -> Result<Json<RiskRecalculationResult>, ApiError> {
     if !user.has_role(Role::Operator) && !user.has_role(Role::Admin) {
-         return Err(ApiError::Authorization("Operator role or higher required".to_string()));
+        return Err(ApiError::Authorization(
+            "Operator role or higher required".to_string(),
+        ));
     }
 
     let result = app_state.risk_service.recalculate_all_risks().await?;
@@ -79,6 +89,9 @@ pub async fn get_high_risk_assets(
     State(app_state): State<AppState>,
     Query(query): Query<HighRiskQuery>,
 ) -> Result<Json<Vec<Asset>>, ApiError> {
-    let assets = app_state.risk_service.get_high_risk_assets(query.limit).await?;
+    let assets = app_state
+        .risk_service
+        .get_high_risk_assets(query.limit)
+        .await?;
     Ok(Json(assets))
 }

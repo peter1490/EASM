@@ -1,10 +1,10 @@
-use async_trait::async_trait;
-use uuid::Uuid;
 use crate::{
     database::DatabasePool,
     error::ApiError,
     models::{Scan, ScanCreate, ScanStatus},
 };
+use async_trait::async_trait;
+use uuid::Uuid;
 
 #[async_trait]
 pub trait ScanRepository {
@@ -30,13 +30,13 @@ impl ScanRepository for SqlxScanRepository {
     async fn create(&self, scan: &ScanCreate) -> Result<Scan, ApiError> {
         let id = Uuid::new_v4();
         let now = chrono::Utc::now();
-        
+
         let result = sqlx::query_as::<_, Scan>(
             r#"
             INSERT INTO scans (id, target, note, status, created_at, updated_at)
             VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id, target, note, status, created_at, updated_at
-            "#
+            "#,
         )
         .bind(id)
         .bind(&scan.target)
@@ -56,7 +56,7 @@ impl ScanRepository for SqlxScanRepository {
             SELECT id, target, note, status, created_at, updated_at
             FROM scans
             WHERE id = $1
-            "#
+            "#,
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -71,7 +71,7 @@ impl ScanRepository for SqlxScanRepository {
             SELECT id, target, note, status, created_at, updated_at
             FROM scans
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .fetch_all(&self.pool)
         .await?;
@@ -81,13 +81,13 @@ impl ScanRepository for SqlxScanRepository {
 
     async fn update_status(&self, id: &Uuid, status: ScanStatus) -> Result<(), ApiError> {
         let now = chrono::Utc::now();
-        
+
         let result = sqlx::query(
             r#"
             UPDATE scans
             SET status = $1, updated_at = $2
             WHERE id = $3
-            "#
+            "#,
         )
         .bind(status)
         .bind(now)
@@ -111,7 +111,7 @@ impl ScanRepository for SqlxScanRepository {
                     FROM scans
                     WHERE status = $1
                     ORDER BY created_at DESC
-                    "#
+                    "#,
                 )
                 .bind(status)
                 .fetch_all(&self.pool)
@@ -123,7 +123,7 @@ impl ScanRepository for SqlxScanRepository {
                     SELECT id, target, note, status, created_at, updated_at
                     FROM scans
                     ORDER BY created_at DESC
-                    "#
+                    "#,
                 )
                 .fetch_all(&self.pool)
                 .await?
@@ -137,13 +137,15 @@ impl ScanRepository for SqlxScanRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ScanStatus;
     use crate::database::create_connection_pool;
+    use crate::models::ScanStatus;
 
     async fn setup_test_db() -> DatabasePool {
         let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
         let pool = create_connection_pool(&db_url).await.unwrap();
-        let _ = sqlx::query("TRUNCATE TABLE scans RESTART IDENTITY CASCADE").execute(&pool).await;
+        let _ = sqlx::query("TRUNCATE TABLE scans RESTART IDENTITY CASCADE")
+            .execute(&pool)
+            .await;
         pool
     }
 
@@ -231,7 +233,9 @@ mod tests {
         assert_eq!(created_scan.status, ScanStatus::Queued);
 
         // Update status to running
-        repo.update_status(&created_scan.id, ScanStatus::Running).await.unwrap();
+        repo.update_status(&created_scan.id, ScanStatus::Running)
+            .await
+            .unwrap();
 
         let updated_scan = repo.get_by_id(&created_scan.id).await.unwrap().unwrap();
         assert_eq!(updated_scan.status, ScanStatus::Running);
@@ -244,8 +248,10 @@ mod tests {
         let repo = SqlxScanRepository::new(pool);
 
         let nonexistent_id = Uuid::new_v4();
-        let result = repo.update_status(&nonexistent_id, ScanStatus::Running).await;
-        
+        let result = repo
+            .update_status(&nonexistent_id, ScanStatus::Running)
+            .await;
+
         assert!(result.is_err());
         match result.unwrap_err() {
             ApiError::NotFound(_) => (),
@@ -259,25 +265,36 @@ mod tests {
         let repo = SqlxScanRepository::new(pool);
 
         // Create scans with different statuses
-        let scan1 = repo.create(&ScanCreate {
-            target: "example1.com".to_string(),
-            note: None,
-        }).await.unwrap();
+        let scan1 = repo
+            .create(&ScanCreate {
+                target: "example1.com".to_string(),
+                note: None,
+            })
+            .await
+            .unwrap();
 
-        let scan2 = repo.create(&ScanCreate {
-            target: "example2.com".to_string(),
-            note: None,
-        }).await.unwrap();
+        let scan2 = repo
+            .create(&ScanCreate {
+                target: "example2.com".to_string(),
+                note: None,
+            })
+            .await
+            .unwrap();
 
         // Update one scan to running
-        repo.update_status(&scan2.id, ScanStatus::Running).await.unwrap();
+        repo.update_status(&scan2.id, ScanStatus::Running)
+            .await
+            .unwrap();
 
         // Test filtering by status
         let queued_scans = repo.list_by_status(Some(ScanStatus::Queued)).await.unwrap();
         assert_eq!(queued_scans.len(), 1);
         assert_eq!(queued_scans[0].id, scan1.id);
 
-        let running_scans = repo.list_by_status(Some(ScanStatus::Running)).await.unwrap();
+        let running_scans = repo
+            .list_by_status(Some(ScanStatus::Running))
+            .await
+            .unwrap();
         assert_eq!(running_scans.len(), 1);
         assert_eq!(running_scans[0].id, scan2.id);
 

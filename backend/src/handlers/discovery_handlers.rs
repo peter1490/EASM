@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     response::Json,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -57,9 +57,7 @@ pub async fn run_discovery(
 }
 
 /// POST /api/discovery/stop - Stop the running discovery
-pub async fn stop_discovery(
-    State(app_state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn stop_discovery(State(app_state): State<AppState>) -> Result<Json<Value>, ApiError> {
     app_state.discovery_service.stop_discovery().await?;
     Ok(Json(json!({
         "message": "Discovery stopped successfully"
@@ -67,9 +65,7 @@ pub async fn stop_discovery(
 }
 
 /// GET /api/discovery/status - Get current discovery status
-pub async fn discovery_status(
-    State(app_state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn discovery_status(State(app_state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let status = app_state.discovery_service.get_discovery_status().await;
     Ok(Json(json!({
         "running": status.is_running,
@@ -92,7 +88,10 @@ pub async fn list_discovery_runs(
     State(app_state): State<AppState>,
     Query(query): Query<ListDiscoveryRunsQuery>,
 ) -> Result<Json<Vec<DiscoveryRun>>, ApiError> {
-    let runs = app_state.discovery_service.list_discovery_runs(query.limit, query.offset).await?;
+    let runs = app_state
+        .discovery_service
+        .list_discovery_runs(query.limit, query.offset)
+        .await?;
     Ok(Json(runs))
 }
 
@@ -101,7 +100,10 @@ pub async fn get_discovery_run(
     State(app_state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<DiscoveryRun>, ApiError> {
-    let run = app_state.discovery_service.get_discovery_run(&id).await?
+    let run = app_state
+        .discovery_service
+        .get_discovery_run(&id)
+        .await?
         .ok_or_else(|| ApiError::NotFound(format!("Discovery run {} not found", id)))?;
     Ok(Json(run))
 }

@@ -1,40 +1,33 @@
-use axum::{
-    extract::Request,
-    middleware::Next,
-    response::Response,
-};
+use axum::{extract::Request, middleware::Next, response::Response};
+use std::time::Instant;
 use tower_http::trace::TraceLayer;
 use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
-use std::time::Instant;
 
 /// Create structured logging layer with JSON output format based on settings
-pub fn create_logging_layer() -> TraceLayer<tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>> {
+pub fn create_logging_layer(
+) -> TraceLayer<tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>>
+{
     TraceLayer::new_for_http()
         .make_span_with(tower_http::trace::DefaultMakeSpan::new().level(Level::DEBUG))
         .on_response(tower_http::trace::DefaultOnResponse::new().level(Level::DEBUG))
 }
 
-
-
 /// Request/response logging middleware with proper correlation IDs
-pub async fn request_logging_middleware(
-    request: Request,
-    next: Next,
-) -> Response {
+pub async fn request_logging_middleware(request: Request, next: Next) -> Response {
     let correlation_id = Uuid::new_v4().to_string();
     let method = request.method().clone();
     let uri = request.uri().clone();
     let start_time = Instant::now();
-    
+
     // Extract user agent and other relevant headers
     let user_agent = request
         .headers()
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
-    
+
     let remote_addr = request
         .headers()
         .get("x-forwarded-for")
@@ -57,7 +50,7 @@ pub async fn request_logging_middleware(
     );
 
     let response = next.run(request).await;
-    
+
     let duration = start_time.elapsed();
     let status = response.status();
 
@@ -92,8 +85,7 @@ pub fn init_logging(log_level: &str, log_format: &str) -> Result<(), Box<dyn std
     let filter_string = format!("rust_backend={},tower_http=info,sqlx=warn", level);
     let env_filter = tracing_subscriber::EnvFilter::new(filter_string);
 
-    let subscriber = tracing_subscriber::registry()
-        .with(env_filter);
+    let subscriber = tracing_subscriber::registry().with(env_filter);
 
     match log_format.to_lowercase().as_str() {
         "json" => {
@@ -104,7 +96,7 @@ pub fn init_logging(log_level: &str, log_format: &str) -> Result<(), Box<dyn std
                 .with_target(true)
                 .with_thread_ids(true)
                 .with_thread_names(true);
-            
+
             subscriber.with(json_layer).init();
         }
         "plain" | "text" => {
@@ -112,7 +104,7 @@ pub fn init_logging(log_level: &str, log_format: &str) -> Result<(), Box<dyn std
                 .with_target(true)
                 .with_thread_ids(true)
                 .with_thread_names(true);
-            
+
             subscriber.with(plain_layer).init();
         }
         _ => {
@@ -124,7 +116,7 @@ pub fn init_logging(log_level: &str, log_format: &str) -> Result<(), Box<dyn std
                 .with_target(true)
                 .with_thread_ids(true)
                 .with_thread_names(true);
-            
+
             subscriber.with(json_layer).init();
         }
     }

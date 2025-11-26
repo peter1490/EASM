@@ -1,9 +1,8 @@
 use async_trait::async_trait;
 use elasticsearch::{
-    Elasticsearch, 
     http::transport::Transport,
-    indices::{IndicesCreateParts, IndicesExistsParts, IndicesDeleteParts},
-    IndexParts, DeleteParts, SearchParts,
+    indices::{IndicesCreateParts, IndicesDeleteParts, IndicesExistsParts},
+    DeleteParts, Elasticsearch, IndexParts, SearchParts,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -64,8 +63,14 @@ pub trait SearchService {
     async fn index_finding(&self, finding: &Finding) -> Result<(), ApiError>;
     async fn bulk_index_assets(&self, assets: &[Asset]) -> Result<(), ApiError>;
     async fn bulk_index_findings(&self, findings: &[Finding]) -> Result<(), ApiError>;
-    async fn search_assets(&self, query: &SearchQuery) -> Result<SearchResult<IndexedAsset>, ApiError>;
-    async fn search_findings(&self, query: &SearchQuery) -> Result<SearchResult<IndexedFinding>, ApiError>;
+    async fn search_assets(
+        &self,
+        query: &SearchQuery,
+    ) -> Result<SearchResult<IndexedAsset>, ApiError>;
+    async fn search_findings(
+        &self,
+        query: &SearchQuery,
+    ) -> Result<SearchResult<IndexedFinding>, ApiError>;
     async fn delete_asset(&self, asset_id: &Uuid) -> Result<(), ApiError>;
     async fn delete_finding(&self, finding_id: &Uuid) -> Result<(), ApiError>;
     async fn recreate_indices(&self) -> Result<(), ApiError>;
@@ -79,19 +84,26 @@ pub struct ElasticsearchService {
 
 impl ElasticsearchService {
     pub fn new(settings: Arc<Settings>) -> Result<Self, ApiError> {
-        let url = settings.elasticsearch_url.as_deref()
+        let url = settings
+            .elasticsearch_url
+            .as_deref()
             .unwrap_or("http://localhost:9200");
-        
-        let transport = Transport::single_node(url)
-            .map_err(|e| ApiError::internal(format!("Failed to create Elasticsearch transport: {}", e)))?;
-        
+
+        let transport = Transport::single_node(url).map_err(|e| {
+            ApiError::internal(format!("Failed to create Elasticsearch transport: {}", e))
+        })?;
+
         let client = Elasticsearch::new(transport);
-        
+
         Ok(Self {
             client,
-            asset_index: settings.elasticsearch_asset_index.clone()
+            asset_index: settings
+                .elasticsearch_asset_index
+                .clone()
                 .unwrap_or_else(|| "easm_assets".to_string()),
-            finding_index: settings.elasticsearch_finding_index.clone()
+            finding_index: settings
+                .elasticsearch_finding_index
+                .clone()
                 .unwrap_or_else(|| "easm_findings".to_string()),
         })
     }
@@ -102,7 +114,7 @@ impl ElasticsearchService {
                 "properties": {
                     "id": { "type": "keyword" },
                     "asset_type": { "type": "keyword" },
-                    "identifier": { 
+                    "identifier": {
                         "type": "text",
                         "fields": {
                             "keyword": { "type": "keyword" }
@@ -125,21 +137,29 @@ impl ElasticsearchService {
             }
         });
 
-        let response = self.client
+        let response = self
+            .client
             .indices()
             .create(IndicesCreateParts::Index(&self.asset_index))
             .body(mapping)
             .send()
             .await
-            .map_err(|e| ApiError::external_service(format!("Failed to create asset index: {}", e)))?;
+            .map_err(|e| {
+                ApiError::external_service(format!("Failed to create asset index: {}", e))
+            })?;
 
         if response.status_code().is_success() {
             tracing::info!("Created asset index: {}", self.asset_index);
             Ok(())
         } else {
-            let error_text = response.text().await
+            let error_text = response
+                .text()
+                .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            Err(ApiError::external_service(format!("Failed to create asset index: {}", error_text)))
+            Err(ApiError::external_service(format!(
+                "Failed to create asset index: {}",
+                error_text
+            )))
         }
     }
 
@@ -160,31 +180,42 @@ impl ElasticsearchService {
             }
         });
 
-        let response = self.client
+        let response = self
+            .client
             .indices()
             .create(IndicesCreateParts::Index(&self.finding_index))
             .body(mapping)
             .send()
             .await
-            .map_err(|e| ApiError::external_service(format!("Failed to create finding index: {}", e)))?;
+            .map_err(|e| {
+                ApiError::external_service(format!("Failed to create finding index: {}", e))
+            })?;
 
         if response.status_code().is_success() {
             tracing::info!("Created finding index: {}", self.finding_index);
             Ok(())
         } else {
-            let error_text = response.text().await
+            let error_text = response
+                .text()
+                .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            Err(ApiError::external_service(format!("Failed to create finding index: {}", error_text)))
+            Err(ApiError::external_service(format!(
+                "Failed to create finding index: {}",
+                error_text
+            )))
         }
     }
 
     async fn index_exists(&self, index_name: &str) -> Result<bool, ApiError> {
-        let response = self.client
+        let response = self
+            .client
             .indices()
             .exists(IndicesExistsParts::Index(&[index_name]))
             .send()
             .await
-            .map_err(|e| ApiError::external_service(format!("Failed to check index existence: {}", e)))?;
+            .map_err(|e| {
+                ApiError::external_service(format!("Failed to check index existence: {}", e))
+            })?;
 
         Ok(response.status_code().is_success())
     }
@@ -215,8 +246,6 @@ impl ElasticsearchService {
             created_at: finding.created_at.to_rfc3339(),
         }
     }
-
-
 }
 
 #[async_trait]
@@ -236,9 +265,13 @@ impl SearchService for ElasticsearchService {
 
     async fn index_asset(&self, asset: &Asset) -> Result<(), ApiError> {
         let indexed_asset = self.asset_to_indexed(asset);
-        
-        let response = self.client
-            .index(IndexParts::IndexId(&self.asset_index, &asset.id.to_string()))
+
+        let response = self
+            .client
+            .index(IndexParts::IndexId(
+                &self.asset_index,
+                &asset.id.to_string(),
+            ))
             .body(indexed_asset)
             .send()
             .await
@@ -248,17 +281,26 @@ impl SearchService for ElasticsearchService {
             tracing::debug!("Indexed asset: {}", asset.id);
             Ok(())
         } else {
-            let error_text = response.text().await
+            let error_text = response
+                .text()
+                .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            Err(ApiError::external_service(format!("Failed to index asset: {}", error_text)))
+            Err(ApiError::external_service(format!(
+                "Failed to index asset: {}",
+                error_text
+            )))
         }
     }
 
     async fn index_finding(&self, finding: &Finding) -> Result<(), ApiError> {
         let indexed_finding = self.finding_to_indexed(finding);
-        
-        let response = self.client
-            .index(IndexParts::IndexId(&self.finding_index, &finding.id.to_string()))
+
+        let response = self
+            .client
+            .index(IndexParts::IndexId(
+                &self.finding_index,
+                &finding.id.to_string(),
+            ))
             .body(indexed_finding)
             .send()
             .await
@@ -268,9 +310,14 @@ impl SearchService for ElasticsearchService {
             tracing::debug!("Indexed finding: {}", finding.id);
             Ok(())
         } else {
-            let error_text = response.text().await
+            let error_text = response
+                .text()
+                .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            Err(ApiError::external_service(format!("Failed to index finding: {}", error_text)))
+            Err(ApiError::external_service(format!(
+                "Failed to index finding: {}",
+                error_text
+            )))
         }
     }
 
@@ -302,7 +349,10 @@ impl SearchService for ElasticsearchService {
         Ok(())
     }
 
-    async fn search_assets(&self, query: &SearchQuery) -> Result<SearchResult<IndexedAsset>, ApiError> {
+    async fn search_assets(
+        &self,
+        query: &SearchQuery,
+    ) -> Result<SearchResult<IndexedAsset>, ApiError> {
         let mut search_body = json!({
             "query": {
                 "bool": {
@@ -337,7 +387,8 @@ impl SearchService for ElasticsearchService {
             search_body["from"] = json!(from);
         }
 
-        let response = self.client
+        let response = self
+            .client
             .search(SearchParts::Index(&[&self.asset_index]))
             .body(search_body)
             .send()
@@ -345,29 +396,39 @@ impl SearchService for ElasticsearchService {
             .map_err(|e| ApiError::external_service(format!("Failed to search assets: {}", e)))?;
 
         if response.status_code().is_success() {
-            let response_body: Value = response.json().await
-                .map_err(|e| ApiError::external_service(format!("Failed to parse search response: {}", e)))?;
+            let response_body: Value = response.json().await.map_err(|e| {
+                ApiError::external_service(format!("Failed to parse search response: {}", e))
+            })?;
 
-            let hits = response_body["hits"]["hits"].as_array()
+            let hits = response_body["hits"]["hits"]
+                .as_array()
                 .unwrap_or(&Vec::new())
                 .iter()
-                .filter_map(|hit| {
-                    serde_json::from_value(hit["_source"].clone()).ok()
-                })
+                .filter_map(|hit| serde_json::from_value(hit["_source"].clone()).ok())
                 .collect();
 
-            let total = response_body["hits"]["total"]["value"].as_u64().unwrap_or(0);
+            let total = response_body["hits"]["total"]["value"]
+                .as_u64()
+                .unwrap_or(0);
             let took = response_body["took"].as_u64().unwrap_or(0);
 
             Ok(SearchResult { hits, total, took })
         } else {
-            let error_text = response.text().await
+            let error_text = response
+                .text()
+                .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            Err(ApiError::external_service(format!("Failed to search assets: {}", error_text)))
+            Err(ApiError::external_service(format!(
+                "Failed to search assets: {}",
+                error_text
+            )))
         }
     }
 
-    async fn search_findings(&self, query: &SearchQuery) -> Result<SearchResult<IndexedFinding>, ApiError> {
+    async fn search_findings(
+        &self,
+        query: &SearchQuery,
+    ) -> Result<SearchResult<IndexedFinding>, ApiError> {
         let mut search_body = json!({
             "query": {
                 "bool": {
@@ -402,7 +463,8 @@ impl SearchService for ElasticsearchService {
             search_body["from"] = json!(from);
         }
 
-        let response = self.client
+        let response = self
+            .client
             .search(SearchParts::Index(&[&self.finding_index]))
             .body(search_body)
             .send()
@@ -410,59 +472,88 @@ impl SearchService for ElasticsearchService {
             .map_err(|e| ApiError::external_service(format!("Failed to search findings: {}", e)))?;
 
         if response.status_code().is_success() {
-            let response_body: Value = response.json().await
-                .map_err(|e| ApiError::external_service(format!("Failed to parse search response: {}", e)))?;
+            let response_body: Value = response.json().await.map_err(|e| {
+                ApiError::external_service(format!("Failed to parse search response: {}", e))
+            })?;
 
-            let hits = response_body["hits"]["hits"].as_array()
+            let hits = response_body["hits"]["hits"]
+                .as_array()
                 .unwrap_or(&Vec::new())
                 .iter()
-                .filter_map(|hit| {
-                    serde_json::from_value(hit["_source"].clone()).ok()
-                })
+                .filter_map(|hit| serde_json::from_value(hit["_source"].clone()).ok())
                 .collect();
 
-            let total = response_body["hits"]["total"]["value"].as_u64().unwrap_or(0);
+            let total = response_body["hits"]["total"]["value"]
+                .as_u64()
+                .unwrap_or(0);
             let took = response_body["took"].as_u64().unwrap_or(0);
 
             Ok(SearchResult { hits, total, took })
         } else {
-            let error_text = response.text().await
+            let error_text = response
+                .text()
+                .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            Err(ApiError::external_service(format!("Failed to search findings: {}", error_text)))
+            Err(ApiError::external_service(format!(
+                "Failed to search findings: {}",
+                error_text
+            )))
         }
     }
 
     async fn delete_asset(&self, asset_id: &Uuid) -> Result<(), ApiError> {
-        let response = self.client
-            .delete(DeleteParts::IndexId(&self.asset_index, &asset_id.to_string()))
+        let response = self
+            .client
+            .delete(DeleteParts::IndexId(
+                &self.asset_index,
+                &asset_id.to_string(),
+            ))
             .send()
             .await
-            .map_err(|e| ApiError::external_service(format!("Failed to delete asset from index: {}", e)))?;
+            .map_err(|e| {
+                ApiError::external_service(format!("Failed to delete asset from index: {}", e))
+            })?;
 
         if response.status_code().is_success() {
             tracing::debug!("Deleted asset from index: {}", asset_id);
             Ok(())
         } else {
-            let error_text = response.text().await
+            let error_text = response
+                .text()
+                .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            Err(ApiError::external_service(format!("Failed to delete asset from index: {}", error_text)))
+            Err(ApiError::external_service(format!(
+                "Failed to delete asset from index: {}",
+                error_text
+            )))
         }
     }
 
     async fn delete_finding(&self, finding_id: &Uuid) -> Result<(), ApiError> {
-        let response = self.client
-            .delete(DeleteParts::IndexId(&self.finding_index, &finding_id.to_string()))
+        let response = self
+            .client
+            .delete(DeleteParts::IndexId(
+                &self.finding_index,
+                &finding_id.to_string(),
+            ))
             .send()
             .await
-            .map_err(|e| ApiError::external_service(format!("Failed to delete finding from index: {}", e)))?;
+            .map_err(|e| {
+                ApiError::external_service(format!("Failed to delete finding from index: {}", e))
+            })?;
 
         if response.status_code().is_success() {
             tracing::debug!("Deleted finding from index: {}", finding_id);
             Ok(())
         } else {
-            let error_text = response.text().await
+            let error_text = response
+                .text()
+                .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            Err(ApiError::external_service(format!("Failed to delete finding from index: {}", error_text)))
+            Err(ApiError::external_service(format!(
+                "Failed to delete finding from index: {}",
+                error_text
+            )))
         }
     }
 
@@ -470,19 +561,30 @@ impl SearchService for ElasticsearchService {
         // Delete existing indices
         for index in [&self.asset_index, &self.finding_index] {
             if self.index_exists(index).await? {
-                let response = self.client
+                let response = self
+                    .client
                     .indices()
                     .delete(IndicesDeleteParts::Index(&[index]))
                     .send()
                     .await
-                    .map_err(|e| ApiError::external_service(format!("Failed to delete index {}: {}", index, e)))?;
+                    .map_err(|e| {
+                        ApiError::external_service(format!(
+                            "Failed to delete index {}: {}",
+                            index, e
+                        ))
+                    })?;
 
                 if response.status_code().is_success() {
                     tracing::info!("Deleted index: {}", index);
                 } else {
-                    let error_text = response.text().await
+                    let error_text = response
+                        .text()
+                        .await
                         .unwrap_or_else(|_| "Unknown error".to_string());
-                    return Err(ApiError::external_service(format!("Failed to delete index {}: {}", index, error_text)));
+                    return Err(ApiError::external_service(format!(
+                        "Failed to delete index {}: {}",
+                        index, error_text
+                    )));
                 }
             }
         }
@@ -548,9 +650,9 @@ mod tests {
         let settings = Arc::new(create_test_settings());
         let service = ElasticsearchService::new(settings).unwrap();
         let asset = create_test_asset();
-        
+
         let indexed = service.asset_to_indexed(&asset);
-        
+
         assert_eq!(indexed.id, asset.id.to_string());
         assert_eq!(indexed.asset_type, "domain");
         assert_eq!(indexed.identifier, asset.identifier);
@@ -562,9 +664,9 @@ mod tests {
         let settings = Arc::new(create_test_settings());
         let service = ElasticsearchService::new(settings).unwrap();
         let finding = create_test_finding();
-        
+
         let indexed = service.finding_to_indexed(&finding);
-        
+
         assert_eq!(indexed.id, finding.id.to_string());
         assert_eq!(indexed.scan_id, finding.scan_id.to_string());
         assert_eq!(indexed.finding_type, finding.finding_type);
@@ -575,14 +677,14 @@ mod tests {
     async fn test_search_query_creation() {
         let mut filters = HashMap::new();
         filters.insert("asset_type".to_string(), json!("domain"));
-        
+
         let query = SearchQuery {
             query: "example.com".to_string(),
             filters,
             size: Some(10),
             from: Some(0),
         };
-        
+
         assert_eq!(query.query, "example.com");
         assert_eq!(query.size, Some(10));
         assert_eq!(query.from, Some(0));

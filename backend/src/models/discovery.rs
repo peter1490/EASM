@@ -322,7 +322,8 @@ impl DiscoveryResult {
     pub fn merge(&mut self, other: DiscoveryResult) {
         self.assets_created.extend(other.assets_created);
         self.assets_updated.extend(other.assets_updated);
-        self.relationships_created.extend(other.relationships_created);
+        self.relationships_created
+            .extend(other.relationships_created);
         self.sources_added.extend(other.sources_added);
         self.warnings.extend(other.warnings);
     }
@@ -344,4 +345,3 @@ pub struct DiscoveryRunSummary {
     pub relationships_created: i32,
     pub errors: Vec<String>,
 }
-

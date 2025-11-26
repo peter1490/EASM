@@ -1,8 +1,8 @@
 //! Security Scan Service
-//! 
+//!
 //! Handles active security scanning of known assets. This service is focused on
 //! **security assessment**, not discovery.
-//! 
+//!
 //! The scanning flow:
 //! 1. User selects an asset to scan (or scan is auto-triggered)
 //! 2. A security scan record is created
@@ -10,36 +10,26 @@
 //! 4. Findings are created for any security issues discovered
 //! 5. The scan is marked as complete with a summary
 
+use chrono::Utc;
+use serde_json::{json, Value};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
-use serde_json::{json, Value};
-use chrono::Utc;
 
 use crate::{
-    config::{Settings, COMMON_PORTS},
+    config::{Settings, SharedSettings, COMMON_PORTS},
     error::ApiError,
     models::{
-        Asset, AssetType,
-        SecurityScan, SecurityScanCreate, SecurityScanType,
-        SecurityFinding, SecurityFindingCreate, FindingSeverity,
-        ScanResultSummary,
+        Asset, AssetType, FindingSeverity, ScanResultSummary, SecurityFinding,
+        SecurityFindingCreate, SecurityScan, SecurityScanCreate, SecurityScanType,
     },
-    repositories::{
-        AssetRepository, 
-        SecurityScanRepository, SecurityFindingRepository,
-    },
+    repositories::{AssetRepository, SecurityFindingRepository, SecurityScanRepository},
     services::{
-        external::{
-            ExternalServicesManager, DnsResolver, HttpProber, TlsAnalyzer, 
-        },
-        task_manager::{TaskManager, TaskType, TaskContext},
+        external::{DnsResolver, ExternalServicesManager, HttpProber, TlsAnalyzer},
+        task_manager::{TaskContext, TaskManager, TaskType},
     },
-    utils::{
-        network::scan_ports,
-        crypto::get_tls_certificate_info,
-    },
+    utils::{crypto::get_tls_certificate_info, network::scan_ports},
 };
 
 pub struct SecurityScanService {
@@ -47,16 +37,16 @@ pub struct SecurityScanService {
     asset_repo: Arc<dyn AssetRepository + Send + Sync>,
     scan_repo: Arc<dyn SecurityScanRepository + Send + Sync>,
     finding_repo: Arc<dyn SecurityFindingRepository + Send + Sync>,
-    
+
     // External services
     external_services: Arc<ExternalServicesManager>,
     dns_resolver: Arc<DnsResolver>,
     http_prober: Arc<HttpProber>,
     tls_analyzer: Arc<TlsAnalyzer>,
-    
+
     // Utilities
     task_manager: Arc<TaskManager>,
-    settings: Arc<Settings>,
+    settings: SharedSettings,
 }
 
 impl SecurityScanService {
@@ -69,7 +59,7 @@ impl SecurityScanService {
         http_prober: Arc<HttpProber>,
         tls_analyzer: Arc<TlsAnalyzer>,
         task_manager: Arc<TaskManager>,
-        settings: Arc<Settings>,
+        settings: SharedSettings,
     ) -> Self {
         Self {
             asset_repo,
@@ -84,15 +74,27 @@ impl SecurityScanService {
         }
     }
 
+    fn current_settings(&self) -> Arc<Settings> {
+        self.settings.load_full()
+    }
+
     // ========================================================================
     // SCAN MANAGEMENT
     // ========================================================================
 
     /// Create a new security scan for an asset
-    pub async fn create_scan(&self, scan_create: SecurityScanCreate) -> Result<SecurityScan, ApiError> {
+    pub async fn create_scan(
+        &self,
+        scan_create: SecurityScanCreate,
+    ) -> Result<SecurityScan, ApiError> {
         // Verify asset exists
-        let asset = self.asset_repo.get_by_id(&scan_create.asset_id).await?
-            .ok_or_else(|| ApiError::NotFound(format!("Asset {} not found", scan_create.asset_id)))?;
+        let asset = self
+            .asset_repo
+            .get_by_id(&scan_create.asset_id)
+            .await?
+            .ok_or_else(|| {
+                ApiError::NotFound(format!("Asset {} not found", scan_create.asset_id))
+            })?;
 
         // Create the scan record
         let scan = self.scan_repo.create(&scan_create).await?;
@@ -108,18 +110,18 @@ impl SecurityScanService {
             "scan_type": scan.scan_type,
         });
 
-        self.task_manager.submit_task(
-            TaskType::Scan,
-            task_metadata,
-            move |ctx| {
+        self.task_manager
+            .submit_task(TaskType::Scan, task_metadata, move |ctx| {
                 let scan_service = scan_service.clone();
-                Box::pin(async move {
-                    scan_service.execute_scan(ctx, scan_id, asset_id).await
-                })
-            }
-        ).await?;
+                Box::pin(async move { scan_service.execute_scan(ctx, scan_id, asset_id).await })
+            })
+            .await?;
 
-        tracing::info!("Created security scan {} for asset {}", scan_id, asset.identifier);
+        tracing::info!(
+            "Created security scan {} for asset {}",
+            scan_id,
+            asset.identifier
+        );
         Ok(scan)
     }
 
@@ -131,38 +133,49 @@ impl SecurityScanService {
     /// Cancel a running scan
     pub async fn cancel_scan(&self, id: &Uuid) -> Result<(), ApiError> {
         use crate::models::security::SecurityScanStatus;
-        
+
         // Get the current scan status
-        let scan = self.scan_repo.get_by_id(id).await?
+        let scan = self
+            .scan_repo
+            .get_by_id(id)
+            .await?
             .ok_or_else(|| ApiError::NotFound(format!("Scan {} not found", id)))?;
-        
+
         // Only running or pending scans can be cancelled
         let cancellable_statuses = ["running", "pending"];
         if !cancellable_statuses.contains(&scan.status.as_str()) {
             return Err(ApiError::Validation(format!(
-                "Scan {} is in {} state and cannot be cancelled", 
+                "Scan {} is in {} state and cannot be cancelled",
                 id, scan.status
             )));
         }
-        
+
         // Update scan status to cancelled
-        self.scan_repo.update_status(id, SecurityScanStatus::Cancelled).await?;
-        
+        self.scan_repo
+            .update_status(id, SecurityScanStatus::Cancelled)
+            .await?;
+
         // Cancel the task in the task manager
         let _ = self.task_manager.cancel_task(*id).await;
-        
+
         tracing::info!("Cancelled security scan {}", id);
         Ok(())
     }
 
     /// Get scan with full details including asset and findings
-    pub async fn get_scan_detail(&self, id: &Uuid) -> Result<Option<crate::models::SecurityScanDetailResponse>, ApiError> {
+    pub async fn get_scan_detail(
+        &self,
+        id: &Uuid,
+    ) -> Result<Option<crate::models::SecurityScanDetailResponse>, ApiError> {
         let scan = match self.scan_repo.get_by_id(id).await? {
             Some(s) => s,
             None => return Ok(None),
         };
 
-        let asset = self.asset_repo.get_by_id(&scan.asset_id).await?
+        let asset = self
+            .asset_repo
+            .get_by_id(&scan.asset_id)
+            .await?
             .ok_or_else(|| ApiError::NotFound("Asset not found".to_string()))?;
 
         let findings = self.finding_repo.list_by_scan(id).await?;
@@ -177,7 +190,10 @@ impl SecurityScanService {
     }
 
     /// List scans for an asset
-    pub async fn list_scans_for_asset(&self, asset_id: &Uuid) -> Result<Vec<SecurityScan>, ApiError> {
+    pub async fn list_scans_for_asset(
+        &self,
+        asset_id: &Uuid,
+    ) -> Result<Vec<SecurityScan>, ApiError> {
         self.scan_repo.list_by_asset(asset_id, 100).await
     }
 
@@ -196,25 +212,39 @@ impl SecurityScanService {
     // ========================================================================
 
     /// Execute a security scan
-    async fn execute_scan(&self, ctx: TaskContext, scan_id: Uuid, asset_id: Uuid) -> Result<(), ApiError> {
+    async fn execute_scan(
+        &self,
+        ctx: TaskContext,
+        scan_id: Uuid,
+        asset_id: Uuid,
+    ) -> Result<(), ApiError> {
         tracing::info!("Starting security scan {}", scan_id);
 
         // Mark scan as running
         self.scan_repo.start(&scan_id).await?;
-        ctx.update_progress(0.1, Some("Scan started".to_string())).await?;
+        ctx.update_progress(0.1, Some("Scan started".to_string()))
+            .await?;
 
         // Get asset details
-        let asset = self.asset_repo.get_by_id(&asset_id).await?
+        let asset = self
+            .asset_repo
+            .get_by_id(&asset_id)
+            .await?
             .ok_or_else(|| ApiError::NotFound("Asset not found".to_string()))?;
 
         // Get scan config
-        let scan = self.scan_repo.get_by_id(&scan_id).await?
+        let scan = self
+            .scan_repo
+            .get_by_id(&scan_id)
+            .await?
             .ok_or_else(|| ApiError::NotFound("Scan not found".to_string()))?;
 
         let scan_type = SecurityScanType::from(scan.scan_type.as_str());
 
         // Execute appropriate scan based on asset type and scan type
-        let result = self.execute_scan_internal(&ctx, scan_id, &asset, scan_type).await;
+        let result = self
+            .execute_scan_internal(&ctx, scan_id, &asset, scan_type)
+            .await;
 
         // Finalize scan
         match result {
@@ -245,13 +275,16 @@ impl SecurityScanService {
 
         match asset.asset_type {
             AssetType::Domain => {
-                self.scan_domain(ctx, scan_id, asset, &scan_type, &mut summary).await?;
+                self.scan_domain(ctx, scan_id, asset, &scan_type, &mut summary)
+                    .await?;
             }
             AssetType::Ip => {
-                self.scan_ip(ctx, scan_id, asset, &scan_type, &mut summary).await?;
+                self.scan_ip(ctx, scan_id, asset, &scan_type, &mut summary)
+                    .await?;
             }
             AssetType::Certificate => {
-                self.scan_certificate(ctx, scan_id, asset, &mut summary).await?;
+                self.scan_certificate(ctx, scan_id, asset, &mut summary)
+                    .await?;
             }
             _ => {
                 tracing::warn!("Scan not supported for asset type {:?}", asset.asset_type);
@@ -262,7 +295,8 @@ impl SecurityScanService {
 
         // Count findings by severity
         let findings = self.finding_repo.list_by_scan(&scan_id).await?;
-        let mut by_severity: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+        let mut by_severity: std::collections::HashMap<String, i32> =
+            std::collections::HashMap::new();
         for finding in &findings {
             *by_severity.entry(finding.severity.clone()).or_insert(0) += 1;
         }
@@ -286,24 +320,37 @@ impl SecurityScanService {
         let domain = &asset.identifier;
 
         // Step 1: DNS checks
-        ctx.update_progress(0.2, Some("Checking DNS".to_string())).await?;
+        ctx.update_progress(0.2, Some("Checking DNS".to_string()))
+            .await?;
         self.check_dns_security(scan_id, asset).await?;
 
         // Step 2: Resolve to IP and scan
-        ctx.update_progress(0.3, Some("Resolving DNS".to_string())).await?;
+        ctx.update_progress(0.3, Some("Resolving DNS".to_string()))
+            .await?;
         match self.dns_resolver.resolve_hostname(domain).await {
             Ok(ips) => {
                 if let Some(ip) = ips.first() {
                     // Port scan
-                    if matches!(scan_type, SecurityScanType::PortScan | SecurityScanType::Full) {
-                        ctx.update_progress(0.4, Some("Scanning ports".to_string())).await?;
-                        summary.open_ports = Some(self.scan_ports_with_findings(scan_id, asset, *ip).await?);
+                    if matches!(
+                        scan_type,
+                        SecurityScanType::PortScan | SecurityScanType::Full
+                    ) {
+                        ctx.update_progress(0.4, Some("Scanning ports".to_string()))
+                            .await?;
+                        summary.open_ports =
+                            Some(self.scan_ports_with_findings(scan_id, asset, *ip).await?);
                     }
 
                     // HTTP probing
-                    if matches!(scan_type, SecurityScanType::HttpProbe | SecurityScanType::Full) {
-                        ctx.update_progress(0.6, Some("Probing HTTP".to_string())).await?;
-                        summary.http_status = self.probe_http_with_findings(scan_id, asset, domain).await?;
+                    if matches!(
+                        scan_type,
+                        SecurityScanType::HttpProbe | SecurityScanType::Full
+                    ) {
+                        ctx.update_progress(0.6, Some("Probing HTTP".to_string()))
+                            .await?;
+                        summary.http_status = self
+                            .probe_http_with_findings(scan_id, asset, domain)
+                            .await?;
                     }
                 }
             }
@@ -316,19 +363,30 @@ impl SecurityScanService {
                     "DNS Resolution Failed",
                     Some(&format!("Could not resolve domain {}: {}", domain, e)),
                     json!({ "domain": domain, "error": e.to_string() }),
-                ).await?;
+                )
+                .await?;
             }
         }
 
         // Step 3: TLS analysis
-        if matches!(scan_type, SecurityScanType::TlsAnalysis | SecurityScanType::Full) {
-            ctx.update_progress(0.7, Some("Analyzing TLS".to_string())).await?;
-            summary.tls_version = self.analyze_tls_with_findings(scan_id, asset, domain, 443).await?;
+        if matches!(
+            scan_type,
+            SecurityScanType::TlsAnalysis | SecurityScanType::Full
+        ) {
+            ctx.update_progress(0.7, Some("Analyzing TLS".to_string()))
+                .await?;
+            summary.tls_version = self
+                .analyze_tls_with_findings(scan_id, asset, domain, 443)
+                .await?;
         }
 
         // Step 4: Threat intelligence
-        if matches!(scan_type, SecurityScanType::ThreatIntel | SecurityScanType::Full) {
-            ctx.update_progress(0.85, Some("Checking threat intel".to_string())).await?;
+        if matches!(
+            scan_type,
+            SecurityScanType::ThreatIntel | SecurityScanType::Full
+        ) {
+            ctx.update_progress(0.85, Some("Checking threat intel".to_string()))
+                .await?;
             self.check_threat_intel(scan_id, asset, domain).await?;
         }
 
@@ -347,41 +405,63 @@ impl SecurityScanService {
         scan_type: &SecurityScanType,
         summary: &mut ScanResultSummary,
     ) -> Result<(), ApiError> {
-        let ip: IpAddr = asset.identifier.parse()
+        let ip: IpAddr = asset
+            .identifier
+            .parse()
             .map_err(|e| ApiError::Validation(format!("Invalid IP: {}", e)))?;
 
         // Port scan
-        if matches!(scan_type, SecurityScanType::PortScan | SecurityScanType::Full) {
-            ctx.update_progress(0.3, Some("Scanning ports".to_string())).await?;
+        if matches!(
+            scan_type,
+            SecurityScanType::PortScan | SecurityScanType::Full
+        ) {
+            ctx.update_progress(0.3, Some("Scanning ports".to_string()))
+                .await?;
             summary.open_ports = Some(self.scan_ports_with_findings(scan_id, asset, ip).await?);
         }
 
         // HTTP probing on web ports
-        if matches!(scan_type, SecurityScanType::HttpProbe | SecurityScanType::Full) {
-            ctx.update_progress(0.5, Some("Probing HTTP".to_string())).await?;
+        if matches!(
+            scan_type,
+            SecurityScanType::HttpProbe | SecurityScanType::Full
+        ) {
+            ctx.update_progress(0.5, Some("Probing HTTP".to_string()))
+                .await?;
             let ports = summary.open_ports.as_ref().cloned().unwrap_or_default();
             for port in &ports {
                 if matches!(port, 80 | 443 | 8080 | 8443) {
-                    self.probe_http_with_findings(scan_id, asset, &format!("{}:{}", ip, port)).await?;
+                    self.probe_http_with_findings(scan_id, asset, &format!("{}:{}", ip, port))
+                        .await?;
                 }
             }
         }
 
         // TLS analysis on HTTPS ports
-        if matches!(scan_type, SecurityScanType::TlsAnalysis | SecurityScanType::Full) {
-            ctx.update_progress(0.7, Some("Analyzing TLS".to_string())).await?;
+        if matches!(
+            scan_type,
+            SecurityScanType::TlsAnalysis | SecurityScanType::Full
+        ) {
+            ctx.update_progress(0.7, Some("Analyzing TLS".to_string()))
+                .await?;
             let ports = summary.open_ports.as_ref().cloned().unwrap_or_default();
             for port in &ports {
                 if matches!(port, 443 | 8443) {
-                    summary.tls_version = self.analyze_tls_with_findings(scan_id, asset, &ip.to_string(), *port).await?;
+                    summary.tls_version = self
+                        .analyze_tls_with_findings(scan_id, asset, &ip.to_string(), *port)
+                        .await?;
                 }
             }
         }
 
         // Threat intelligence
-        if matches!(scan_type, SecurityScanType::ThreatIntel | SecurityScanType::Full) {
-            ctx.update_progress(0.85, Some("Checking threat intel".to_string())).await?;
-            self.check_threat_intel(scan_id, asset, &ip.to_string()).await?;
+        if matches!(
+            scan_type,
+            SecurityScanType::ThreatIntel | SecurityScanType::Full
+        ) {
+            ctx.update_progress(0.85, Some("Checking threat intel".to_string()))
+                .await?;
+            self.check_threat_intel(scan_id, asset, &ip.to_string())
+                .await?;
         }
 
         Ok(())
@@ -396,7 +476,7 @@ impl SecurityScanService {
         _ctx: &TaskContext,
         scan_id: Uuid,
         asset: &Asset,
-        summary: &mut ScanResultSummary,
+        _summary: &mut ScanResultSummary,
     ) -> Result<(), ApiError> {
         // Check certificate metadata for issues
         if let Some(metadata) = asset.metadata.as_object() {
@@ -413,9 +493,13 @@ impl SecurityScanService {
                             "expired_certificate",
                             FindingSeverity::Critical,
                             "Expired SSL/TLS Certificate",
-                            Some(&format!("Certificate expired {} days ago", -days_until_expiry)),
+                            Some(&format!(
+                                "Certificate expired {} days ago",
+                                -days_until_expiry
+                            )),
                             json!({ "expiry_date": not_after, "days_overdue": -days_until_expiry }),
-                        ).await?;
+                        )
+                        .await?;
                     } else if days_until_expiry < 30 {
                         self.create_finding(
                             scan_id,
@@ -454,7 +538,8 @@ impl SecurityScanService {
                         "Self-Signed Certificate",
                         Some("Certificate is self-signed and may not be trusted by browsers"),
                         json!({ "subject": subject, "issuer": issuer }),
-                    ).await?;
+                    )
+                    .await?;
                 }
             }
         }
@@ -466,8 +551,14 @@ impl SecurityScanService {
     // SECURITY CHECK IMPLEMENTATIONS
     // ========================================================================
 
-    async fn scan_ports_with_findings(&self, scan_id: Uuid, asset: &Asset, ip: IpAddr) -> Result<Vec<u16>, ApiError> {
-        let timeout = Duration::from_secs_f64(self.settings.tcp_scan_timeout);
+    async fn scan_ports_with_findings(
+        &self,
+        scan_id: Uuid,
+        asset: &Asset,
+        ip: IpAddr,
+    ) -> Result<Vec<u16>, ApiError> {
+        let settings = self.current_settings();
+        let timeout = Duration::from_secs_f64(settings.tcp_scan_timeout);
         let open_ports = scan_ports(ip, COMMON_PORTS, timeout).await;
 
         for port in &open_ports {
@@ -489,20 +580,32 @@ impl SecurityScanService {
                 &title,
                 Some(&description),
                 json!({ "port": port, "ip": ip.to_string() }),
-            ).await?;
+            )
+            .await?;
         }
 
         Ok(open_ports)
     }
 
-    async fn probe_http_with_findings(&self, scan_id: Uuid, asset: &Asset, target: &str) -> Result<Option<i32>, ApiError> {
+    async fn probe_http_with_findings(
+        &self,
+        scan_id: Uuid,
+        asset: &Asset,
+        target: &str,
+    ) -> Result<Option<i32>, ApiError> {
         let url = if target.contains("://") {
             target.to_string()
         } else if target.contains(':') {
-            let port: u16 = target.split(':').last()
+            let port: u16 = target
+                .split(':')
+                .last()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(80);
-            let scheme = if port == 443 || port == 8443 { "https" } else { "http" };
+            let scheme = if port == 443 || port == 8443 {
+                "https"
+            } else {
+                "http"
+            };
             format!("{}://{}", scheme, target)
         } else {
             format!("https://{}", target)
@@ -523,7 +626,8 @@ impl SecurityScanService {
                         "HTTPS Not Enforced",
                         Some("HTTP requests are not automatically redirected to HTTPS"),
                         json!({ "url": url, "status_code": code }),
-                    ).await?;
+                    )
+                    .await?;
                 }
             }
         }
@@ -538,13 +642,20 @@ impl SecurityScanService {
                 "HTTP Probe Error",
                 Some(error),
                 json!({ "url": url, "error": error }),
-            ).await?;
+            )
+            .await?;
         }
 
         Ok(status)
     }
 
-    async fn analyze_tls_with_findings(&self, scan_id: Uuid, asset: &Asset, host: &str, port: u16) -> Result<Option<String>, ApiError> {
+    async fn analyze_tls_with_findings(
+        &self,
+        scan_id: Uuid,
+        asset: &Asset,
+        host: &str,
+        port: u16,
+    ) -> Result<Option<String>, ApiError> {
         match get_tls_certificate_info(host, port).await {
             Ok(cert_info) => {
                 // Check certificate expiration using the not_after string field
@@ -560,9 +671,13 @@ impl SecurityScanService {
                             "expired_certificate",
                             FindingSeverity::Critical,
                             "Expired SSL/TLS Certificate",
-                            Some(&format!("The SSL/TLS certificate expired {} days ago", -days_until_expiry)),
+                            Some(&format!(
+                                "The SSL/TLS certificate expired {} days ago",
+                                -days_until_expiry
+                            )),
                             json!({ "expiry_date": cert_info.not_after, "host": host }),
-                        ).await?;
+                        )
+                        .await?;
                     } else if days_until_expiry < 30 {
                         self.create_finding(
                             scan_id,
@@ -570,9 +685,13 @@ impl SecurityScanService {
                             "certificate_expiring_soon",
                             FindingSeverity::High,
                             "Certificate Expiring Soon",
-                            Some(&format!("Certificate expires in {} days", days_until_expiry)),
+                            Some(&format!(
+                                "Certificate expires in {} days",
+                                days_until_expiry
+                            )),
                             json!({ "expiry_date": cert_info.not_after, "host": host }),
-                        ).await?;
+                        )
+                        .await?;
                     } else if days_until_expiry < 90 {
                         self.create_finding(
                             scan_id,
@@ -580,9 +699,13 @@ impl SecurityScanService {
                             "certificate_expiring_soon",
                             FindingSeverity::Medium,
                             "Certificate Expiring Within 90 Days",
-                            Some(&format!("Certificate expires in {} days", days_until_expiry)),
+                            Some(&format!(
+                                "Certificate expires in {} days",
+                                days_until_expiry
+                            )),
                             json!({ "expiry_date": cert_info.not_after, "host": host }),
-                        ).await?;
+                        )
+                        .await?;
                     }
                 }
 
@@ -615,7 +738,12 @@ impl SecurityScanService {
         Ok(())
     }
 
-    async fn check_threat_intel(&self, scan_id: Uuid, asset: &Asset, target: &str) -> Result<(), ApiError> {
+    async fn check_threat_intel(
+        &self,
+        scan_id: Uuid,
+        asset: &Asset,
+        target: &str,
+    ) -> Result<(), ApiError> {
         // Check threat intelligence for the target
         let threat_result = if target.parse::<IpAddr>().is_ok() {
             self.external_services.get_ip_threat_intel(target).await
@@ -631,27 +759,39 @@ impl SecurityScanService {
                     "reputation_issue",
                     FindingSeverity::High,
                     "Malicious Reputation Detected",
-                    Some(&format!("Target has malicious reputation from: {:?}", intel.threat_sources)),
+                    Some(&format!(
+                        "Target has malicious reputation from: {:?}",
+                        intel.threat_sources
+                    )),
                     json!({
                         "target": target,
                         "is_malicious": true,
                         "reputation_score": intel.reputation_score,
                         "threat_sources": intel.threat_sources,
                     }),
-                ).await?;
-            } else if intel.reputation_score.map(|s| (s as i64) < 50).unwrap_or(false) {
+                )
+                .await?;
+            } else if intel
+                .reputation_score
+                .map(|s| (s as i64) < 50)
+                .unwrap_or(false)
+            {
                 self.create_finding(
                     scan_id,
                     asset.id,
                     "reputation_issue",
                     FindingSeverity::Medium,
                     "Low Reputation Score",
-                    Some(&format!("Target has low reputation score: {}", intel.reputation_score.unwrap_or(0) as i64)),
+                    Some(&format!(
+                        "Target has low reputation score: {}",
+                        intel.reputation_score.unwrap_or(0) as i64
+                    )),
                     json!({
                         "target": target,
                         "reputation_score": intel.reputation_score,
                     }),
-                ).await?;
+                )
+                .await?;
             }
         }
 
@@ -693,7 +833,10 @@ impl SecurityScanService {
     // FINDINGS MANAGEMENT
     // ========================================================================
 
-    pub async fn list_findings_for_asset(&self, asset_id: &Uuid) -> Result<Vec<SecurityFinding>, ApiError> {
+    pub async fn list_findings_for_asset(
+        &self,
+        asset_id: &Uuid,
+    ) -> Result<Vec<SecurityFinding>, ApiError> {
         self.finding_repo.list_by_asset(asset_id, 1000).await
     }
 
@@ -701,7 +844,9 @@ impl SecurityScanService {
         self.finding_repo.get_by_id(id).await
     }
 
-    pub async fn get_findings_summary(&self) -> Result<std::collections::HashMap<String, i64>, ApiError> {
+    pub async fn get_findings_summary(
+        &self,
+    ) -> Result<std::collections::HashMap<String, i64>, ApiError> {
         self.finding_repo.count_by_severity().await
     }
 }
@@ -749,7 +894,10 @@ fn get_port_description(port: u16) -> String {
 }
 
 fn _is_weak_tls_version(version: &str) -> bool {
-    matches!(version.to_uppercase().as_str(), "SSLV2" | "SSLV3" | "TLSV1" | "TLSV1.0" | "TLSV1.1")
+    matches!(
+        version.to_uppercase().as_str(),
+        "SSLV2" | "SSLV3" | "TLSV1" | "TLSV1.0" | "TLSV1.1"
+    )
 }
 
 fn get_remediation(finding_type: &str) -> Option<String> {
@@ -764,4 +912,3 @@ fn get_remediation(finding_type: &str) -> Option<String> {
         _ => None,
     }
 }
-

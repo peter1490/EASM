@@ -1,15 +1,15 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 
-use crate::{
-    config::Settings,
-    error::ApiError,
-};
+use crate::{config::SharedSettings, error::ApiError};
 
 /// Task status enumeration
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -92,7 +92,10 @@ impl TaskInfo {
     }
 
     pub fn is_finished(&self) -> bool {
-        matches!(self.status, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled)
+        matches!(
+            self.status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+        )
     }
 }
 
@@ -103,8 +106,14 @@ pub struct TaskContext {
 }
 
 impl TaskContext {
-    pub async fn update_progress(&self, progress: f32, message: Option<String>) -> Result<(), ApiError> {
-        self.task_manager.update_task_progress(self.task_id, progress, message).await
+    pub async fn update_progress(
+        &self,
+        progress: f32,
+        message: Option<String>,
+    ) -> Result<(), ApiError> {
+        self.task_manager
+            .update_task_progress(self.task_id, progress, message)
+            .await
     }
 
     pub async fn check_cancellation(&self) -> Result<(), ApiError> {
@@ -117,33 +126,72 @@ impl TaskContext {
 }
 
 /// Task execution function type
-pub type TaskFunction = Box<dyn Fn(TaskContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ApiError>> + Send>> + Send + Sync>;
+pub type TaskFunction = Box<
+    dyn Fn(
+            TaskContext,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ApiError>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Background task manager with concurrency control and cancellation support
 pub struct TaskManager {
-    settings: Arc<Settings>,
+    settings: SharedSettings,
     tasks: Arc<RwLock<HashMap<Uuid, TaskInfo>>>,
     active_handles: Arc<Mutex<HashMap<Uuid, JoinHandle<()>>>>,
     concurrency_semaphore: Arc<tokio::sync::Semaphore>,
+    max_concurrent: Arc<AtomicUsize>,
 }
 
 impl TaskManager {
-    pub fn new(settings: Arc<Settings>) -> Self {
-        let max_concurrent = settings.max_concurrent_scans as usize;
-        
+    pub fn new(settings: SharedSettings) -> Self {
+        let max_concurrent = settings.load().max_concurrent_scans as usize;
+
         Self {
             settings,
             tasks: Arc::new(RwLock::new(HashMap::new())),
             active_handles: Arc::new(Mutex::new(HashMap::new())),
             concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent)),
+            max_concurrent: Arc::new(AtomicUsize::new(max_concurrent)),
+        }
+    }
+
+    fn refresh_concurrency(&self) {
+        let desired = self.settings.load().max_concurrent_scans as usize;
+        let current = self.max_concurrent.load(Ordering::SeqCst);
+
+        if desired > current {
+            self.concurrency_semaphore.add_permits(desired - current);
+            self.max_concurrent.store(desired, Ordering::SeqCst);
+        } else if desired < current {
+            let remove = current - desired;
+            if remove > 0 {
+                if let Ok(permits) = self.concurrency_semaphore.try_acquire_many(remove as u32) {
+                    drop(permits);
+                    self.max_concurrent.store(desired, Ordering::SeqCst);
+                }
+            }
         }
     }
 
     /// Submit a new task for execution
-    pub async fn submit_task<F>(&self, task_type: TaskType, metadata: serde_json::Value, task_fn: F) -> Result<Uuid, ApiError>
+    pub async fn submit_task<F>(
+        &self,
+        task_type: TaskType,
+        metadata: serde_json::Value,
+        task_fn: F,
+    ) -> Result<Uuid, ApiError>
     where
-        F: Fn(TaskContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ApiError>> + Send>> + Send + Sync + 'static,
+        F: Fn(
+                TaskContext,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ApiError>> + Send>>
+            + Send
+            + Sync
+            + 'static,
     {
+        self.refresh_concurrency();
         let task_info = TaskInfo::new(task_type.clone(), metadata);
         let task_id = task_info.id;
 
@@ -156,11 +204,11 @@ impl TaskManager {
         // Spawn background task
         let task_manager = Arc::new(self.clone());
         let semaphore = self.concurrency_semaphore.clone();
-        
+
         let handle = tokio::spawn(async move {
             // Acquire semaphore permit for concurrency control
             let _permit = semaphore.acquire().await.unwrap();
-            
+
             // Create task context
             let context = TaskContext {
                 task_id,
@@ -211,9 +259,14 @@ impl TaskManager {
     }
 
     /// List all tasks with optional filtering
-    pub async fn list_tasks(&self, task_type: Option<TaskType>, status: Option<TaskStatus>) -> Vec<TaskInfo> {
+    pub async fn list_tasks(
+        &self,
+        task_type: Option<TaskType>,
+        status: Option<TaskStatus>,
+    ) -> Vec<TaskInfo> {
         let tasks = self.tasks.read().await;
-        tasks.values()
+        tasks
+            .values()
             .filter(|task| {
                 if let Some(ref filter_type) = task_type {
                     if &task.task_type != filter_type {
@@ -234,7 +287,8 @@ impl TaskManager {
     /// Get active (running or pending) tasks
     pub async fn get_active_tasks(&self) -> Vec<TaskInfo> {
         let tasks = self.tasks.read().await;
-        tasks.values()
+        tasks
+            .values()
             .filter(|task| task.is_active())
             .cloned()
             .collect()
@@ -272,7 +326,8 @@ impl TaskManager {
     pub async fn cancel_all_tasks(&self) -> Result<usize, ApiError> {
         let active_task_ids: Vec<Uuid> = {
             let tasks = self.tasks.read().await;
-            tasks.values()
+            tasks
+                .values()
                 .filter(|task| task.is_active())
                 .map(|task| task.id)
                 .collect()
@@ -296,10 +351,13 @@ impl TaskManager {
 
         {
             let mut tasks = self.tasks.write().await;
-            let task_ids_to_remove: Vec<Uuid> = tasks.values()
+            let task_ids_to_remove: Vec<Uuid> = tasks
+                .values()
                 .filter(|task| {
-                    task.is_finished() && 
-                    task.completed_at.map_or(false, |completed| completed < cutoff_time)
+                    task.is_finished()
+                        && task
+                            .completed_at
+                            .map_or(false, |completed| completed < cutoff_time)
                 })
                 .map(|task| task.id)
                 .collect();
@@ -334,7 +392,7 @@ impl TaskManager {
         }
 
         stats.available_slots = self.concurrency_semaphore.available_permits();
-        stats.max_concurrent = self.settings.max_concurrent_scans as usize;
+        stats.max_concurrent = self.max_concurrent.load(Ordering::SeqCst);
 
         stats
     }
@@ -342,7 +400,8 @@ impl TaskManager {
     /// Check if a task is cancelled
     pub async fn is_task_cancelled(&self, task_id: Uuid) -> bool {
         let tasks = self.tasks.read().await;
-        tasks.get(&task_id)
+        tasks
+            .get(&task_id)
             .map(|task| task.status == TaskStatus::Cancelled)
             .unwrap_or(false)
     }
@@ -376,7 +435,12 @@ impl TaskManager {
         let mut tasks = self.tasks.write().await;
         if let Some(task) = tasks.get_mut(&task_id) {
             task.fail(error.clone());
-            tracing::warn!("Failed task {} of type {:?}: {}", task_id, task.task_type, error);
+            tracing::warn!(
+                "Failed task {} of type {:?}: {}",
+                task_id,
+                task.task_type,
+                error
+            );
             Ok(())
         } else {
             Err(ApiError::NotFound("Task not found".to_string()))
@@ -384,7 +448,12 @@ impl TaskManager {
     }
 
     /// Internal method to update task progress
-    async fn update_task_progress(&self, task_id: Uuid, progress: f32, message: Option<String>) -> Result<(), ApiError> {
+    async fn update_task_progress(
+        &self,
+        task_id: Uuid,
+        progress: f32,
+        message: Option<String>,
+    ) -> Result<(), ApiError> {
         let mut tasks = self.tasks.write().await;
         if let Some(task) = tasks.get_mut(&task_id) {
             task.update_progress(progress, message);
@@ -415,10 +484,10 @@ impl TaskManager {
     /// Graceful shutdown - cancel all tasks and wait for completion
     pub async fn shutdown(&self) -> Result<(), ApiError> {
         tracing::info!("Shutting down task manager...");
-        
+
         // Cancel all active tasks
         let cancelled_count = self.cancel_all_tasks().await?;
-        
+
         // Wait a bit for tasks to handle cancellation
         if cancelled_count > 0 {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -446,6 +515,7 @@ impl Clone for TaskManager {
             tasks: Arc::clone(&self.tasks),
             active_handles: Arc::clone(&self.active_handles),
             concurrency_semaphore: Arc::clone(&self.concurrency_semaphore),
+            max_concurrent: Arc::clone(&self.max_concurrent),
         }
     }
 }
@@ -481,27 +551,35 @@ impl Default for TaskManagerStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arc_swap::ArcSwap;
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::time::sleep;
 
     async fn create_test_task_manager() -> TaskManager {
         let mut settings = crate::config::Settings::new_with_env_file(false).unwrap();
         settings.max_concurrent_scans = 2; // Small limit for testing
-        TaskManager::new(Arc::new(settings))
+        let shared = Arc::new(ArcSwap::from_pointee(settings));
+        TaskManager::new(shared)
     }
 
     #[tokio::test]
     async fn test_task_creation_and_execution() {
         let task_manager = create_test_task_manager().await;
-        
-        let task_id = task_manager.submit_task(
-            TaskType::Scan,
-            serde_json::json!({"test": "data"}),
-            |_ctx| Box::pin(async {
-                sleep(Duration::from_millis(100)).await;
-                Ok(())
-            })
-        ).await.unwrap();
+
+        let task_id = task_manager
+            .submit_task(
+                TaskType::Scan,
+                serde_json::json!({"test": "data"}),
+                |_ctx| {
+                    Box::pin(async {
+                        sleep(Duration::from_millis(100)).await;
+                        Ok(())
+                    })
+                },
+            )
+            .await
+            .unwrap();
 
         // Task should initially be pending
         let task = task_manager.get_task(task_id).await.unwrap();
@@ -518,14 +596,13 @@ mod tests {
     #[tokio::test]
     async fn test_task_failure() {
         let task_manager = create_test_task_manager().await;
-        
-        let task_id = task_manager.submit_task(
-            TaskType::Scan,
-            serde_json::json!({}),
-            |_ctx| Box::pin(async {
-                Err(ApiError::Validation("Test error".to_string()))
+
+        let task_id = task_manager
+            .submit_task(TaskType::Scan, serde_json::json!({}), |_ctx| {
+                Box::pin(async { Err(ApiError::Validation("Test error".to_string())) })
             })
-        ).await.unwrap();
+            .await
+            .unwrap();
 
         // Wait for task to fail
         sleep(Duration::from_millis(100)).await;
@@ -539,19 +616,21 @@ mod tests {
     #[tokio::test]
     async fn test_task_cancellation() {
         let task_manager = create_test_task_manager().await;
-        
-        let task_id = task_manager.submit_task(
-            TaskType::Scan,
-            serde_json::json!({}),
-            |ctx| Box::pin(async move {
-                for i in 0..10 {
-                    ctx.check_cancellation().await?;
-                    ctx.update_progress(i as f32 / 10.0, Some(format!("Step {}", i))).await?;
-                    sleep(Duration::from_millis(50)).await;
-                }
-                Ok(())
+
+        let task_id = task_manager
+            .submit_task(TaskType::Scan, serde_json::json!({}), |ctx| {
+                Box::pin(async move {
+                    for i in 0..10 {
+                        ctx.check_cancellation().await?;
+                        ctx.update_progress(i as f32 / 10.0, Some(format!("Step {}", i)))
+                            .await?;
+                        sleep(Duration::from_millis(50)).await;
+                    }
+                    Ok(())
+                })
             })
-        ).await.unwrap();
+            .await
+            .unwrap();
 
         // Let task start
         sleep(Duration::from_millis(25)).await;
@@ -569,25 +648,29 @@ mod tests {
     #[tokio::test]
     async fn test_concurrency_limits() {
         let task_manager = create_test_task_manager().await;
-        
+
         // Submit 4 tasks (more than the limit of 2)
         let mut task_ids = Vec::new();
         for i in 0..4 {
-            let task_id = task_manager.submit_task(
-                TaskType::Scan,
-                serde_json::json!({"task": i}),
-                |_ctx| Box::pin(async {
-                    sleep(Duration::from_millis(200)).await;
-                    Ok(())
+            let task_id = task_manager
+                .submit_task(TaskType::Scan, serde_json::json!({"task": i}), |_ctx| {
+                    Box::pin(async {
+                        sleep(Duration::from_millis(200)).await;
+                        Ok(())
+                    })
                 })
-            ).await.unwrap();
+                .await
+                .unwrap();
             task_ids.push(task_id);
         }
 
         // Check that only 2 tasks are running initially
         sleep(Duration::from_millis(50)).await;
         let active_tasks = task_manager.get_active_tasks().await;
-        let running_count = active_tasks.iter().filter(|t| t.status == TaskStatus::Running).count();
+        let running_count = active_tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Running)
+            .count();
         assert!(running_count <= 2);
 
         // Wait for all tasks to complete
@@ -603,19 +686,21 @@ mod tests {
     #[tokio::test]
     async fn test_task_progress_updates() {
         let task_manager = create_test_task_manager().await;
-        
-        let task_id = task_manager.submit_task(
-            TaskType::Scan,
-            serde_json::json!({}),
-            |ctx| Box::pin(async move {
-                for i in 0..5 {
-                    let progress = i as f32 / 4.0;
-                    ctx.update_progress(progress, Some(format!("Step {}", i + 1))).await?;
-                    sleep(Duration::from_millis(50)).await;
-                }
-                Ok(())
+
+        let task_id = task_manager
+            .submit_task(TaskType::Scan, serde_json::json!({}), |ctx| {
+                Box::pin(async move {
+                    for i in 0..5 {
+                        let progress = i as f32 / 4.0;
+                        ctx.update_progress(progress, Some(format!("Step {}", i + 1)))
+                            .await?;
+                        sleep(Duration::from_millis(50)).await;
+                    }
+                    Ok(())
+                })
             })
-        ).await.unwrap();
+            .await
+            .unwrap();
 
         // Wait for some progress
         sleep(Duration::from_millis(125)).await;
@@ -635,19 +720,21 @@ mod tests {
     #[tokio::test]
     async fn test_task_listing_and_filtering() {
         let task_manager = create_test_task_manager().await;
-        
-        // Submit different types of tasks
-        let _scan_task = task_manager.submit_task(
-            TaskType::Scan,
-            serde_json::json!({}),
-            |_ctx| Box::pin(async { Ok(()) })
-        ).await.unwrap();
 
-        let _discovery_task = task_manager.submit_task(
-            TaskType::Discovery,
-            serde_json::json!({}),
-            |_ctx| Box::pin(async { Ok(()) })
-        ).await.unwrap();
+        // Submit different types of tasks
+        let _scan_task = task_manager
+            .submit_task(TaskType::Scan, serde_json::json!({}), |_ctx| {
+                Box::pin(async { Ok(()) })
+            })
+            .await
+            .unwrap();
+
+        let _discovery_task = task_manager
+            .submit_task(TaskType::Discovery, serde_json::json!({}), |_ctx| {
+                Box::pin(async { Ok(()) })
+            })
+            .await
+            .unwrap();
 
         // Wait for tasks to complete
         sleep(Duration::from_millis(100)).await;
@@ -661,25 +748,30 @@ mod tests {
         assert_eq!(scan_tasks.len(), 1);
         assert_eq!(scan_tasks[0].task_type, TaskType::Scan);
 
-        let discovery_tasks = task_manager.list_tasks(Some(TaskType::Discovery), None).await;
+        let discovery_tasks = task_manager
+            .list_tasks(Some(TaskType::Discovery), None)
+            .await;
         assert_eq!(discovery_tasks.len(), 1);
         assert_eq!(discovery_tasks[0].task_type, TaskType::Discovery);
 
         // Test filtering by status
-        let completed_tasks = task_manager.list_tasks(None, Some(TaskStatus::Completed)).await;
+        let completed_tasks = task_manager
+            .list_tasks(None, Some(TaskStatus::Completed))
+            .await;
         assert_eq!(completed_tasks.len(), 2);
     }
 
     #[tokio::test]
     async fn test_task_cleanup() {
         let task_manager = create_test_task_manager().await;
-        
+
         // Submit and complete a task
-        let _task_id = task_manager.submit_task(
-            TaskType::Scan,
-            serde_json::json!({}),
-            |_ctx| Box::pin(async { Ok(()) })
-        ).await.unwrap();
+        let _task_id = task_manager
+            .submit_task(TaskType::Scan, serde_json::json!({}), |_ctx| {
+                Box::pin(async { Ok(()) })
+            })
+            .await
+            .unwrap();
 
         // Wait for completion
         sleep(Duration::from_millis(100)).await;
@@ -689,7 +781,10 @@ mod tests {
         assert_eq!(all_tasks.len(), 1);
 
         // Clean up tasks older than 0 seconds (should remove the completed task)
-        let removed_count = task_manager.cleanup_old_tasks(chrono::Duration::seconds(0)).await.unwrap();
+        let removed_count = task_manager
+            .cleanup_old_tasks(chrono::Duration::seconds(0))
+            .await
+            .unwrap();
         assert_eq!(removed_count, 1);
 
         // Verify task was removed
@@ -700,28 +795,31 @@ mod tests {
     #[tokio::test]
     async fn test_task_statistics() {
         let task_manager = create_test_task_manager().await;
-        
+
         // Submit tasks with different outcomes
-        let _completed_task = task_manager.submit_task(
-            TaskType::Scan,
-            serde_json::json!({}),
-            |_ctx| Box::pin(async { Ok(()) })
-        ).await.unwrap();
-
-        let _failed_task = task_manager.submit_task(
-            TaskType::Discovery,
-            serde_json::json!({}),
-            |_ctx| Box::pin(async { Err(ApiError::Validation("Test error".to_string())) })
-        ).await.unwrap();
-
-        let cancelled_task = task_manager.submit_task(
-            TaskType::AssetProcessing,
-            serde_json::json!({}),
-            |_ctx| Box::pin(async {
-                sleep(Duration::from_millis(1000)).await;
-                Ok(())
+        let _completed_task = task_manager
+            .submit_task(TaskType::Scan, serde_json::json!({}), |_ctx| {
+                Box::pin(async { Ok(()) })
             })
-        ).await.unwrap();
+            .await
+            .unwrap();
+
+        let _failed_task = task_manager
+            .submit_task(TaskType::Discovery, serde_json::json!({}), |_ctx| {
+                Box::pin(async { Err(ApiError::Validation("Test error".to_string())) })
+            })
+            .await
+            .unwrap();
+
+        let cancelled_task = task_manager
+            .submit_task(TaskType::AssetProcessing, serde_json::json!({}), |_ctx| {
+                Box::pin(async {
+                    sleep(Duration::from_millis(1000)).await;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
 
         // Wait for some tasks to process
         sleep(Duration::from_millis(50)).await;

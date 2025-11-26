@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::{
     error::ApiError,
-    services::{SearchQuery, IndexedAsset, IndexedFinding},
+    services::{IndexedAsset, IndexedFinding, SearchQuery},
     AppState,
 };
 
@@ -33,7 +33,9 @@ pub async fn search_assets(
     State(app_state): State<AppState>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<SearchResponse<IndexedAsset>>, ApiError> {
-    let search_service = app_state.search_service.as_ref()
+    let search_service = app_state
+        .search_service
+        .as_ref()
         .ok_or_else(|| ApiError::not_found("Search service not available"))?;
 
     let query = SearchQuery {
@@ -58,7 +60,9 @@ pub async fn search_findings(
     State(app_state): State<AppState>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<SearchResponse<IndexedFinding>>, ApiError> {
-    let search_service = app_state.search_service.as_ref()
+    let search_service = app_state
+        .search_service
+        .as_ref()
         .ok_or_else(|| ApiError::not_found("Search service not available"))?;
 
     let query = SearchQuery {
@@ -82,14 +86,19 @@ pub async fn search_findings(
 pub async fn reindex_all(
     State(app_state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let search_service = app_state.search_service.as_ref()
+    let search_service = app_state
+        .search_service
+        .as_ref()
         .ok_or_else(|| ApiError::not_found("Search service not available"))?;
 
     // Recreate indices
     search_service.recreate_indices().await?;
 
     // Get all assets and findings from database (no limit for reindexing)
-    let assets = app_state.asset_repository.list(None, Some(100000), None).await?;
+    let assets = app_state
+        .asset_repository
+        .list(None, Some(100000), None)
+        .await?;
     let findings = app_state.finding_repository.list_by_type("").await?; // Get all findings
 
     // Bulk index them
@@ -113,7 +122,7 @@ pub async fn search_status(
     State(app_state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let search_available = app_state.search_service.is_some();
-    
+
     if search_available {
         // Try to initialize indices to check connectivity
         let search_service = app_state.search_service.as_ref().unwrap();
@@ -127,7 +136,7 @@ pub async fn search_status(
                 "status": "unhealthy",
                 "search_available": true,
                 "message": format!("Search service error: {}", e)
-            })))
+            }))),
         }
     } else {
         Ok(Json(serde_json::json!({

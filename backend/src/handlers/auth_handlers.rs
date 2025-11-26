@@ -1,13 +1,12 @@
+use crate::auth::context::UserContext;
+use crate::{error::ApiError, AppState};
 use axum::{
     extract::{Query, State},
-    response::{Redirect, IntoResponse},
-    Json,
-    Extension,
+    response::IntoResponse,
+    Extension, Json,
 };
-use crate::{AppState, error::ApiError};
-use serde::{Deserialize, Serialize};
 use axum_extra::extract::cookie::{Cookie, PrivateCookieJar, SameSite};
-use crate::auth::context::UserContext;
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
 pub struct AuthCallbackParams {
@@ -26,12 +25,12 @@ pub struct LocalLoginParams {
     password: String,
 }
 
-pub async fn login_google(
-    State(state): State<AppState>,
-) -> Result<Json<LoginResponse>, ApiError> {
-    let (url, _csrf_token, _nonce) = state.auth_service.get_google_auth_url()?;
+pub async fn login_google(State(state): State<AppState>) -> Result<Json<LoginResponse>, ApiError> {
+    let (url, _csrf_token, _nonce) = state.auth_service.get_google_auth_url().await?;
     // In a real app, store csrf_token in cookie/session to verify state param in callback
-    Ok(Json(LoginResponse { url: url.to_string() }))
+    Ok(Json(LoginResponse {
+        url: url.to_string(),
+    }))
 }
 
 pub async fn login_local(
@@ -39,11 +38,14 @@ pub async fn login_local(
     jar: PrivateCookieJar,
     Json(params): Json<LocalLoginParams>,
 ) -> Result<(PrivateCookieJar, Json<crate::auth::session::UserSession>), ApiError> {
-    let session = state.auth_service.login_local(&params.email, &params.password).await?;
-    
+    let session = state
+        .auth_service
+        .login_local(&params.email, &params.password)
+        .await?;
+
     let session_str = serde_json::to_string(&session).map_err(ApiError::Serialization)?;
-    
-    let is_prod = state.config.environment == "production";
+
+    let is_prod = state.config.load().environment == "production";
 
     let cookie = Cookie::build(("session", session_str))
         .path("/")
@@ -51,9 +53,9 @@ pub async fn login_local(
         .http_only(true)
         .same_site(SameSite::Lax)
         .build();
-        
+
     let jar = jar.add(cookie);
-    
+
     Ok((jar, Json(session)))
 }
 
@@ -62,12 +64,15 @@ pub async fn callback_google(
     jar: PrivateCookieJar,
     Query(params): Query<AuthCallbackParams>,
 ) -> Result<(PrivateCookieJar, Json<crate::auth::session::UserSession>), ApiError> {
-    let session = state.auth_service.handle_google_callback(params.code).await?;
-    
+    let session = state
+        .auth_service
+        .handle_google_callback(params.code)
+        .await?;
+
     // Serialize session
     let session_str = serde_json::to_string(&session).map_err(ApiError::Serialization)?;
-    
-    let is_prod = state.config.environment == "production";
+
+    let is_prod = state.config.load().environment == "production";
 
     let cookie = Cookie::build(("session", session_str))
         .path("/")
@@ -75,9 +80,9 @@ pub async fn callback_google(
         .http_only(true)
         .same_site(SameSite::Lax)
         .build();
-        
+
     let jar = jar.add(cookie);
-    
+
     // Return jar (which sets headers) and session
     Ok((jar, Json(session)))
 }
@@ -85,8 +90,10 @@ pub async fn callback_google(
 pub async fn login_keycloak(
     State(state): State<AppState>,
 ) -> Result<Json<LoginResponse>, ApiError> {
-    let (url, _csrf_token, _nonce) = state.auth_service.get_keycloak_auth_url()?;
-    Ok(Json(LoginResponse { url: url.to_string() }))
+    let (url, _csrf_token, _nonce) = state.auth_service.get_keycloak_auth_url().await?;
+    Ok(Json(LoginResponse {
+        url: url.to_string(),
+    }))
 }
 
 pub async fn callback_keycloak(
@@ -94,11 +101,14 @@ pub async fn callback_keycloak(
     jar: PrivateCookieJar,
     Query(params): Query<AuthCallbackParams>,
 ) -> Result<(PrivateCookieJar, Json<crate::auth::session::UserSession>), ApiError> {
-    let session = state.auth_service.handle_keycloak_callback(params.code).await?;
-    
+    let session = state
+        .auth_service
+        .handle_keycloak_callback(params.code)
+        .await?;
+
     let session_str = serde_json::to_string(&session).map_err(ApiError::Serialization)?;
-    
-    let is_prod = state.config.environment == "production";
+
+    let is_prod = state.config.load().environment == "production";
 
     let cookie = Cookie::build(("session", session_str))
         .path("/")
@@ -106,21 +116,17 @@ pub async fn callback_keycloak(
         .http_only(true)
         .same_site(SameSite::Lax)
         .build();
-        
+
     let jar = jar.add(cookie);
-    
+
     Ok((jar, Json(session)))
 }
 
-pub async fn logout(
-    jar: PrivateCookieJar,
-) -> (PrivateCookieJar, impl IntoResponse) {
+pub async fn logout(jar: PrivateCookieJar) -> (PrivateCookieJar, impl IntoResponse) {
     let jar = jar.remove(Cookie::from("session"));
     (jar, "Logged out")
 }
 
-pub async fn get_me(
-    Extension(user): Extension<UserContext>,
-) -> Json<UserContext> {
+pub async fn get_me(Extension(user): Extension<UserContext>) -> Json<UserContext> {
     Json(user)
 }

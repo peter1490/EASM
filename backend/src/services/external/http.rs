@@ -1,6 +1,8 @@
 use crate::error::ApiError;
 use futures::future::join_all;
-use governor::{Quota, RateLimiter, state::direct::NotKeyed, state::InMemoryState, clock::DefaultClock};
+use governor::{
+    clock::DefaultClock, state::direct::NotKeyed, state::InMemoryState, Quota, RateLimiter,
+};
 use reqwest::{Client, ClientBuilder, Response};
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
@@ -116,7 +118,7 @@ impl HttpAnalyzer {
     /// Probe a single HTTP/HTTPS URL
     pub async fn probe_url(&self, url: &str) -> HttpProbeResult {
         let start_time = std::time::Instant::now();
-        
+
         // Apply rate limiting
         self.rate_limiter.until_ready().await;
 
@@ -137,20 +139,20 @@ impl HttpAnalyzer {
             Ok(response) => {
                 result.status_code = Some(response.status().as_u16());
                 result.final_url = Some(response.url().to_string());
-                
+
                 // Extract headers
                 if let Some(server) = response.headers().get("server") {
                     if let Ok(server_str) = server.to_str() {
                         result.server = Some(server_str.to_string());
                     }
                 }
-                
+
                 if let Some(content_type) = response.headers().get("content-type") {
                     if let Ok(ct_str) = content_type.to_str() {
                         result.content_type = Some(ct_str.to_string());
                     }
                 }
-                
+
                 if let Some(content_length) = response.headers().get("content-length") {
                     if let Ok(cl_str) = content_length.to_str() {
                         if let Ok(cl_num) = cl_str.parse::<u64>() {
@@ -163,10 +165,13 @@ impl HttpAnalyzer {
                 match response.text().await {
                     Ok(body) => {
                         // Check if it's HTML content (either by content-type or by content)
-                        let is_html = result.content_type.as_ref()
+                        let is_html = result
+                            .content_type
+                            .as_ref()
                             .map(|ct| ct.contains("text/html"))
-                            .unwrap_or(false) || body.contains("<title");
-                        
+                            .unwrap_or(false)
+                            || body.contains("<title");
+
                         if is_html {
                             result.title = self.extract_title(&body);
                         }
@@ -184,7 +189,8 @@ impl HttpAnalyzer {
                             match self.get_tls_certificate_info(host, port).await {
                                 Ok(tls_result) => {
                                     if !tls_result.certificate_chain.is_empty() {
-                                        result.tls_info = Some(tls_result.certificate_chain[0].clone());
+                                        result.tls_info =
+                                            Some(tls_result.certificate_chain[0].clone());
                                     }
                                 }
                                 Err(e) => {
@@ -219,7 +225,7 @@ impl HttpAnalyzer {
         // Simple regex-based title extraction
         use regex::Regex;
         let title_regex = Regex::new(r"(?i)<title[^>]*>([^<]*)</title>").ok()?;
-        
+
         if let Some(captures) = title_regex.captures(html) {
             if let Some(title_match) = captures.get(1) {
                 let title = title_match.as_str().trim();
@@ -228,12 +234,16 @@ impl HttpAnalyzer {
                 }
             }
         }
-        
+
         None
     }
 
     /// Get TLS certificate information for a hostname and port
-    pub async fn get_tls_certificate_info(&self, hostname: &str, port: u16) -> Result<TlsCertificateResult, ApiError> {
+    pub async fn get_tls_certificate_info(
+        &self,
+        hostname: &str,
+        port: u16,
+    ) -> Result<TlsCertificateResult, ApiError> {
         let mut result = TlsCertificateResult {
             hostname: hostname.to_string(),
             port,
@@ -261,9 +271,13 @@ impl HttpAnalyzer {
     }
 
     /// Fetch TLS certificates from a server
-    async fn fetch_tls_certificates(&self, hostname: &str, port: u16) -> Result<Vec<CertificateDer<'static>>, ApiError> {
+    async fn fetch_tls_certificates(
+        &self,
+        hostname: &str,
+        port: u16,
+    ) -> Result<Vec<CertificateDer<'static>>, ApiError> {
         let hostname_owned = hostname.to_string();
-        
+
         // Resolve hostname to IP address first
         let addr = format!("{}:{}", hostname_owned, port);
         let socket_addr = tokio::net::lookup_host(&addr)
@@ -276,30 +290,40 @@ impl HttpAnalyzer {
         let tcp_stream = timeout(self.config.tls_timeout, TcpStream::connect(socket_addr))
             .await
             .map_err(|_| ApiError::ExternalService(format!("Connection timeout to {}", addr)))?
-            .map_err(|e| ApiError::ExternalService(format!("Failed to connect to {}: {}", addr, e)))?;
+            .map_err(|e| {
+                ApiError::ExternalService(format!("Failed to connect to {}: {}", addr, e))
+            })?;
 
         // Set up TLS configuration
         let mut root_store = RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        
+
         let config = ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth();
 
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
-        
-        let server_name = ServerName::try_from(hostname_owned.clone())
-            .map_err(|e| ApiError::ExternalService(format!("Invalid server name {}: {}", hostname_owned, e)))?;
+
+        let server_name = ServerName::try_from(hostname_owned.clone()).map_err(|e| {
+            ApiError::ExternalService(format!("Invalid server name {}: {}", hostname_owned, e))
+        })?;
 
         // Perform TLS handshake
-        let tls_stream = timeout(self.config.tls_timeout, connector.connect(server_name, tcp_stream))
-            .await
-            .map_err(|_| ApiError::ExternalService(format!("TLS handshake timeout to {}", addr)))?
-            .map_err(|e| ApiError::ExternalService(format!("TLS handshake failed to {}: {}", addr, e)))?;
+        let tls_stream = timeout(
+            self.config.tls_timeout,
+            connector.connect(server_name, tcp_stream),
+        )
+        .await
+        .map_err(|_| ApiError::ExternalService(format!("TLS handshake timeout to {}", addr)))?
+        .map_err(|e| {
+            ApiError::ExternalService(format!("TLS handshake failed to {}: {}", addr, e))
+        })?;
 
         // Extract certificate chain
-        let peer_certificates = tls_stream.get_ref().1.peer_certificates()
-            .ok_or_else(|| ApiError::ExternalService("No peer certificates found".to_string()))?;
+        let peer_certificates =
+            tls_stream.get_ref().1.peer_certificates().ok_or_else(|| {
+                ApiError::ExternalService("No peer certificates found".to_string())
+            })?;
 
         let certificates: Vec<CertificateDer<'static>> = peer_certificates
             .iter()
@@ -313,27 +337,34 @@ impl HttpAnalyzer {
     fn parse_certificate(&self, cert_der: &CertificateDer) -> Result<TlsInfo, ApiError> {
         use x509_parser::prelude::*;
 
-        let (_, cert) = X509Certificate::from_der(cert_der.as_ref())
-            .map_err(|e| ApiError::ExternalService(format!("Failed to parse certificate: {}", e)))?;
+        let (_, cert) = X509Certificate::from_der(cert_der.as_ref()).map_err(|e| {
+            ApiError::ExternalService(format!("Failed to parse certificate: {}", e))
+        })?;
 
         let subject = cert.subject().to_string();
         let issuer = cert.issuer().to_string();
-        
+
         // Extract organization from subject
-        let organization = cert.subject()
+        let organization = cert
+            .subject()
             .iter_organization()
             .next()
             .map(|attr| attr.as_str().unwrap_or("").to_string());
 
         // Extract common name from subject
-        let common_name = cert.subject()
+        let common_name = cert
+            .subject()
             .iter_common_name()
             .next()
             .map(|attr| attr.as_str().unwrap_or("").to_string());
 
         // Extract SAN domains
         let mut san_domains = Vec::new();
-        if let Some(san_ext) = cert.extensions().iter().find(|ext| ext.oid == x509_parser::oid_registry::OID_X509_EXT_SUBJECT_ALT_NAME) {
+        if let Some(san_ext) = cert
+            .extensions()
+            .iter()
+            .find(|ext| ext.oid == x509_parser::oid_registry::OID_X509_EXT_SUBJECT_ALT_NAME)
+        {
             if let Ok((_, san)) = SubjectAlternativeName::from_der(san_ext.value) {
                 for name in &san.general_names {
                     if let GeneralName::DNSName(dns_name) = name {
@@ -364,13 +395,13 @@ impl HttpAnalyzer {
     /// Probe multiple URLs concurrently
     pub async fn probe_urls_concurrent(&self, urls: Vec<String>) -> Vec<HttpProbeResult> {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.max_concurrent));
-        
+
         let tasks: Vec<_> = urls
             .into_iter()
             .map(|url| {
                 let semaphore = semaphore.clone();
                 let analyzer = self.clone();
-                
+
                 tokio::spawn(async move {
                     let _permit = semaphore.acquire().await.unwrap();
                     analyzer.probe_url(&url).await
@@ -383,25 +414,29 @@ impl HttpAnalyzer {
     }
 
     /// Get TLS certificate information for multiple hosts concurrently
-    pub async fn get_tls_certificates_concurrent(&self, hosts: Vec<(String, u16)>) -> Vec<TlsCertificateResult> {
+    pub async fn get_tls_certificates_concurrent(
+        &self,
+        hosts: Vec<(String, u16)>,
+    ) -> Vec<TlsCertificateResult> {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.max_concurrent));
-        
+
         let tasks: Vec<_> = hosts
             .into_iter()
             .map(|(hostname, port)| {
                 let semaphore = semaphore.clone();
                 let analyzer = self.clone();
-                
+
                 tokio::spawn(async move {
                     let _permit = semaphore.acquire().await.unwrap();
-                    analyzer.get_tls_certificate_info(&hostname, port).await.unwrap_or_else(|e| {
-                        TlsCertificateResult {
+                    analyzer
+                        .get_tls_certificate_info(&hostname, port)
+                        .await
+                        .unwrap_or_else(|e| TlsCertificateResult {
                             hostname: hostname.clone(),
                             port,
                             certificate_chain: Vec::new(),
                             error: Some(e.to_string()),
-                        }
-                    })
+                        })
                 })
             })
             .collect();
@@ -430,8 +465,8 @@ impl Clone for HttpAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
     use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
     async fn test_http_analyzer_creation() {
@@ -449,10 +484,10 @@ mod tests {
             rate_limit: 25,
             user_agent: "Test-Agent/1.0".to_string(),
         };
-        
+
         let analyzer = HttpAnalyzer::with_config(config.clone());
         assert!(analyzer.is_ok());
-        
+
         let analyzer = analyzer.unwrap();
         assert_eq!(analyzer.config().request_timeout, config.request_timeout);
         assert_eq!(analyzer.config().max_redirects, config.max_redirects);
@@ -463,7 +498,7 @@ mod tests {
     async fn test_probe_url_success() {
         // Start a mock server
         let mock_server = MockServer::start().await;
-        
+
         Mock::given(method("GET"))
             .and(path("/"))
             .respond_with(ResponseTemplate::new(200)
@@ -488,35 +523,46 @@ mod tests {
     #[tokio::test]
     async fn test_probe_url_with_redirect() {
         let mock_server = MockServer::start().await;
-        
+
         // Set up redirect
         Mock::given(method("GET"))
             .and(path("/redirect"))
-            .respond_with(ResponseTemplate::new(302)
-                .insert_header("location", format!("{}/final", mock_server.uri())))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/final", mock_server.uri())),
+            )
             .mount(&mock_server)
             .await;
 
         Mock::given(method("GET"))
             .and(path("/final"))
-            .respond_with(ResponseTemplate::new(200)
-                .set_body_string("<html><head><title>Final Page</title></head></html>"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("<html><head><title>Final Page</title></head></html>"),
+            )
             .mount(&mock_server)
             .await;
 
         let analyzer = HttpAnalyzer::new().unwrap();
-        let result = analyzer.probe_url(&format!("{}/redirect", mock_server.uri())).await;
+        let result = analyzer
+            .probe_url(&format!("{}/redirect", mock_server.uri()))
+            .await;
 
         assert_eq!(result.status_code, Some(200));
         assert_eq!(result.title, Some("Final Page".to_string()));
-        assert_eq!(result.final_url, Some(format!("{}/final", mock_server.uri())));
+        assert_eq!(
+            result.final_url,
+            Some(format!("{}/final", mock_server.uri()))
+        );
         assert!(result.error.is_none());
     }
 
     #[tokio::test]
     async fn test_probe_url_error() {
         let analyzer = HttpAnalyzer::new().unwrap();
-        let result = analyzer.probe_url("http://localhost:99999/nonexistent").await;
+        let result = analyzer
+            .probe_url("http://localhost:99999/nonexistent")
+            .await;
 
         assert!(result.status_code.is_none());
         assert!(result.error.is_some());
@@ -526,23 +572,32 @@ mod tests {
     #[tokio::test]
     async fn test_extract_title() {
         let analyzer = HttpAnalyzer::new().unwrap();
-        
+
         // Test normal title
         let html1 = "<html><head><title>Test Title</title></head></html>";
-        assert_eq!(analyzer.extract_title(html1), Some("Test Title".to_string()));
-        
+        assert_eq!(
+            analyzer.extract_title(html1),
+            Some("Test Title".to_string())
+        );
+
         // Test title with extra whitespace
         let html2 = "<html><head><title>  Spaced Title  </title></head></html>";
-        assert_eq!(analyzer.extract_title(html2), Some("Spaced Title".to_string()));
-        
+        assert_eq!(
+            analyzer.extract_title(html2),
+            Some("Spaced Title".to_string())
+        );
+
         // Test case insensitive
         let html3 = "<HTML><HEAD><TITLE>Upper Case</TITLE></HEAD></HTML>";
-        assert_eq!(analyzer.extract_title(html3), Some("Upper Case".to_string()));
-        
+        assert_eq!(
+            analyzer.extract_title(html3),
+            Some("Upper Case".to_string())
+        );
+
         // Test no title
         let html4 = "<html><head></head><body>No title</body></html>";
         assert_eq!(analyzer.extract_title(html4), None);
-        
+
         // Test empty title
         let html5 = "<html><head><title></title></head></html>";
         assert_eq!(analyzer.extract_title(html5), None);
@@ -551,13 +606,15 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_probing() {
         let mock_server = MockServer::start().await;
-        
+
         // Set up multiple endpoints
         for i in 1..=3 {
             Mock::given(method("GET"))
                 .and(path(format!("/page{}", i)))
-                .respond_with(ResponseTemplate::new(200)
-                    .set_body_string(format!("<html><head><title>Page {}</title></head></html>", i)))
+                .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                    "<html><head><title>Page {}</title></head></html>",
+                    i
+                )))
                 .mount(&mock_server)
                 .await;
         }
@@ -570,20 +627,18 @@ mod tests {
         ];
 
         let results = analyzer.probe_urls_concurrent(urls).await;
-        
+
         assert_eq!(results.len(), 3);
-        
+
         // Check that all requests succeeded
         for result in &results {
             assert_eq!(result.status_code, Some(200));
             assert!(result.title.is_some());
             assert!(result.error.is_none());
         }
-        
+
         // Check that we got all expected titles
-        let titles: Vec<String> = results.iter()
-            .filter_map(|r| r.title.clone())
-            .collect();
+        let titles: Vec<String> = results.iter().filter_map(|r| r.title.clone()).collect();
         assert!(titles.contains(&"Page 1".to_string()));
         assert!(titles.contains(&"Page 2".to_string()));
         assert!(titles.contains(&"Page 3".to_string()));
@@ -595,14 +650,14 @@ mod tests {
             request_timeout: Duration::from_millis(1), // Very short timeout
             ..Default::default()
         };
-        
+
         let analyzer = HttpAnalyzer::with_config(config).unwrap();
-        
+
         // This should timeout quickly
         let start = std::time::Instant::now();
         let result = analyzer.probe_url("http://httpbin.org/delay/5").await;
         let elapsed = start.elapsed();
-        
+
         // Should fail due to timeout and complete quickly
         assert!(result.error.is_some());
         assert!(elapsed < Duration::from_millis(100)); // Should be much faster than the delay
@@ -611,11 +666,10 @@ mod tests {
     #[tokio::test]
     async fn test_user_agent_configuration() {
         let mock_server = MockServer::start().await;
-        
+
         Mock::given(method("GET"))
             .and(path("/"))
-            .respond_with(ResponseTemplate::new(200)
-                .set_body_string("OK"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("OK"))
             .mount(&mock_server)
             .await;
 
@@ -623,10 +677,10 @@ mod tests {
             user_agent: "Custom-Agent/2.0".to_string(),
             ..Default::default()
         };
-        
+
         let analyzer = HttpAnalyzer::with_config(config).unwrap();
         let result = analyzer.probe_url(&mock_server.uri()).await;
-        
+
         assert_eq!(result.status_code, Some(200));
         assert!(result.error.is_none());
     }
@@ -634,23 +688,23 @@ mod tests {
     #[tokio::test]
     async fn test_tls_certificate_info() {
         let analyzer = HttpAnalyzer::new().unwrap();
-        
+
         // Test with a real HTTPS site (example.com should have a valid certificate)
         let result = analyzer.get_tls_certificate_info("example.com", 443).await;
-        
+
         match result {
             Ok(tls_result) => {
                 assert_eq!(tls_result.hostname, "example.com");
                 assert_eq!(tls_result.port, 443);
-                
+
                 if tls_result.error.is_some() {
                     println!("TLS error: {:?}", tls_result.error);
                     // Skip assertions if there was an error
                     return;
                 }
-                
+
                 assert!(!tls_result.certificate_chain.is_empty());
-                
+
                 // Check the first certificate in the chain
                 let cert = &tls_result.certificate_chain[0];
                 assert!(!cert.subject.is_empty());
@@ -667,10 +721,10 @@ mod tests {
     #[tokio::test]
     async fn test_https_probe_with_tls_info() {
         let analyzer = HttpAnalyzer::new().unwrap();
-        
+
         // Test with a real HTTPS site
         let result = analyzer.probe_url("https://example.com").await;
-        
+
         // This test might fail in CI environments without internet access
         if result.error.is_none() {
             assert_eq!(result.status_code, Some(200));
@@ -682,7 +736,10 @@ mod tests {
                 assert!(!tls_info.issuer.is_empty());
             }
         } else {
-            println!("HTTPS test skipped due to network error: {:?}", result.error);
+            println!(
+                "HTTPS test skipped due to network error: {:?}",
+                result.error
+            );
         }
     }
 }

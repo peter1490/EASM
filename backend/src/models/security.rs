@@ -413,4 +413,3 @@ pub struct ScanResultSummary {
     pub scan_duration_ms: Option<i64>,
     pub errors: Option<Vec<String>>,
 }
-

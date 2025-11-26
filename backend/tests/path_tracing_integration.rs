@@ -50,7 +50,7 @@ mod integration_tests {
     #[ignore]
     async fn test_deep_path_tracing() {
         println!("Creating 50-level deep asset chain...");
-        
+
         // let pool = setup_test_database().await;
         // let repo = SqlxAssetRepository::new(pool);
 
@@ -92,10 +92,10 @@ mod integration_tests {
     #[ignore]
     async fn test_cycle_detection() {
         println!("Testing cycle detection...");
-        
+
         // This test requires manually creating a cycle in the database
         // (which should be prevented by application logic, but we test DB-level protection)
-        
+
         // let pool = setup_test_database().await;
         // let repo = SqlxAssetRepository::new(pool);
 
@@ -123,7 +123,7 @@ mod integration_tests {
     #[ignore]
     async fn test_path_query_performance() {
         println!("Testing path query performance with 1000 assets...");
-        
+
         // let pool = setup_test_database().await;
         // let repo = SqlxAssetRepository::new(pool);
 
@@ -157,7 +157,7 @@ mod integration_tests {
     #[ignore]
     async fn test_organization_lineage() {
         println!("Testing organization discovery lineage...");
-        
+
         // This would test the actual discovery service
         // let discovery_service = DiscoveryService::new(...);
 
@@ -174,9 +174,9 @@ mod integration_tests {
 
         // let org_asset = repo.get_by_identifier(AssetType::Organization, "Test Org")
         //     .await.unwrap().unwrap();
-        
+
         // assert_eq!(org_asset.parent_id, Some(cert.id), "Organization should link to certificate");
-        
+
         println!("✓ Organization lineage correct");
     }
 }
@@ -189,37 +189,38 @@ mod manual_verification_steps {
     #[ignore]
     fn manual_test_checklist() {
         println!("\n=== MANUAL VERIFICATION CHECKLIST ===\n");
-        
-        println!("1. Run migration: psql $DATABASE_URL < backend/migrations/003_add_asset_lineage.sql");
+
+        println!(
+            "1. Run migration: psql $DATABASE_URL < backend/migrations/003_add_asset_lineage.sql"
+        );
         println!("   Verify: SELECT column_name FROM information_schema.columns WHERE table_name='assets' AND column_name IN ('seed_id', 'parent_id');");
-        
+
         println!("\n2. Start the backend: cargo run");
-        
+
         println!("\n3. Create a seed via API:");
         println!("   curl -X POST http://localhost:8000/api/seeds -H 'Content-Type: application/json' -d '{{\"seed_type\":\"domain\",\"value\":\"example.com\"}}'");
-        
+
         println!("\n4. Run discovery:");
         println!("   curl -X POST http://localhost:8000/api/discovery/run");
-        
+
         println!("\n5. List assets and pick one:");
         println!("   curl http://localhost:8000/api/assets");
-        
+
         println!("\n6. Get asset path (replace ASSET_ID):");
         println!("   curl http://localhost:8000/api/assets/ASSET_ID/path");
-        
+
         println!("\n7. Verify the path shows correct lineage from seed to asset");
-        
+
         println!("\n8. Open frontend and view discovery graph");
         println!("   Should render a visual tree of asset relationships");
-        
+
         println!("\n9. Check database directly:");
         println!("   psql $DATABASE_URL -c \"SELECT id, asset_type, identifier, seed_id, parent_id FROM assets WHERE parent_id IS NOT NULL LIMIT 10;\"");
-        
+
         println!("\n10. Performance check - Query explain:");
         println!("   psql $DATABASE_URL -c \"EXPLAIN ANALYZE WITH RECURSIVE asset_path AS (SELECT ... ) SELECT * FROM asset_path;\"");
         println!("   Verify it uses idx_assets_parent_id index");
-        
+
         println!("\n=== END CHECKLIST ===\n");
     }
 }
-

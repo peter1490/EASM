@@ -44,20 +44,20 @@ pub enum Permission {
     StopScan,
     DeleteScan,
     ViewScan,
-    
+
     // Discovery Control
     StartDiscovery,
     StopDiscovery,
     ConfigureDiscovery,
-    
+
     // Evidence
     DownloadEvidence,
     ViewEvidence,
-    
+
     // Config
     EditConfig,
     ViewConfig,
-    
+
     // User Management
     ManageUsers,
     ViewUsers,
@@ -70,31 +70,41 @@ impl Role {
     pub fn permissions(&self) -> Vec<Permission> {
         match self {
             Role::Admin => vec![
-                Permission::CreateScan, Permission::StopScan, Permission::DeleteScan, Permission::ViewScan,
-                Permission::StartDiscovery, Permission::StopDiscovery, Permission::ConfigureDiscovery,
-                Permission::DownloadEvidence, Permission::ViewEvidence,
-                Permission::EditConfig, Permission::ViewConfig,
-                Permission::ManageUsers, Permission::ViewUsers,
+                Permission::CreateScan,
+                Permission::StopScan,
+                Permission::DeleteScan,
+                Permission::ViewScan,
+                Permission::StartDiscovery,
+                Permission::StopDiscovery,
+                Permission::ConfigureDiscovery,
+                Permission::DownloadEvidence,
+                Permission::ViewEvidence,
+                Permission::EditConfig,
+                Permission::ViewConfig,
+                Permission::ManageUsers,
+                Permission::ViewUsers,
                 Permission::EditRiskScore,
             ],
             Role::Operator => vec![
-                Permission::CreateScan, Permission::StopScan, Permission::ViewScan,
-                Permission::StartDiscovery, Permission::StopDiscovery,
-                Permission::DownloadEvidence, Permission::ViewEvidence,
+                Permission::CreateScan,
+                Permission::StopScan,
+                Permission::ViewScan,
+                Permission::StartDiscovery,
+                Permission::StopDiscovery,
+                Permission::DownloadEvidence,
+                Permission::ViewEvidence,
                 Permission::ViewConfig,
                 Permission::ViewUsers,
                 Permission::EditRiskScore,
             ],
             Role::Analyst => vec![
                 Permission::ViewScan,
-                Permission::DownloadEvidence, Permission::ViewEvidence,
+                Permission::DownloadEvidence,
+                Permission::ViewEvidence,
                 Permission::ViewConfig,
                 Permission::EditRiskScore,
             ],
-            Role::Viewer => vec![
-                Permission::ViewScan,
-                Permission::ViewEvidence,
-            ],
+            Role::Viewer => vec![Permission::ViewScan, Permission::ViewEvidence],
         }
     }
 
@@ -107,7 +117,10 @@ impl Role {
 macro_rules! require_role {
     ($user:expr, $role:expr) => {
         if !$user.has_role($role) {
-             return Err(crate::error::ApiError::Forbidden(format!("Role {} required", $role)));
+            return Err(crate::error::ApiError::Forbidden(format!(
+                "Role {} required",
+                $role
+            )));
         }
     };
 }
@@ -116,8 +129,10 @@ macro_rules! require_role {
 macro_rules! require_permission {
     ($user:expr, $perm:expr) => {
         if !$user.has_permission($perm) {
-             return Err(crate::error::ApiError::Forbidden(format!("Permission {:?} required", $perm)));
+            return Err(crate::error::ApiError::Forbidden(format!(
+                "Permission {:?} required",
+                $perm
+            )));
         }
     };
 }
-

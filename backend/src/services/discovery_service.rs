@@ -1,46 +1,41 @@
 //! Discovery Service
-//! 
-//! Handles asset discovery from seeds. This service is purely focused on 
+//!
+//! Handles asset discovery from seeds. This service is purely focused on
 //! **discovering** assets (passive reconnaissance), not scanning them.
-//! 
+//!
 //! The discovery flow:
 //! 1. User triggers a discovery run
 //! 2. Seeds are loaded and queued for processing
 //! 3. Each seed type is processed using appropriate external services
 //! 4. Discovered assets are stored with proper lineage and sources
 //! 5. Relationships between assets are recorded
-//! 
+//!
 //! Security scanning is handled separately by SecurityScanService.
 
+use chrono::Utc;
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
-use serde_json::json;
-use chrono::Utc;
 
 use crate::{
-    config::Settings,
+    config::{Settings, SharedSettings},
     error::ApiError,
     models::{
-        Asset, AssetCreate, AssetType, Seed, SeedCreate, SeedType,
-        DiscoveryRun, DiscoveryRunCreate, DiscoveryConfig, DiscoveryResult,
-        DiscoveryQueueItemCreate, QueueItemType,
-        AssetSourceCreate, SourceType, AssetRelationshipCreate, RelationshipType,
-        TriggerType,
-        SecurityScanCreate, SecurityScanType, ScanTriggerType,
+        Asset, AssetCreate, AssetRelationshipCreate, AssetSourceCreate, AssetType, DiscoveryConfig,
+        DiscoveryQueueItemCreate, DiscoveryResult, DiscoveryRun, DiscoveryRunCreate, QueueItemType,
+        RelationshipType, ScanTriggerType, SecurityScanCreate, SecurityScanType, Seed, SeedCreate,
+        SeedType, SourceType, TriggerType,
     },
     repositories::{
-        AssetRepository, SeedRepository,
-        DiscoveryRunRepository, DiscoveryQueueRepository,
-        AssetSourceRepository, AssetRelationshipRepository,
+        AssetRelationshipRepository, AssetRepository, AssetSourceRepository,
+        DiscoveryQueueRepository, DiscoveryRunRepository, SeedRepository,
     },
     services::{
-        external::{
-            ExternalServicesManager, DnsResolver, HttpAnalyzer,
-        },
-        task_manager::{TaskManager, TaskType, TaskContext},
         confidence::ConfidenceScorer,
+        external::{DnsResolver, ExternalServicesManager, HttpAnalyzer},
+        task_manager::{TaskContext, TaskManager, TaskType},
         SecurityScanService,
     },
     utils::network::expand_cidr,
@@ -48,16 +43,57 @@ use crate::{
 
 /// Common CDN, cloud provider, and hosting organizations to filter
 static COMMON_INFRASTRUCTURE_ORGS: &[&str] = &[
-    "cloudflare", "akamai", "fastly", "cloudfront", "amazon cloudfront",
-    "stackpath", "keycdn", "bunnycdn", "maxcdn",
-    "amazon", "aws", "google", "google cloud", "microsoft", "azure",
-    "digitalocean", "linode", "vultr", "ovh", "hetzner", "scaleway",
-    "godaddy", "namecheap", "bluehost", "hostgator", "dreamhost",
-    "let's encrypt", "digicert", "comodo", "sectigo", "globalsign",
-    "incapsula", "imperva", "sucuri", "wordfence", "barracuda",
-    "domain administrator", "domain admin", "privacy", "whois privacy",
-    "contact privacy", "private", "registration private", "proxy",
-    "inc", "llc", "ltd", "corporation", "corp", "company", "co.",
+    "cloudflare",
+    "akamai",
+    "fastly",
+    "cloudfront",
+    "amazon cloudfront",
+    "stackpath",
+    "keycdn",
+    "bunnycdn",
+    "maxcdn",
+    "amazon",
+    "aws",
+    "google",
+    "google cloud",
+    "microsoft",
+    "azure",
+    "digitalocean",
+    "linode",
+    "vultr",
+    "ovh",
+    "hetzner",
+    "scaleway",
+    "godaddy",
+    "namecheap",
+    "bluehost",
+    "hostgator",
+    "dreamhost",
+    "let's encrypt",
+    "digicert",
+    "comodo",
+    "sectigo",
+    "globalsign",
+    "incapsula",
+    "imperva",
+    "sucuri",
+    "wordfence",
+    "barracuda",
+    "domain administrator",
+    "domain admin",
+    "privacy",
+    "whois privacy",
+    "contact privacy",
+    "private",
+    "registration private",
+    "proxy",
+    "inc",
+    "llc",
+    "ltd",
+    "corporation",
+    "corp",
+    "company",
+    "co.",
 ];
 
 /// Discovery run status tracking (in-memory for real-time updates)
@@ -88,20 +124,20 @@ pub struct DiscoveryService {
     discovery_queue_repo: Arc<dyn DiscoveryQueueRepository + Send + Sync>,
     asset_source_repo: Arc<dyn AssetSourceRepository + Send + Sync>,
     asset_relationship_repo: Arc<dyn AssetRelationshipRepository + Send + Sync>,
-    
+
     // Services
     security_scan_service: Option<Arc<SecurityScanService>>,
-    
+
     // External services
     external_services: Arc<ExternalServicesManager>,
     dns_resolver: Arc<DnsResolver>,
     http_analyzer: Arc<HttpAnalyzer>,
-    
+
     // Utilities
     task_manager: Arc<TaskManager>,
-    settings: Arc<Settings>,
+    settings: SharedSettings,
     confidence_scorer: Arc<ConfidenceScorer>,
-    
+
     // State
     status: Arc<Mutex<DiscoveryStatus>>,
 }
@@ -118,7 +154,7 @@ impl DiscoveryService {
         dns_resolver: Arc<DnsResolver>,
         http_analyzer: Arc<HttpAnalyzer>,
         task_manager: Arc<TaskManager>,
-        settings: Arc<Settings>,
+        settings: SharedSettings,
     ) -> Self {
         Self {
             asset_repo,
@@ -137,7 +173,11 @@ impl DiscoveryService {
             status: Arc::new(Mutex::new(DiscoveryStatus::default())),
         }
     }
-    
+
+    fn current_settings(&self) -> Arc<Settings> {
+        self.settings.load_full()
+    }
+
     /// Set the security scan service for auto-scan functionality
     pub fn with_security_scan_service(mut self, service: Arc<SecurityScanService>) -> Self {
         self.security_scan_service = Some(service);
@@ -181,7 +221,9 @@ impl DiscoveryService {
             }
             SeedType::Organization => {
                 if seed.value.is_empty() {
-                    return Err(ApiError::Validation("Organization name cannot be empty".to_string()));
+                    return Err(ApiError::Validation(
+                        "Organization name cannot be empty".to_string(),
+                    ));
                 }
             }
             SeedType::Keyword => {
@@ -203,7 +245,9 @@ impl DiscoveryService {
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<Vec<Asset>, ApiError> {
-        self.asset_repo.list(confidence_threshold, limit, offset).await
+        self.asset_repo
+            .list(confidence_threshold, limit, offset)
+            .await
     }
 
     pub async fn count_assets(&self, confidence_threshold: Option<f64>) -> Result<i64, ApiError> {
@@ -230,26 +274,37 @@ impl DiscoveryService {
         self.discovery_run_repo.get_by_id(id).await
     }
 
-    pub async fn list_discovery_runs(&self, limit: i64, offset: i64) -> Result<Vec<DiscoveryRun>, ApiError> {
+    pub async fn list_discovery_runs(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<DiscoveryRun>, ApiError> {
         self.discovery_run_repo.list(limit, offset).await
     }
 
     /// Start a new discovery run
-    pub async fn run_discovery(&self, config: Option<DiscoveryConfig>) -> Result<DiscoveryRun, ApiError> {
+    pub async fn run_discovery(
+        &self,
+        config: Option<DiscoveryConfig>,
+    ) -> Result<DiscoveryRun, ApiError> {
         // Check if discovery is already running
         {
             let status = self.status.lock().await;
             if status.is_running {
-                return Err(ApiError::Validation("Discovery is already running".to_string()));
+                return Err(ApiError::Validation(
+                    "Discovery is already running".to_string(),
+                ));
             }
         }
 
         // Create a new discovery run
         let run_create = DiscoveryRunCreate {
             trigger_type: Some(TriggerType::Manual),
-            config: config.as_ref().map(|c| serde_json::to_value(c).unwrap_or(json!({}))),
+            config: config
+                .as_ref()
+                .map(|c| serde_json::to_value(c).unwrap_or(json!({}))),
         };
-        
+
         let run = self.discovery_run_repo.create(&run_create).await?;
         let run_id = run.id;
 
@@ -266,23 +321,23 @@ impl DiscoveryService {
         // Submit discovery task to TaskManager
         let discovery_service = self.clone();
         let config_arc = Arc::new(config);
-        
+
         let task_metadata = json!({
             "discovery_run_id": run_id,
             "started_at": Utc::now()
         });
-        
-        self.task_manager.submit_task(
-            TaskType::Discovery,
-            task_metadata,
-            move |ctx| {
+
+        self.task_manager
+            .submit_task(TaskType::Discovery, task_metadata, move |ctx| {
                 let discovery_service = discovery_service.clone();
                 let config_clone = (*config_arc).clone();
                 Box::pin(async move {
-                    discovery_service.execute_discovery(ctx, run_id, config_clone).await
+                    discovery_service
+                        .execute_discovery(ctx, run_id, config_clone)
+                        .await
                 })
-            }
-        ).await?;
+            })
+            .await?;
 
         Ok(run)
     }
@@ -299,8 +354,10 @@ impl DiscoveryService {
 
         if let Some(id) = run_id {
             // Mark run as cancelled
-            self.discovery_run_repo.update_status(&id, "cancelled", Some("Stopped by user")).await?;
-            
+            self.discovery_run_repo
+                .update_status(&id, "cancelled", Some("Stopped by user"))
+                .await?;
+
             // Update status
             let mut status = self.status.lock().await;
             status.is_running = false;
@@ -317,24 +374,24 @@ impl DiscoveryService {
 
     /// Main discovery execution loop
     async fn execute_discovery(
-        &self, 
-        ctx: TaskContext, 
-        run_id: Uuid, 
-        config: Option<DiscoveryConfig>
+        &self,
+        ctx: TaskContext,
+        run_id: Uuid,
+        config: Option<DiscoveryConfig>,
     ) -> Result<(), ApiError> {
         tracing::info!("Starting discovery run {}", run_id);
-        
+
         // Mark run as started
         self.discovery_run_repo.start(&run_id).await?;
-        
+
         let result = self.execute_discovery_internal(&ctx, run_id, config).await;
-        
+
         // Finalize discovery run
         {
             let mut status = self.status.lock().await;
             status.is_running = false;
             status.completed_at = Some(Utc::now());
-            
+
             match &result {
                 Ok(_) => {
                     status.current_phase = "Completed".to_string();
@@ -343,29 +400,33 @@ impl DiscoveryService {
                 Err(e) => {
                     status.current_phase = "Failed".to_string();
                     status.errors.push(e.to_string());
-                    self.discovery_run_repo.fail(&run_id, &e.to_string()).await?;
+                    self.discovery_run_repo
+                        .fail(&run_id, &e.to_string())
+                        .await?;
                 }
             }
         }
-        
+
         result
     }
 
     async fn execute_discovery_internal(
-        &self, 
-        ctx: &TaskContext, 
-        run_id: Uuid, 
-        config: Option<DiscoveryConfig>
+        &self,
+        ctx: &TaskContext,
+        run_id: Uuid,
+        config: Option<DiscoveryConfig>,
     ) -> Result<(), ApiError> {
         // Load seeds
         let seeds = self.seed_repo.list().await?;
         let seed_count = seeds.len();
-        
+
         // Extract auto_scan_threshold from config
-        let auto_scan_threshold = config.as_ref()
+        let auto_scan_threshold = config
+            .as_ref()
             .and_then(|c| c.auto_scan_threshold)
             .unwrap_or(0.0);
-        
+        let settings = self.current_settings();
+
         {
             let mut status = self.status.lock().await;
             status.seeds_total = seed_count;
@@ -373,15 +434,16 @@ impl DiscoveryService {
             status.auto_scan_threshold = auto_scan_threshold;
             status.scans_queued = 0;
         }
-        
+
         if auto_scan_threshold > 0.0 {
             tracing::info!(
                 "Auto-scan enabled: assets with confidence >= {:.2} will be scanned",
                 auto_scan_threshold
             );
         }
-        
-        ctx.update_progress(0.05, Some(format!("Found {} seeds", seed_count))).await?;
+
+        ctx.update_progress(0.05, Some(format!("Found {} seeds", seed_count)))
+            .await?;
 
         if seeds.is_empty() {
             tracing::info!("No seeds to process");
@@ -393,10 +455,10 @@ impl DiscoveryService {
             let mut status = self.status.lock().await;
             status.current_phase = "Queuing seeds".to_string();
         }
-        
+
         for seed in &seeds {
             ctx.check_cancellation().await?;
-            
+
             let item_type = match seed.seed_type {
                 SeedType::Domain => QueueItemType::Domain,
                 SeedType::Organization => QueueItemType::Organization,
@@ -404,7 +466,7 @@ impl DiscoveryService {
                 SeedType::Cidr => QueueItemType::Cidr,
                 SeedType::Keyword => QueueItemType::Domain, // Keywords search for domains
             };
-            
+
             let item = DiscoveryQueueItemCreate {
                 discovery_run_id: run_id,
                 item_type,
@@ -414,11 +476,12 @@ impl DiscoveryService {
                 depth: 0,
                 priority: 10, // Seeds have highest priority
             };
-            
+
             self.discovery_queue_repo.enqueue(&item).await?;
         }
 
-        ctx.update_progress(0.1, Some("Seeds queued".to_string())).await?;
+        ctx.update_progress(0.1, Some("Seeds queued".to_string()))
+            .await?;
 
         // Phase 2: Process queue
         {
@@ -426,9 +489,10 @@ impl DiscoveryService {
             status.current_phase = "Processing discovery queue".to_string();
         }
 
-        let max_depth = config.as_ref()
+        let max_depth = config
+            .as_ref()
             .and_then(|c| c.max_depth)
-            .unwrap_or(self.settings.max_discovery_depth);
+            .unwrap_or(settings.max_discovery_depth);
 
         let mut total_result = DiscoveryResult::default();
         let mut processed = 0;
@@ -438,7 +502,7 @@ impl DiscoveryService {
 
             // Get pending count
             let pending = self.discovery_queue_repo.get_pending_count(&run_id).await?;
-            
+
             {
                 let mut status = self.status.lock().await;
                 status.queue_pending = pending.try_into().unwrap_or(0);
@@ -450,7 +514,7 @@ impl DiscoveryService {
 
             // Dequeue batch
             let batch = self.discovery_queue_repo.dequeue(&run_id, 10).await?;
-            
+
             if batch.is_empty() {
                 break;
             }
@@ -466,14 +530,16 @@ impl DiscoveryService {
                 }
 
                 // Process the queue item
-                let result = self.process_queue_item(
-                    run_id,
-                    &item.item_type,
-                    &item.item_value,
-                    item.seed_id,
-                    item.parent_asset_id,
-                    item.depth,
-                ).await;
+                let result = self
+                    .process_queue_item(
+                        run_id,
+                        &item.item_type,
+                        &item.item_value,
+                        item.seed_id,
+                        item.parent_asset_id,
+                        item.depth,
+                    )
+                    .await;
 
                 match result {
                     Ok(item_result) => {
@@ -482,8 +548,12 @@ impl DiscoveryService {
                     }
                     Err(e) => {
                         tracing::warn!("Failed to process queue item {}: {}", item.item_value, e);
-                        self.discovery_queue_repo.fail_item(&item.id, &e.to_string()).await?;
-                        total_result.warnings.push(format!("{}: {}", item.item_value, e));
+                        self.discovery_queue_repo
+                            .fail_item(&item.id, &e.to_string())
+                            .await?;
+                        total_result
+                            .warnings
+                            .push(format!("{}: {}", item.item_value, e));
                     }
                 }
 
@@ -491,8 +561,10 @@ impl DiscoveryService {
 
                 // Update progress
                 let pending_usize: usize = pending.try_into().unwrap_or(0);
-                let progress = 0.1 + (0.8 * (processed as f32 / (processed + pending_usize).max(1) as f32));
-                ctx.update_progress(progress, Some(format!("Processed {} items", processed))).await?;
+                let progress =
+                    0.1 + (0.8 * (processed as f32 / (processed + pending_usize).max(1) as f32));
+                ctx.update_progress(progress, Some(format!("Processed {} items", processed)))
+                    .await?;
 
                 // Update status
                 {
@@ -505,18 +577,24 @@ impl DiscoveryService {
         }
 
         // Update discovery run with final counts
-        self.discovery_run_repo.update_progress(
-            &run_id,
-            seed_count as i32,
-            total_result.assets_created.len() as i32,
-            total_result.assets_updated.len() as i32,
-        ).await?;
+        self.discovery_run_repo
+            .update_progress(
+                &run_id,
+                seed_count as i32,
+                total_result.assets_created.len() as i32,
+                total_result.assets_updated.len() as i32,
+            )
+            .await?;
 
-        ctx.update_progress(0.95, Some("Finalizing".to_string())).await?;
+        ctx.update_progress(0.95, Some("Finalizing".to_string()))
+            .await?;
 
         tracing::info!(
             "Discovery run {} completed: {} seeds, {} new assets, {} updated",
-            run_id, seed_count, total_result.assets_created.len(), total_result.assets_updated.len()
+            run_id,
+            seed_count,
+            total_result.assets_created.len(),
+            total_result.assets_updated.len()
         );
 
         Ok(())
@@ -532,14 +610,34 @@ impl DiscoveryService {
         parent_asset_id: Option<Uuid>,
         depth: i32,
     ) -> Result<DiscoveryResult, ApiError> {
-        tracing::debug!("Processing {} '{}' at depth {}", item_type, item_value, depth);
+        tracing::debug!(
+            "Processing {} '{}' at depth {}",
+            item_type,
+            item_value,
+            depth
+        );
 
         match item_type {
-            "domain" => self.discover_from_domain(run_id, item_value, seed_id, parent_asset_id, depth).await,
-            "organization" => self.discover_from_organization(run_id, item_value, seed_id, parent_asset_id, depth).await,
-            "asn" => self.discover_from_asn(run_id, item_value, seed_id, parent_asset_id, depth).await,
-            "cidr" => self.discover_from_cidr(run_id, item_value, seed_id, parent_asset_id, depth).await,
-            "ip" => self.discover_from_ip(run_id, item_value, seed_id, parent_asset_id, depth).await,
+            "domain" => {
+                self.discover_from_domain(run_id, item_value, seed_id, parent_asset_id, depth)
+                    .await
+            }
+            "organization" => {
+                self.discover_from_organization(run_id, item_value, seed_id, parent_asset_id, depth)
+                    .await
+            }
+            "asn" => {
+                self.discover_from_asn(run_id, item_value, seed_id, parent_asset_id, depth)
+                    .await
+            }
+            "cidr" => {
+                self.discover_from_cidr(run_id, item_value, seed_id, parent_asset_id, depth)
+                    .await
+            }
+            "ip" => {
+                self.discover_from_ip(run_id, item_value, seed_id, parent_asset_id, depth)
+                    .await
+            }
             _ => {
                 tracing::warn!("Unknown item type: {}", item_type);
                 Ok(DiscoveryResult::default())
@@ -561,20 +659,24 @@ impl DiscoveryService {
         depth: i32,
     ) -> Result<DiscoveryResult, ApiError> {
         let mut result = DiscoveryResult::default();
+        let settings = self.current_settings();
 
         // Create the domain asset first (if it's not from a seed)
-        let domain_asset = self.create_or_update_asset(
-            run_id,
-            AssetType::Domain,
-            domain,
-            SourceType::Seed,
-            1.0, // Full confidence for seed domains
-            seed_id,
-            parent_asset_id,
-            Some(json!({ "discovery_depth": depth })),
-        ).await?;
+        let domain_asset = self
+            .create_or_update_asset(
+                run_id,
+                AssetType::Domain,
+                domain,
+                SourceType::Seed,
+                1.0, // Full confidence for seed domains
+                seed_id,
+                parent_asset_id,
+                Some(json!({ "discovery_depth": depth })),
+            )
+            .await?;
 
-        if domain_asset.1 { // was created
+        if domain_asset.1 {
+            // was created
             result.assets_created.push(domain_asset.0);
         } else {
             result.assets_updated.push(domain_asset.0);
@@ -591,20 +693,22 @@ impl DiscoveryService {
                     }
 
                     let confidence = self.calculate_subdomain_confidence(&subdomain_result.sources);
-                    
-                    let asset = self.create_or_update_asset(
-                        run_id,
-                        AssetType::Domain,
-                        subdomain,
-                        SourceType::Shodan, // Primary source
-                        confidence,
-                        seed_id,
-                        Some(domain_asset_id),
-                        Some(json!({
-                            "parent_domain": domain,
-                            "sources": subdomain_result.sources.keys().collect::<Vec<_>>()
-                        })),
-                    ).await?;
+
+                    let asset = self
+                        .create_or_update_asset(
+                            run_id,
+                            AssetType::Domain,
+                            subdomain,
+                            SourceType::Shodan, // Primary source
+                            confidence,
+                            seed_id,
+                            Some(domain_asset_id),
+                            Some(json!({
+                                "parent_domain": domain,
+                                "sources": subdomain_result.sources.keys().collect::<Vec<_>>()
+                            })),
+                        )
+                        .await?;
 
                     if asset.1 {
                         result.assets_created.push(asset.0);
@@ -619,11 +723,14 @@ impl DiscoveryService {
                         asset.0,
                         RelationshipType::HasSubdomain,
                         confidence,
-                    ).await?;
+                    )
+                    .await?;
                 }
             }
             Err(e) => {
-                result.warnings.push(format!("Subdomain enumeration failed: {}", e));
+                result
+                    .warnings
+                    .push(format!("Subdomain enumeration failed: {}", e));
             }
         }
 
@@ -632,18 +739,22 @@ impl DiscoveryService {
             Ok(ips) => {
                 for ip in ips {
                     let ip_str = ip.to_string();
-                    let confidence = self.confidence_scorer.calculate_ip_confidence(vec!["dns_resolution".to_string()]);
-                    
-                    let asset = self.create_or_update_asset(
-                        run_id,
-                        AssetType::Ip,
-                        &ip_str,
-                        SourceType::DnsResolution,
-                        confidence,
-                        seed_id,
-                        Some(domain_asset_id),
-                        Some(json!({ "resolved_from": domain })),
-                    ).await?;
+                    let confidence = self
+                        .confidence_scorer
+                        .calculate_ip_confidence(vec!["dns_resolution".to_string()]);
+
+                    let asset = self
+                        .create_or_update_asset(
+                            run_id,
+                            AssetType::Ip,
+                            &ip_str,
+                            SourceType::DnsResolution,
+                            confidence,
+                            seed_id,
+                            Some(domain_asset_id),
+                            Some(json!({ "resolved_from": domain })),
+                        )
+                        .await?;
 
                     if asset.1 {
                         result.assets_created.push(asset.0);
@@ -658,7 +769,8 @@ impl DiscoveryService {
                         asset.0,
                         RelationshipType::ResolvesTo,
                         confidence,
-                    ).await?;
+                    )
+                    .await?;
                 }
             }
             Err(e) => {
@@ -667,30 +779,36 @@ impl DiscoveryService {
         }
 
         // Step 3: TLS Certificate analysis (for pivoting)
-        match self.http_analyzer.get_tls_certificate_info(domain, 443).await {
+        match self
+            .http_analyzer
+            .get_tls_certificate_info(domain, 443)
+            .await
+        {
             Ok(cert_result) => {
                 if !cert_result.certificate_chain.is_empty() {
                     let cert_info = &cert_result.certificate_chain[0];
-                    
+
                     let confidence = self.confidence_scorer.calculate_certificate_confidence(
                         cert_info.organization.is_some(),
                         vec!["tls_certificate".to_string()],
                     );
 
-                    let cert_asset = self.create_or_update_asset(
-                        run_id,
-                        AssetType::Certificate,
-                        &cert_info.subject,
-                        SourceType::TlsCertificate,
-                        confidence,
-                        seed_id,
-                        Some(domain_asset_id),
-                        Some(json!({
-                            "organization": cert_info.organization,
-                            "issuer": cert_info.issuer,
-                            "san_domains": cert_info.san_domains,
-                        })),
-                    ).await?;
+                    let cert_asset = self
+                        .create_or_update_asset(
+                            run_id,
+                            AssetType::Certificate,
+                            &cert_info.subject,
+                            SourceType::TlsCertificate,
+                            confidence,
+                            seed_id,
+                            Some(domain_asset_id),
+                            Some(json!({
+                                "organization": cert_info.organization,
+                                "issuer": cert_info.issuer,
+                                "san_domains": cert_info.san_domains,
+                            })),
+                        )
+                        .await?;
 
                     if cert_asset.1 {
                         result.assets_created.push(cert_asset.0);
@@ -704,11 +822,14 @@ impl DiscoveryService {
                         cert_asset.0,
                         RelationshipType::HasCertificate,
                         confidence,
-                    ).await?;
+                    )
+                    .await?;
 
                     // Queue organization for discovery if found and depth allows
                     if let Some(ref org) = cert_info.organization {
-                        if !self.should_filter_organization(org) && depth < self.settings.max_discovery_depth as i32 {
+                        if !self.should_filter_organization(org)
+                            && depth < settings.max_discovery_depth as i32
+                        {
                             self.queue_for_discovery(
                                 run_id,
                                 QueueItemType::Organization,
@@ -717,7 +838,8 @@ impl DiscoveryService {
                                 Some(cert_asset.0),
                                 depth + 1,
                                 5, // Lower priority for pivot
-                            ).await?;
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -740,6 +862,7 @@ impl DiscoveryService {
         depth: i32,
     ) -> Result<DiscoveryResult, ApiError> {
         let mut result = DiscoveryResult::default();
+        let settings = self.current_settings();
 
         // Skip common infrastructure orgs
         if self.should_filter_organization(org) {
@@ -748,16 +871,18 @@ impl DiscoveryService {
         }
 
         // Create organization asset
-        let org_asset = self.create_or_update_asset(
-            run_id,
-            AssetType::Organization,
-            org,
-            SourceType::Seed,
-            0.8,
-            seed_id,
-            parent_asset_id,
-            Some(json!({ "discovery_depth": depth })),
-        ).await?;
+        let org_asset = self
+            .create_or_update_asset(
+                run_id,
+                AssetType::Organization,
+                org,
+                SourceType::Seed,
+                0.8,
+                seed_id,
+                parent_asset_id,
+                Some(json!({ "discovery_depth": depth })),
+            )
+            .await?;
 
         if org_asset.1 {
             result.assets_created.push(org_asset.0);
@@ -768,46 +893,61 @@ impl DiscoveryService {
         let org_asset_id = org_asset.0;
 
         // Search Shodan for organization
-        match self.external_services.search_shodan_org_comprehensive(org).await {
+        match self
+            .external_services
+            .search_shodan_org_comprehensive(org)
+            .await
+        {
             Ok(extracted) => {
                 // Process IPs
                 for ip in &extracted.ips {
-                    let asset = self.create_or_update_asset(
-                        run_id,
-                        AssetType::Ip,
-                        ip,
-                        SourceType::Shodan,
-                        0.7,
-                        seed_id,
-                        Some(org_asset_id),
-                        Some(json!({ "organization": org })),
-                    ).await?;
+                    let asset = self
+                        .create_or_update_asset(
+                            run_id,
+                            AssetType::Ip,
+                            ip,
+                            SourceType::Shodan,
+                            0.7,
+                            seed_id,
+                            Some(org_asset_id),
+                            Some(json!({ "organization": org })),
+                        )
+                        .await?;
 
                     if asset.1 {
                         result.assets_created.push(asset.0);
                     }
 
-                    self.create_relationship(run_id, org_asset_id, asset.0, RelationshipType::BelongsToOrg, 0.7).await?;
+                    self.create_relationship(
+                        run_id,
+                        org_asset_id,
+                        asset.0,
+                        RelationshipType::BelongsToOrg,
+                        0.7,
+                    )
+                    .await?;
                 }
 
                 // Process domains - queue for further discovery
                 for domain in &extracted.domains {
-                    let asset = self.create_or_update_asset(
-                        run_id,
-                        AssetType::Domain,
-                        domain,
-                        SourceType::Shodan,
-                        0.6,
-                        seed_id,
-                        Some(org_asset_id),
-                        Some(json!({ "organization": org })),
-                    ).await?;
+                    let asset = self
+                        .create_or_update_asset(
+                            run_id,
+                            AssetType::Domain,
+                            domain,
+                            SourceType::Shodan,
+                            0.6,
+                            seed_id,
+                            Some(org_asset_id),
+                            Some(json!({ "organization": org })),
+                        )
+                        .await?;
 
                     if asset.1 {
                         result.assets_created.push(asset.0);
 
                         // Queue for deeper discovery if within depth limit
-                        if depth < self.settings.max_discovery_depth as i32 {
+                        if depth < settings.max_discovery_depth as i32 {
                             self.queue_for_discovery(
                                 run_id,
                                 QueueItemType::Domain,
@@ -816,38 +956,62 @@ impl DiscoveryService {
                                 Some(asset.0),
                                 depth + 1,
                                 3,
-                            ).await?;
+                            )
+                            .await?;
                         }
                     }
 
-                    self.create_relationship(run_id, org_asset_id, asset.0, RelationshipType::BelongsToOrg, 0.6).await?;
+                    self.create_relationship(
+                        run_id,
+                        org_asset_id,
+                        asset.0,
+                        RelationshipType::BelongsToOrg,
+                        0.6,
+                    )
+                    .await?;
                 }
             }
             Err(e) => {
-                result.warnings.push(format!("Shodan org search failed: {}", e));
+                result
+                    .warnings
+                    .push(format!("Shodan org search failed: {}", e));
             }
         }
 
         // Also search crt.sh for domains
-        match self.external_services.search_crtsh_by_organization(org).await {
+        match self
+            .external_services
+            .search_crtsh_by_organization(org)
+            .await
+        {
             Ok(domains) => {
-                for domain in domains.iter().take(50) { // Limit to prevent explosion
-                    let asset = self.create_or_update_asset(
-                        run_id,
-                        AssetType::Domain,
-                        domain,
-                        SourceType::Crtsh,
-                        0.6,
-                        seed_id,
-                        Some(org_asset_id),
-                        Some(json!({ "organization": org, "source": "crt.sh" })),
-                    ).await?;
+                for domain in domains.iter().take(50) {
+                    // Limit to prevent explosion
+                    let asset = self
+                        .create_or_update_asset(
+                            run_id,
+                            AssetType::Domain,
+                            domain,
+                            SourceType::Crtsh,
+                            0.6,
+                            seed_id,
+                            Some(org_asset_id),
+                            Some(json!({ "organization": org, "source": "crt.sh" })),
+                        )
+                        .await?;
 
                     if asset.1 {
                         result.assets_created.push(asset.0);
                     }
 
-                    self.create_relationship(run_id, org_asset_id, asset.0, RelationshipType::BelongsToOrg, 0.6).await?;
+                    self.create_relationship(
+                        run_id,
+                        org_asset_id,
+                        asset.0,
+                        RelationshipType::BelongsToOrg,
+                        0.6,
+                    )
+                    .await?;
                 }
             }
             Err(e) => {
@@ -870,16 +1034,18 @@ impl DiscoveryService {
         let mut result = DiscoveryResult::default();
 
         // Create ASN asset
-        let asn_asset = self.create_or_update_asset(
-            run_id,
-            AssetType::Asn,
-            asn,
-            SourceType::Seed,
-            1.0,
-            seed_id,
-            parent_asset_id,
-            Some(json!({ "discovery_depth": depth })),
-        ).await?;
+        let asn_asset = self
+            .create_or_update_asset(
+                run_id,
+                AssetType::Asn,
+                asn,
+                SourceType::Seed,
+                1.0,
+                seed_id,
+                parent_asset_id,
+                Some(json!({ "discovery_depth": depth })),
+            )
+            .await?;
 
         if asn_asset.1 {
             result.assets_created.push(asn_asset.0);
@@ -888,38 +1054,53 @@ impl DiscoveryService {
         let asn_asset_id = asn_asset.0;
 
         // Search Shodan for ASN
-        match self.external_services.search_shodan_asn_comprehensive(asn).await {
+        match self
+            .external_services
+            .search_shodan_asn_comprehensive(asn)
+            .await
+        {
             Ok(extracted) => {
                 for ip in &extracted.ips {
-                    let asset = self.create_or_update_asset(
-                        run_id,
-                        AssetType::Ip,
-                        ip,
-                        SourceType::Shodan,
-                        0.8,
-                        seed_id,
-                        Some(asn_asset_id),
-                        Some(json!({ "asn": asn })),
-                    ).await?;
+                    let asset = self
+                        .create_or_update_asset(
+                            run_id,
+                            AssetType::Ip,
+                            ip,
+                            SourceType::Shodan,
+                            0.8,
+                            seed_id,
+                            Some(asn_asset_id),
+                            Some(json!({ "asn": asn })),
+                        )
+                        .await?;
 
                     if asset.1 {
                         result.assets_created.push(asset.0);
                     }
 
-                    self.create_relationship(run_id, asn_asset_id, asset.0, RelationshipType::BelongsToAsn, 0.8).await?;
+                    self.create_relationship(
+                        run_id,
+                        asn_asset_id,
+                        asset.0,
+                        RelationshipType::BelongsToAsn,
+                        0.8,
+                    )
+                    .await?;
                 }
 
                 for domain in &extracted.domains {
-                    let asset = self.create_or_update_asset(
-                        run_id,
-                        AssetType::Domain,
-                        domain,
-                        SourceType::Shodan,
-                        0.7,
-                        seed_id,
-                        Some(asn_asset_id),
-                        Some(json!({ "asn": asn })),
-                    ).await?;
+                    let asset = self
+                        .create_or_update_asset(
+                            run_id,
+                            AssetType::Domain,
+                            domain,
+                            SourceType::Shodan,
+                            0.7,
+                            seed_id,
+                            Some(asn_asset_id),
+                            Some(json!({ "asn": asn })),
+                        )
+                        .await?;
 
                     if asset.1 {
                         result.assets_created.push(asset.0);
@@ -927,7 +1108,9 @@ impl DiscoveryService {
                 }
             }
             Err(e) => {
-                result.warnings.push(format!("Shodan ASN search failed: {}", e));
+                result
+                    .warnings
+                    .push(format!("Shodan ASN search failed: {}", e));
             }
         }
 
@@ -944,29 +1127,34 @@ impl DiscoveryService {
         _depth: i32,
     ) -> Result<DiscoveryResult, ApiError> {
         let mut result = DiscoveryResult::default();
+        let settings = self.current_settings();
 
         let ips = expand_cidr(cidr)?;
-        let max_hosts = self.settings.max_cidr_hosts as usize;
+        let max_hosts = settings.max_cidr_hosts as usize;
 
         if ips.len() > max_hosts {
             return Err(ApiError::Validation(format!(
                 "CIDR range {} has {} hosts, exceeding limit of {}",
-                cidr, ips.len(), max_hosts
+                cidr,
+                ips.len(),
+                max_hosts
             )));
         }
 
         for ip in ips {
             let ip_str = ip.to_string();
-            let asset = self.create_or_update_asset(
-                run_id,
-                AssetType::Ip,
-                &ip_str,
-                SourceType::CidrExpansion,
-                0.9, // High confidence for CIDR expansion
-                seed_id,
-                None,
-                Some(json!({ "cidr": cidr })),
-            ).await?;
+            let asset = self
+                .create_or_update_asset(
+                    run_id,
+                    AssetType::Ip,
+                    &ip_str,
+                    SourceType::CidrExpansion,
+                    0.9, // High confidence for CIDR expansion
+                    seed_id,
+                    None,
+                    Some(json!({ "cidr": cidr })),
+                )
+                .await?;
 
             if asset.1 {
                 result.assets_created.push(asset.0);
@@ -988,16 +1176,18 @@ impl DiscoveryService {
         let mut result = DiscoveryResult::default();
 
         // Create or get IP asset
-        let ip_asset = self.create_or_update_asset(
-            run_id,
-            AssetType::Ip,
-            ip,
-            SourceType::Seed,
-            1.0,
-            seed_id,
-            parent_asset_id,
-            None,
-        ).await?;
+        let ip_asset = self
+            .create_or_update_asset(
+                run_id,
+                AssetType::Ip,
+                ip,
+                SourceType::Seed,
+                1.0,
+                seed_id,
+                parent_asset_id,
+                None,
+            )
+            .await?;
 
         if ip_asset.1 {
             result.assets_created.push(ip_asset.0);
@@ -1010,16 +1200,18 @@ impl DiscoveryService {
             match self.dns_resolver.reverse_lookup(&ip_addr).await {
                 Ok(hostnames) => {
                     for hostname in hostnames {
-                        let asset = self.create_or_update_asset(
-                            run_id,
-                            AssetType::Domain,
-                            &hostname,
-                            SourceType::ReverseDns,
-                            0.7,
-                            seed_id,
-                            Some(ip_asset_id),
-                            Some(json!({ "reverse_resolved_from": ip })),
-                        ).await?;
+                        let asset = self
+                            .create_or_update_asset(
+                                run_id,
+                                AssetType::Domain,
+                                &hostname,
+                                SourceType::ReverseDns,
+                                0.7,
+                                seed_id,
+                                Some(ip_asset_id),
+                                Some(json!({ "reverse_resolved_from": ip })),
+                            )
+                            .await?;
 
                         if asset.1 {
                             result.assets_created.push(asset.0);
@@ -1031,7 +1223,8 @@ impl DiscoveryService {
                             asset.0,
                             RelationshipType::ReverseResolvesTo,
                             0.7,
-                        ).await?;
+                        )
+                        .await?;
                     }
                 }
                 Err(e) => {
@@ -1058,7 +1251,8 @@ impl DiscoveryService {
         seed_id: Option<Uuid>,
         parent_id: Option<Uuid>,
         metadata: Option<serde_json::Value>,
-    ) -> Result<(Uuid, bool), ApiError> { // Returns (asset_id, was_created)
+    ) -> Result<(Uuid, bool), ApiError> {
+        // Returns (asset_id, was_created)
         let asset_create = AssetCreate {
             asset_type: asset_type.clone(),
             identifier: identifier.to_string(),
@@ -1072,7 +1266,10 @@ impl DiscoveryService {
         };
 
         // Check if asset exists
-        let existing = self.asset_repo.get_by_identifier(asset_type.clone(), identifier).await?;
+        let existing = self
+            .asset_repo
+            .get_by_identifier(asset_type.clone(), identifier)
+            .await?;
         let was_created = existing.is_none();
 
         let asset = self.asset_repo.create_or_merge(&asset_create).await?;
@@ -1086,20 +1283,21 @@ impl DiscoveryService {
             raw_data: None,
         };
         self.asset_source_repo.create(&source_create).await?;
-        
+
         // Auto-scan high confidence newly created assets
         if was_created {
-            let auto_scan_threshold = {
-                self.status.lock().await.auto_scan_threshold
-            };
-            
+            let auto_scan_threshold = { self.status.lock().await.auto_scan_threshold };
+
             if auto_scan_threshold > 0.0 {
-                if let Err(e) = self.maybe_trigger_auto_scan(
-                    asset.id,
-                    &asset_type,
-                    confidence,
-                    Some(auto_scan_threshold),
-                ).await {
+                if let Err(e) = self
+                    .maybe_trigger_auto_scan(
+                        asset.id,
+                        &asset_type,
+                        confidence,
+                        Some(auto_scan_threshold),
+                    )
+                    .await
+                {
                     tracing::warn!("Failed to trigger auto-scan for {}: {}", identifier, e);
                 } else if confidence >= auto_scan_threshold {
                     // Increment counter if scan was likely queued
@@ -1130,7 +1328,10 @@ impl DiscoveryService {
             discovery_run_id: Some(run_id),
         };
 
-        let rel = self.asset_relationship_repo.create_or_update(&rel_create).await?;
+        let rel = self
+            .asset_relationship_repo
+            .create_or_update(&rel_create)
+            .await?;
         Ok(rel.id)
     }
 
@@ -1162,7 +1363,7 @@ impl DiscoveryService {
     /// Check if an organization should be filtered out
     fn should_filter_organization(&self, org: &str) -> bool {
         let org_lower = org.to_lowercase();
-        
+
         if org_lower.trim().is_empty() || org_lower.len() < 3 {
             return true;
         }
@@ -1183,7 +1384,7 @@ impl DiscoveryService {
         let boost = (source_count as f64 - 1.0) * 0.1;
         (base + boost).min(0.9)
     }
-    
+
     /// Check if asset should be auto-scanned and queue a security scan
     async fn maybe_trigger_auto_scan(
         &self,
@@ -1197,29 +1398,36 @@ impl DiscoveryService {
             Some(t) if t > 0.0 => t,
             _ => return Ok(()), // No threshold set or threshold is 0
         };
-        
+
         let security_scan_service = match &self.security_scan_service {
             Some(service) => service,
             None => return Ok(()), // No security scan service configured
         };
-        
+
         // Only scan scannable asset types
-        let is_scannable = matches!(asset_type, AssetType::Domain | AssetType::Ip | AssetType::Certificate);
+        let is_scannable = matches!(
+            asset_type,
+            AssetType::Domain | AssetType::Ip | AssetType::Certificate
+        );
         if !is_scannable {
             return Ok(());
         }
-        
+
         // Check if confidence meets threshold
         if confidence < threshold {
             tracing::debug!(
                 "Asset {} confidence {:.2} below auto-scan threshold {:.2}",
-                asset_id, confidence, threshold
+                asset_id,
+                confidence,
+                threshold
             );
             return Ok(());
         }
-        
+
         // Check if asset was recently scanned (avoid duplicate scans)
-        let existing_scans = security_scan_service.list_scans_for_asset(&asset_id).await?;
+        let existing_scans = security_scan_service
+            .list_scans_for_asset(&asset_id)
+            .await?;
         if let Some(scan) = existing_scans.first() {
             let scan_age = chrono::Utc::now() - scan.created_at;
             if scan_age.num_hours() < 24 {
@@ -1230,7 +1438,7 @@ impl DiscoveryService {
                 return Ok(());
             }
         }
-        
+
         // Create and execute a security scan via the service (this submits to task manager)
         let scan_create = SecurityScanCreate {
             asset_id,
@@ -1240,22 +1448,21 @@ impl DiscoveryService {
             note: Some("Auto-triggered by discovery (high confidence asset)".to_string()),
             config: None,
         };
-        
+
         match security_scan_service.create_scan(scan_create).await {
             Ok(scan) => {
                 tracing::info!(
                     "Auto-triggered security scan {} for asset {} (confidence: {:.2})",
-                    scan.id, asset_id, confidence
+                    scan.id,
+                    asset_id,
+                    confidence
                 );
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to trigger auto-scan for asset {}: {}",
-                    asset_id, e
-                );
+                tracing::warn!("Failed to trigger auto-scan for asset {}: {}", asset_id, e);
             }
         }
-        
+
         Ok(())
     }
 }

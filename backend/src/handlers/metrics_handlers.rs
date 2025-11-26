@@ -39,14 +39,19 @@ pub async fn get_metrics(
     let overall = report.overall;
 
     // Get counts from repositories
-    let active_scans = app_state.scan_repository.list_by_status(Some(ScanStatus::Running)).await
+    let active_scans = app_state
+        .scan_repository
+        .list_by_status(Some(ScanStatus::Running))
+        .await
         .map(|scans| scans.len() as i64)
         .unwrap_or(0);
 
-    let total_assets = app_state.asset_repository.count(None).await
-        .unwrap_or(0);
+    let total_assets = app_state.asset_repository.count(None).await.unwrap_or(0);
 
-    let total_findings = app_state.finding_repository.filter(&FindingFilter::default()).await
+    let total_findings = app_state
+        .finding_repository
+        .filter(&FindingFilter::default())
+        .await
         .map(|response| response.total_count)
         .unwrap_or(0);
 
@@ -56,7 +61,9 @@ pub async fn get_metrics(
         memory_usage: MemoryUsage {
             total_bytes: system.total_memory_bytes,
             used_bytes: system.memory_usage_bytes,
-            free_bytes: system.total_memory_bytes.saturating_sub(system.memory_usage_bytes),
+            free_bytes: system
+                .total_memory_bytes
+                .saturating_sub(system.memory_usage_bytes),
         },
         cpu_usage_percent: system.cpu_usage_percent,
         active_scans,
@@ -82,17 +89,21 @@ pub async fn get_endpoint_metrics(
     Path(endpoint): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let endpoint_path = format!("/{}", endpoint);
-    
-    match app_state.metrics_service.get_endpoint_metrics(&endpoint_path) {
+
+    match app_state
+        .metrics_service
+        .get_endpoint_metrics(&endpoint_path)
+    {
         Some(metrics) => Ok(Json(serde_json::to_value(metrics).unwrap())),
-        None => Err(ApiError::not_found(format!("No metrics found for endpoint: {}", endpoint_path))),
+        None => Err(ApiError::not_found(format!(
+            "No metrics found for endpoint: {}",
+            endpoint_path
+        ))),
     }
 }
 
 /// Clear all metrics (admin endpoint)
-pub async fn clear_metrics(
-    State(app_state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn clear_metrics(State(app_state): State<AppState>) -> Result<Json<Value>, ApiError> {
     app_state.metrics_service.clear_metrics();
     Ok(Json(serde_json::json!({
         "message": "All metrics cleared successfully"
@@ -104,13 +115,14 @@ pub async fn get_health_metrics(
     State(app_state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
     let report = app_state.metrics_service.generate_report();
-    
+
     // Determine health status based on metrics
-    let is_healthy = report.overall.average_response_time_ms < 1000.0 
-        && (report.overall.failed_requests as f64 / report.overall.total_requests.max(1) as f64) < 0.1;
-    
+    let is_healthy = report.overall.average_response_time_ms < 1000.0
+        && (report.overall.failed_requests as f64 / report.overall.total_requests.max(1) as f64)
+            < 0.1;
+
     let status = if is_healthy { "healthy" } else { "degraded" };
-    
+
     Ok(Json(serde_json::json!({
         "status": status,
         "version": env!("CARGO_PKG_VERSION"),
@@ -128,6 +140,4 @@ pub async fn get_health_metrics(
 }
 
 #[cfg(test)]
-mod tests {
-    
-}
+mod tests {}

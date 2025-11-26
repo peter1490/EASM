@@ -1,5 +1,5 @@
-use crate::error::ApiError;
 use super::rate_limited_client::RateLimitedClient;
+use crate::error::ApiError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -44,47 +44,57 @@ impl CertSpotterClient {
         // Free tier: 100 requests per hour, so roughly 1 request per 36 seconds
         // We'll be more conservative and use 1 request per 40 seconds
         let client = RateLimitedClient::new(1, 3)?;
-        
-        Ok(Self {
-            client,
-            api_token,
-        })
+
+        Ok(Self { client, api_token })
     }
 
     /// Get certificate issuances for a domain
-    pub async fn get_issuances(&self, domain: &str, include_subdomains: bool) -> Result<Vec<CertSpotterIssuance>, ApiError> {
+    pub async fn get_issuances(
+        &self,
+        domain: &str,
+        include_subdomains: bool,
+    ) -> Result<Vec<CertSpotterIssuance>, ApiError> {
         if domain.is_empty() {
             return Err(ApiError::Validation("Domain cannot be empty".to_string()));
         }
 
-        let mut url = format!("https://api.certspotter.com/v1/issuances?domain={}", urlencoding::encode(domain));
-        
+        let mut url = format!(
+            "https://api.certspotter.com/v1/issuances?domain={}",
+            urlencoding::encode(domain)
+        );
+
         if include_subdomains {
             url.push_str("&include_subdomains=true");
         }
-        
+
         if let Some(token) = &self.api_token {
             url.push_str(&format!("&token={}", token));
         }
 
         tracing::debug!("Querying CertSpotter issuances: {}", domain);
-        
+
         let response = self.client.get(&url).await?;
         let response_text = response.text().await?;
-        
-        let issuances: Vec<CertSpotterIssuance> = serde_json::from_str(&response_text)
-            .map_err(|e| ApiError::ExternalService(format!("Failed to parse CertSpotter response: {}", e)))?;
 
-        tracing::info!("Found {} certificate issuances for {}", issuances.len(), domain);
+        let issuances: Vec<CertSpotterIssuance> =
+            serde_json::from_str(&response_text).map_err(|e| {
+                ApiError::ExternalService(format!("Failed to parse CertSpotter response: {}", e))
+            })?;
+
+        tracing::info!(
+            "Found {} certificate issuances for {}",
+            issuances.len(),
+            domain
+        );
         Ok(issuances)
     }
 
     /// Get unique subdomains from certificate issuances
     pub async fn get_subdomains(&self, domain: &str) -> Result<Vec<String>, ApiError> {
         let issuances = self.get_issuances(domain, true).await?;
-        
+
         let mut subdomains = HashSet::new();
-        
+
         for issuance in issuances {
             for dns_name in issuance.dns_names {
                 // Clean and validate the DNS name
@@ -96,71 +106,90 @@ impl CertSpotterClient {
 
         let mut result: Vec<String> = subdomains.into_iter().collect();
         result.sort();
-        
-        tracing::info!("Found {} unique subdomains for {} from CertSpotter", result.len(), domain);
+
+        tracing::info!(
+            "Found {} unique subdomains for {} from CertSpotter",
+            result.len(),
+            domain
+        );
         Ok(result)
     }
 
     /// Get certificate details by ID
     pub async fn get_certificate(&self, cert_id: &str) -> Result<CertSpotterCertificate, ApiError> {
         if cert_id.is_empty() {
-            return Err(ApiError::Validation("Certificate ID cannot be empty".to_string()));
+            return Err(ApiError::Validation(
+                "Certificate ID cannot be empty".to_string(),
+            ));
         }
 
         let mut url = format!("https://api.certspotter.com/v1/certificates/{}", cert_id);
-        
+
         if let Some(token) = &self.api_token {
             url.push_str(&format!("?token={}", token));
         }
 
         tracing::debug!("Querying CertSpotter certificate: {}", cert_id);
-        
+
         let response = self.client.get(&url).await?;
         let response_text = response.text().await?;
-        
-        let certificate: CertSpotterCertificate = serde_json::from_str(&response_text)
-            .map_err(|e| ApiError::ExternalService(format!("Failed to parse CertSpotter certificate response: {}", e)))?;
+
+        let certificate: CertSpotterCertificate =
+            serde_json::from_str(&response_text).map_err(|e| {
+                ApiError::ExternalService(format!(
+                    "Failed to parse CertSpotter certificate response: {}",
+                    e
+                ))
+            })?;
 
         Ok(certificate)
     }
 
     /// Search for certificates by organization name
-    pub async fn search_by_organization(&self, org: &str) -> Result<Vec<CertSpotterIssuance>, ApiError> {
+    pub async fn search_by_organization(
+        &self,
+        org: &str,
+    ) -> Result<Vec<CertSpotterIssuance>, ApiError> {
         if org.is_empty() {
-            return Err(ApiError::Validation("Organization name cannot be empty".to_string()));
+            return Err(ApiError::Validation(
+                "Organization name cannot be empty".to_string(),
+            ));
         }
 
         // Note: CertSpotter doesn't have direct organization search in the free API
         // This would need to be implemented by searching for known domains of the organization
         // For now, we'll return an empty result with a warning
-        tracing::warn!("Organization search not directly supported by CertSpotter free API for org: {}", org);
+        tracing::warn!(
+            "Organization search not directly supported by CertSpotter free API for org: {}",
+            org
+        );
         Ok(Vec::new())
     }
 
     /// Validate and clean domain names from certificate data
     pub fn validate_and_clean_domain(&self, domain: &str, base_domain: &str) -> Option<String> {
         let cleaned = domain.trim().to_lowercase();
-        
+
         // Skip empty domains
         if cleaned.is_empty() {
             return None;
         }
-        
+
         // Skip wildcards to match crt.sh behavior
         if cleaned.contains('*') {
             return None;
         }
-        
+
         // Must be related to base domain
         if cleaned != base_domain && !cleaned.ends_with(&format!(".{}", base_domain)) {
             return None;
         }
-        
+
         // Basic domain validation
         if cleaned.contains(' ') || cleaned.contains('\t') || cleaned.contains('\n') {
             return None;
         }
-        
+
         Some(cleaned)
     }
 
@@ -186,7 +215,7 @@ mod tests {
     async fn test_certspotter_client_creation() {
         let client = CertSpotterClient::new(Some("test_token".to_string())).unwrap();
         assert!(client.is_configured());
-        
+
         let client_no_token = CertSpotterClient::new(None).unwrap();
         assert!(!client_no_token.is_configured());
     }
@@ -195,7 +224,7 @@ mod tests {
     async fn test_certspotter_empty_domain() {
         let client = CertSpotterClient::new(Some("test_token".to_string())).unwrap();
         let result = client.get_issuances("", false).await;
-        
+
         assert!(result.is_err());
         match result.unwrap_err() {
             ApiError::Validation(msg) => assert!(msg.contains("empty")),
@@ -206,7 +235,7 @@ mod tests {
     #[tokio::test]
     async fn test_certspotter_domain_validation() {
         let client = CertSpotterClient::new(Some("test_token".to_string())).unwrap();
-        
+
         // Valid domains
         assert_eq!(
             client.validate_and_clean_domain("example.com", "example.com"),
@@ -216,7 +245,7 @@ mod tests {
             client.validate_and_clean_domain("sub.example.com", "example.com"),
             Some("sub.example.com".to_string())
         );
-        
+
         // Wildcard handling - now skipped to match crt.sh behavior
         assert_eq!(
             client.validate_and_clean_domain("*.example.com", "example.com"),
@@ -226,16 +255,13 @@ mod tests {
             client.validate_and_clean_domain("*.sub.example.com", "example.com"),
             None
         );
-        
+
         // Invalid domains
         assert_eq!(
             client.validate_and_clean_domain("other.com", "example.com"),
             None
         );
-        assert_eq!(
-            client.validate_and_clean_domain("", "example.com"),
-            None
-        );
+        assert_eq!(client.validate_and_clean_domain("", "example.com"), None);
         assert_eq!(
             client.validate_and_clean_domain("invalid domain", "example.com"),
             None
@@ -246,7 +272,7 @@ mod tests {
     async fn test_certspotter_empty_cert_id() {
         let client = CertSpotterClient::new(Some("test_token".to_string())).unwrap();
         let result = client.get_certificate("").await;
-        
+
         assert!(result.is_err());
         match result.unwrap_err() {
             ApiError::Validation(msg) => assert!(msg.contains("empty")),
@@ -258,7 +284,7 @@ mod tests {
     async fn test_certspotter_organization_search() {
         let client = CertSpotterClient::new(Some("test_token".to_string())).unwrap();
         let result = client.search_by_organization("Example Corp").await;
-        
+
         // Should return empty result with warning (not implemented in free API)
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());

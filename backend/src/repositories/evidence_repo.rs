@@ -1,10 +1,10 @@
-use async_trait::async_trait;
-use uuid::Uuid;
 use crate::{
     database::DatabasePool,
     error::ApiError,
     models::{Evidence, EvidenceCreate},
 };
+use async_trait::async_trait;
+use uuid::Uuid;
 
 #[async_trait]
 pub trait EvidenceRepository {
@@ -33,25 +33,36 @@ impl SqlxEvidenceRepository {
         // Validate file size (max 100MB for example)
         const MAX_FILE_SIZE: i64 = 100 * 1024 * 1024; // 100MB
         if evidence.file_size < 0 {
-            return Err(ApiError::Validation("File size cannot be negative".to_string()));
+            return Err(ApiError::Validation(
+                "File size cannot be negative".to_string(),
+            ));
         }
         if evidence.file_size > MAX_FILE_SIZE {
-            return Err(ApiError::Validation(format!("File size {} exceeds maximum allowed size of {} bytes", evidence.file_size, MAX_FILE_SIZE)));
+            return Err(ApiError::Validation(format!(
+                "File size {} exceeds maximum allowed size of {} bytes",
+                evidence.file_size, MAX_FILE_SIZE
+            )));
         }
 
         // Validate content type
         if evidence.content_type.trim().is_empty() {
-            return Err(ApiError::Validation("Content type cannot be empty".to_string()));
+            return Err(ApiError::Validation(
+                "Content type cannot be empty".to_string(),
+            ));
         }
 
         // Validate file path
         if evidence.file_path.trim().is_empty() {
-            return Err(ApiError::Validation("File path cannot be empty".to_string()));
+            return Err(ApiError::Validation(
+                "File path cannot be empty".to_string(),
+            ));
         }
 
         // Basic security check - prevent path traversal
         if evidence.file_path.contains("..") || evidence.file_path.contains("//") {
-            return Err(ApiError::Validation("Invalid file path - path traversal not allowed".to_string()));
+            return Err(ApiError::Validation(
+                "Invalid file path - path traversal not allowed".to_string(),
+            ));
         }
 
         Ok(())
@@ -63,10 +74,10 @@ impl EvidenceRepository for SqlxEvidenceRepository {
     async fn create(&self, evidence: &EvidenceCreate) -> Result<Evidence, ApiError> {
         let id = Uuid::new_v4();
         let now = chrono::Utc::now();
-        
+
         // Validate file metadata
         self.validate_evidence(evidence)?;
-        
+
         let result = sqlx::query_as::<_, Evidence>(
             r#"
             INSERT INTO evidence (id, scan_id, filename, content_type, file_size, file_path, created_at)
@@ -93,7 +104,7 @@ impl EvidenceRepository for SqlxEvidenceRepository {
             SELECT id, scan_id, filename, content_type, file_size, file_path, created_at
             FROM evidence
             WHERE id = $1
-            "#
+            "#,
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -109,7 +120,7 @@ impl EvidenceRepository for SqlxEvidenceRepository {
             FROM evidence
             WHERE scan_id = $1
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .bind(scan_id)
         .fetch_all(&self.pool)
@@ -125,7 +136,7 @@ impl EvidenceRepository for SqlxEvidenceRepository {
             FROM evidence
             WHERE content_type = $1
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .bind(content_type)
         .fetch_all(&self.pool)
@@ -139,14 +150,17 @@ impl EvidenceRepository for SqlxEvidenceRepository {
             r#"
             DELETE FROM evidence
             WHERE id = $1
-            "#
+            "#,
         )
         .bind(id)
         .execute(&self.pool)
         .await?;
 
         if result.rows_affected() == 0 {
-            return Err(ApiError::NotFound(format!("Evidence with id {} not found", id)));
+            return Err(ApiError::NotFound(format!(
+                "Evidence with id {} not found",
+                id
+            )));
         }
 
         Ok(())
@@ -161,7 +175,9 @@ mod tests {
     async fn setup_test_db() -> DatabasePool {
         let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
         let pool = create_connection_pool(&db_url).await.unwrap();
-        let _ = sqlx::query("TRUNCATE TABLE evidence RESTART IDENTITY CASCADE").execute(&pool).await;
+        let _ = sqlx::query("TRUNCATE TABLE evidence RESTART IDENTITY CASCADE")
+            .execute(&pool)
+            .await;
         pool
     }
 

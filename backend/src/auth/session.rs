@@ -1,7 +1,7 @@
+use crate::auth::rbac::Role;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
-use crate::auth::rbac::Role;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserSession {
@@ -34,7 +34,6 @@ impl SessionManager {
     pub fn new(secret: String) -> Self {
         Self { secret }
     }
-    
+
     // JWT logic would go here if using JWTs, or cookie signing logic via axum-extra
 }
-

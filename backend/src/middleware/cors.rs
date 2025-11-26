@@ -1,5 +1,5 @@
-use tower_http::cors::{CorsLayer, Any};
-use axum::http::{Method, HeaderName};
+use axum::http::{HeaderName, Method};
+use tower_http::cors::{Any, CorsLayer};
 
 /// Create CORS layer with configurable origins from settings
 pub fn create_cors_layer(allowed_origins: Vec<String>) -> CorsLayer {
@@ -16,12 +16,12 @@ pub fn create_cors_layer(allowed_origins: Vec<String>) -> CorsLayer {
         CorsLayer::new()
             .allow_origin(Any)
             .allow_methods([
-                Method::GET, 
-                Method::POST, 
-                Method::PUT, 
-                Method::DELETE, 
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
                 Method::PATCH,
-                Method::OPTIONS
+                Method::OPTIONS,
             ])
             .allow_headers(allowed_headers)
             .allow_credentials(false)
@@ -29,31 +29,29 @@ pub fn create_cors_layer(allowed_origins: Vec<String>) -> CorsLayer {
         // Production mode - restrict origins
         let origins: Vec<_> = allowed_origins
             .iter()
-            .filter_map(|origin| {
-                match origin.parse() {
-                    Ok(parsed) => {
-                        tracing::debug!("CORS: Allowing origin: {}", origin);
-                        Some(parsed)
-                    }
-                    Err(e) => {
-                        tracing::warn!("CORS: Invalid origin '{}': {}", origin, e);
-                        None
-                    }
+            .filter_map(|origin| match origin.parse() {
+                Ok(parsed) => {
+                    tracing::debug!("CORS: Allowing origin: {}", origin);
+                    Some(parsed)
+                }
+                Err(e) => {
+                    tracing::warn!("CORS: Invalid origin '{}': {}", origin, e);
+                    None
                 }
             })
             .collect();
-            
+
         if origins.is_empty() {
             tracing::warn!("CORS: No valid origins configured, falling back to permissive mode");
             CorsLayer::new()
                 .allow_origin(Any)
                 .allow_methods([
-                    Method::GET, 
-                    Method::POST, 
-                    Method::PUT, 
-                    Method::DELETE, 
+                    Method::GET,
+                    Method::POST,
+                    Method::PUT,
+                    Method::DELETE,
                     Method::PATCH,
-                    Method::OPTIONS
+                    Method::OPTIONS,
                 ])
                 .allow_headers(allowed_headers)
                 .allow_credentials(false)
@@ -61,12 +59,12 @@ pub fn create_cors_layer(allowed_origins: Vec<String>) -> CorsLayer {
             CorsLayer::new()
                 .allow_origin(origins)
                 .allow_methods([
-                    Method::GET, 
-                    Method::POST, 
-                    Method::PUT, 
-                    Method::DELETE, 
+                    Method::GET,
+                    Method::POST,
+                    Method::PUT,
+                    Method::DELETE,
                     Method::PATCH,
-                    Method::OPTIONS
+                    Method::OPTIONS,
                 ])
                 .allow_headers(allowed_headers)
                 .allow_credentials(true)

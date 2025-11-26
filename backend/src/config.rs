@@ -3,6 +3,12 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use thiserror::Error;
 
+pub mod managed;
+mod secure_store;
+pub mod store;
+pub use managed::ManagedSettings;
+pub use store::{SettingsService, SharedSettings};
+
 /// Configuration errors
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -36,15 +42,15 @@ where
 pub struct Settings {
     // Environment
     pub environment: String,
-    
+
     // Database
     pub database_url: String,
-    
+
     // Elasticsearch
     pub elasticsearch_url: Option<String>,
     pub elasticsearch_asset_index: Option<String>,
     pub elasticsearch_finding_index: Option<String>,
-    
+
     // API Keys
     pub certspotter_api_token: Option<String>,
     pub virustotal_api_key: Option<String>,
@@ -53,18 +59,18 @@ pub struct Settings {
     pub otx_api_key: Option<String>,
     pub clearbit_api_key: Option<String>,
     pub opencorporates_api_token: Option<String>,
-    
+
     // Security
     #[serde(deserialize_with = "deserialize_comma_separated")]
     pub cors_allow_origins: Vec<String>,
     pub api_key_header: String,
     #[serde(deserialize_with = "deserialize_comma_separated")]
     pub api_keys: Vec<String>,
-    
+
     // Authentication (OIDC/SAML)
     pub auth_secret: String, // For session signing
     pub auth_session_expiry_seconds: u64,
-    
+
     // Google OIDC
     pub google_client_id: Option<String>,
     pub google_client_secret: Option<String>,
@@ -79,18 +85,18 @@ pub struct Settings {
     pub keycloak_discovery_url: Option<String>,
     pub keycloak_redirect_uri: Option<String>,
     pub keycloak_realm: Option<String>,
-    
+
     // Logging
     pub log_level: String,
     pub log_format: String,
     pub sql_log_level: String,
-    
+
     // Evidence Storage
     pub max_evidence_bytes: u64,
     #[serde(deserialize_with = "deserialize_comma_separated")]
     pub evidence_allowed_types: Vec<String>,
     pub evidence_storage_path: String,
-    
+
     // Performance Tuning
     pub http_timeout_seconds: f64,
     pub tls_timeout_seconds: f64,
@@ -98,7 +104,7 @@ pub struct Settings {
     pub rdns_concurrency: u32,
     pub tcp_scan_timeout: f64,
     pub tcp_scan_concurrency: u32,
-    
+
     // Discovery Settings
     pub max_cidr_hosts: u32,
     pub max_discovery_depth: u32,
@@ -112,18 +118,18 @@ pub struct Settings {
     pub enable_wikidata: bool,
     pub enable_opencorporates: bool,
     pub related_asset_confidence_default: f64,
-    
+
     // Recursive Discovery Limits (to reduce false-positives)
-    pub max_assets_per_discovery: u32,        // Max assets per discovery run
-    pub min_pivot_confidence: f64,            // Min confidence to follow pivot
-    pub max_orgs_per_domain: u32,             // Max orgs to pivot from per domain
-    pub max_domains_per_org: u32,             // Max domains to pivot from per org
-    
+    pub max_assets_per_discovery: u32, // Max assets per discovery run
+    pub min_pivot_confidence: f64,     // Min confidence to follow pivot
+    pub max_orgs_per_domain: u32,      // Max orgs to pivot from per domain
+    pub max_domains_per_org: u32,      // Max domains to pivot from per org
+
     // Rate Limiting
     pub rate_limit_enabled: bool,
     pub rate_limit_requests: u32,
     pub rate_limit_window_seconds: u32,
-    
+
     // Background Tasks
     pub max_concurrent_scans: u32,
     pub scan_queue_check_interval: f64,
@@ -132,21 +138,31 @@ pub struct Settings {
 impl Settings {
     /// Create new settings instance from environment variables and .env file
     pub fn new() -> Result<Self, ConfigError> {
-        Self::new_with_env_file(true)
+        Self::new_with_options(true, true)
     }
-    
+
     /// Create new settings instance with optional .env file loading
-    pub fn new_with_env_file(_load_env_file: bool) -> Result<Self, ConfigError> {
+    pub fn new_with_env_file(load_env_file: bool) -> Result<Self, ConfigError> {
+        Self::new_with_options(load_env_file, true)
+    }
+
+    /// Create new settings instance with control over env file loading and env overrides
+    pub fn new_with_options(
+        load_env_file: bool,
+        apply_env_overrides: bool,
+    ) -> Result<Self, ConfigError> {
         // Serialize settings construction to avoid cross-test environment races
         // Tests frequently mutate process env; locking ensures consistent reads
         static SETTINGS_BUILD_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
         let build_mutex = SETTINGS_BUILD_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = build_mutex.lock().expect("Failed to lock settings build mutex");
+        let _guard = build_mutex
+            .lock()
+            .expect("Failed to lock settings build mutex");
 
         // Load .env file if it exists and requested (skip during tests for determinism)
         #[cfg(not(test))]
         {
-            if _load_env_file {
+            if load_env_file {
                 dotenvy::dotenv().ok();
             }
         }
@@ -158,7 +174,7 @@ impl Settings {
             .set_default("elasticsearch_url", None::<String>)?
             .set_default("elasticsearch_asset_index", None::<String>)?
             .set_default("elasticsearch_finding_index", None::<String>)?
-            
+
             // API Keys defaults (all optional)
             .set_default("certspotter_api_token", None::<String>)?
             .set_default("virustotal_api_key", None::<String>)?
@@ -167,12 +183,12 @@ impl Settings {
             .set_default("otx_api_key", None::<String>)?
             .set_default("clearbit_api_key", None::<String>)?
             .set_default("opencorporates_api_token", None::<String>)?
-            
+
             // Security defaults
             .set_default("cors_allow_origins", "http://localhost:3000,http://127.0.0.1:3000")?
             .set_default("api_key_header", "X-API-Key")?
             .set_default("api_keys", "")?
-            
+
             // Auth defaults
             .set_default("auth_secret", "changeme_super_secret_session_key_must_be_at_least_64_bytes_long_for_security_reasons_so_here_is_a_very_long_string_!!")?
             .set_default("auth_session_expiry_seconds", 86400u64)? // 24 hours
@@ -191,12 +207,12 @@ impl Settings {
             .set_default("log_level", "INFO")?
             .set_default("log_format", "json")?
             .set_default("sql_log_level", "WARNING")?
-            
+
             // Evidence Storage defaults
             .set_default("max_evidence_bytes", 52428800u64)?  // 50MB
             .set_default("evidence_allowed_types", "image/png,image/jpeg,image/gif,text/plain,application/pdf,application/json,text/csv")?
             .set_default("evidence_storage_path", "./data/evidence")?
-            
+
             // Performance Tuning defaults
             .set_default("http_timeout_seconds", 8.0)?
             .set_default("tls_timeout_seconds", 4.0)?
@@ -204,7 +220,7 @@ impl Settings {
             .set_default("rdns_concurrency", 256u32)?
             .set_default("tcp_scan_timeout", 0.35)?
             .set_default("tcp_scan_concurrency", 64u32)?
-            
+
             // Discovery Settings defaults
             .set_default("max_cidr_hosts", 4096u32)?
             .set_default("max_discovery_depth", 3u32)?
@@ -218,18 +234,18 @@ impl Settings {
             .set_default("enable_wikidata", true)?
             .set_default("enable_opencorporates", false)?
             .set_default("related_asset_confidence_default", 0.3)?
-            
+
             // Recursive Discovery Limits defaults
             .set_default("max_assets_per_discovery", 5000u32)?
             .set_default("min_pivot_confidence", 0.5)?
             .set_default("max_orgs_per_domain", 3u32)?
             .set_default("max_domains_per_org", 20u32)?
-            
+
             // Rate Limiting defaults
             .set_default("rate_limit_enabled", true)?
             .set_default("rate_limit_requests", 100u32)?
             .set_default("rate_limit_window_seconds", 60u32)?
-            
+
             // Background Tasks defaults
             .set_default("max_concurrent_scans", 5u32)?
             .set_default("scan_queue_check_interval", 5.0)?
@@ -238,232 +254,364 @@ impl Settings {
         // Load .env as a configuration source instead of mutating process environment (skip in tests)
         #[cfg(not(test))]
         {
-            if _load_env_file {
+            if load_env_file {
                 builder = builder.add_source(config::File::with_name(".env").required(false));
             }
         }
 
-        // Apply environment overrides using explicit, uppercase-only mapping
-        fn read_env(key: &str) -> Option<String> {
-            std::env::var(key).ok()
+        if apply_env_overrides {
+            // Apply environment overrides using explicit, uppercase-only mapping
+            fn read_env(key: &str) -> Option<String> {
+                std::env::var(key).ok()
+            }
+
+            fn parse_bool_env(key: &str) -> Option<bool> {
+                read_env(key).and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+                    "true" | "1" => Some(true),
+                    "false" | "0" => Some(false),
+                    _ => None,
+                })
+            }
+
+            // String overrides (UPPERCASE only, special-case database_url to also consider lowercase for tests)
+            if let Some(v) = read_env("ENVIRONMENT") {
+                builder = builder.set_override("environment", v)?;
+            }
+            if let Some(v) = read_env("DATABASE_URL").or_else(|| std::env::var("database_url").ok())
+            {
+                builder = builder.set_override("database_url", v)?;
+            }
+            if let Some(v) = read_env("ELASTICSEARCH_URL") {
+                builder = builder.set_override("elasticsearch_url", v)?;
+            }
+            if let Some(v) = read_env("ELASTICSEARCH_ASSET_INDEX") {
+                builder = builder.set_override("elasticsearch_asset_index", v)?;
+            }
+            if let Some(v) = read_env("ELASTICSEARCH_FINDING_INDEX") {
+                builder = builder.set_override("elasticsearch_finding_index", v)?;
+            }
+            if let Some(v) = read_env("CERTSPOTTER_API_TOKEN") {
+                builder = builder.set_override("certspotter_api_token", v)?;
+            }
+            if let Some(v) = read_env("VIRUSTOTAL_API_KEY") {
+                builder = builder.set_override("virustotal_api_key", v)?;
+            }
+            if let Some(v) = read_env("SHODAN_API_KEY") {
+                builder = builder.set_override("shodan_api_key", v)?;
+            }
+            if let Some(v) = read_env("URLSCAN_API_KEY") {
+                builder = builder.set_override("urlscan_api_key", v)?;
+            }
+            if let Some(v) = read_env("OTX_API_KEY") {
+                builder = builder.set_override("otx_api_key", v)?;
+            }
+            if let Some(v) = read_env("CLEARBIT_API_KEY") {
+                builder = builder.set_override("clearbit_api_key", v)?;
+            }
+            if let Some(v) = read_env("OPENCORPORATES_API_TOKEN") {
+                builder = builder.set_override("opencorporates_api_token", v)?;
+            }
+            if let Some(v) = read_env("CORS_ALLOW_ORIGINS") {
+                builder = builder.set_override("cors_allow_origins", v)?;
+            }
+            if let Some(v) = read_env("API_KEY_HEADER") {
+                builder = builder.set_override("api_key_header", v)?;
+            }
+            if let Some(v) = read_env("API_KEYS") {
+                builder = builder.set_override("api_keys", v)?;
+            }
+
+            // Auth overrides
+            if let Some(v) = read_env("AUTH_SECRET") {
+                builder = builder.set_override("auth_secret", v)?;
+            }
+            if let Some(v) = read_env("GOOGLE_CLIENT_ID") {
+                builder = builder.set_override("google_client_id", v)?;
+            }
+            if let Some(v) = read_env("GOOGLE_CLIENT_SECRET") {
+                builder = builder.set_override("google_client_secret", v)?;
+            }
+            if let Some(v) = read_env("GOOGLE_DISCOVERY_URL") {
+                builder = builder.set_override("google_discovery_url", v)?;
+            }
+            if let Some(v) = read_env("GOOGLE_REDIRECT_URI") {
+                builder = builder.set_override("google_redirect_uri", v)?;
+            }
+            if let Some(v) = read_env("GOOGLE_ALLOWED_DOMAINS") {
+                builder = builder.set_override("google_allowed_domains", v)?;
+            }
+            if let Some(v) = read_env("KEYCLOAK_CLIENT_ID") {
+                builder = builder.set_override("keycloak_client_id", v)?;
+            }
+            if let Some(v) = read_env("KEYCLOAK_CLIENT_SECRET") {
+                builder = builder.set_override("keycloak_client_secret", v)?;
+            }
+            if let Some(v) = read_env("KEYCLOAK_DISCOVERY_URL") {
+                builder = builder.set_override("keycloak_discovery_url", v)?;
+            }
+            if let Some(v) = read_env("KEYCLOAK_REDIRECT_URI") {
+                builder = builder.set_override("keycloak_redirect_uri", v)?;
+            }
+            if let Some(v) = read_env("KEYCLOAK_REALM") {
+                builder = builder.set_override("keycloak_realm", v)?;
+            }
+
+            if let Some(v) = read_env("LOG_LEVEL") {
+                builder = builder.set_override("log_level", v)?;
+            }
+            if let Some(v) = read_env("LOG_FORMAT") {
+                builder = builder.set_override("log_format", v)?;
+            }
+            if let Some(v) = read_env("SQL_LOG_LEVEL") {
+                builder = builder.set_override("sql_log_level", v)?;
+            }
+            if let Some(v) = read_env("EVIDENCE_ALLOWED_TYPES") {
+                builder = builder.set_override("evidence_allowed_types", v)?;
+            }
+            if let Some(v) = read_env("EVIDENCE_STORAGE_PATH") {
+                builder = builder.set_override("evidence_storage_path", v)?;
+            }
+
+            // Numeric overrides
+            if let Some(v) = read_env("MAX_EVIDENCE_BYTES").and_then(|s| s.parse::<u64>().ok()) {
+                builder = builder.set_override("max_evidence_bytes", v)?;
+            }
+            if let Some(v) = read_env("HTTP_TIMEOUT_SECONDS").and_then(|s| s.parse::<f64>().ok()) {
+                builder = builder.set_override("http_timeout_seconds", v)?;
+            }
+            if let Some(v) = read_env("TLS_TIMEOUT_SECONDS").and_then(|s| s.parse::<f64>().ok()) {
+                builder = builder.set_override("tls_timeout_seconds", v)?;
+            }
+            if let Some(v) = read_env("DNS_CONCURRENCY").and_then(|s| s.parse::<u32>().ok()) {
+                builder = builder.set_override("dns_concurrency", v)?;
+            }
+            if let Some(v) = read_env("RDNS_CONCURRENCY").and_then(|s| s.parse::<u32>().ok()) {
+                builder = builder.set_override("rdns_concurrency", v)?;
+            }
+            if let Some(v) = read_env("TCP_SCAN_TIMEOUT").and_then(|s| s.parse::<f64>().ok()) {
+                builder = builder.set_override("tcp_scan_timeout", v)?;
+            }
+            if let Some(v) = read_env("TCP_SCAN_CONCURRENCY").and_then(|s| s.parse::<u32>().ok()) {
+                builder = builder.set_override("tcp_scan_concurrency", v)?;
+            }
+            if let Some(v) = read_env("MAX_CIDR_HOSTS").and_then(|s| s.parse::<u32>().ok()) {
+                builder = builder.set_override("max_cidr_hosts", v)?;
+            }
+            if let Some(v) = read_env("MAX_DISCOVERY_DEPTH").and_then(|s| s.parse::<u32>().ok()) {
+                builder = builder.set_override("max_discovery_depth", v)?;
+            }
+            if let Some(v) = read_env("SUBDOMAIN_ENUM_TIMEOUT").and_then(|s| s.parse::<f64>().ok())
+            {
+                builder = builder.set_override("subdomain_enum_timeout", v)?;
+            }
+            if let Some(v) =
+                read_env("RELATED_ASSET_CONFIDENCE_DEFAULT").and_then(|s| s.parse::<f64>().ok())
+            {
+                builder = builder.set_override("related_asset_confidence_default", v)?;
+            }
+            if let Some(v) =
+                read_env("MAX_ASSETS_PER_DISCOVERY").and_then(|s| s.parse::<u32>().ok())
+            {
+                builder = builder.set_override("max_assets_per_discovery", v)?;
+            }
+            if let Some(v) = read_env("MIN_PIVOT_CONFIDENCE").and_then(|s| s.parse::<f64>().ok()) {
+                builder = builder.set_override("min_pivot_confidence", v)?;
+            }
+            if let Some(v) = read_env("MAX_ORGS_PER_DOMAIN").and_then(|s| s.parse::<u32>().ok()) {
+                builder = builder.set_override("max_orgs_per_domain", v)?;
+            }
+            if let Some(v) = read_env("MAX_DOMAINS_PER_ORG").and_then(|s| s.parse::<u32>().ok()) {
+                builder = builder.set_override("max_domains_per_org", v)?;
+            }
+            if let Some(v) = read_env("RATE_LIMIT_REQUESTS").and_then(|s| s.parse::<u32>().ok()) {
+                builder = builder.set_override("rate_limit_requests", v)?;
+            }
+            if let Some(v) =
+                read_env("RATE_LIMIT_WINDOW_SECONDS").and_then(|s| s.parse::<u32>().ok())
+            {
+                builder = builder.set_override("rate_limit_window_seconds", v)?;
+            }
+            if let Some(v) = read_env("MAX_CONCURRENT_SCANS").and_then(|s| s.parse::<u32>().ok()) {
+                builder = builder.set_override("max_concurrent_scans", v)?;
+            }
+            if let Some(v) =
+                read_env("SCAN_QUEUE_CHECK_INTERVAL").and_then(|s| s.parse::<f64>().ok())
+            {
+                builder = builder.set_override("scan_queue_check_interval", v)?;
+            }
+            if let Some(v) =
+                read_env("AUTH_SESSION_EXPIRY_SECONDS").and_then(|s| s.parse::<u64>().ok())
+            {
+                builder = builder.set_override("auth_session_expiry_seconds", v)?;
+            }
+
+            // Boolean overrides
+            if let Some(v) = parse_bool_env("ENABLE_WAYBACK") {
+                builder = builder.set_override("enable_wayback", v)?;
+            }
+            if let Some(v) = parse_bool_env("ENABLE_URLSCAN") {
+                builder = builder.set_override("enable_urlscan", v)?;
+            }
+            if let Some(v) = parse_bool_env("ENABLE_OTX") {
+                builder = builder.set_override("enable_otx", v)?;
+            }
+            if let Some(v) = parse_bool_env("ENABLE_DNS_RECORD_EXPANSION") {
+                builder = builder.set_override("enable_dns_record_expansion", v)?;
+            }
+            if let Some(v) = parse_bool_env("ENABLE_WEB_CRAWL") {
+                builder = builder.set_override("enable_web_crawl", v)?;
+            }
+            if let Some(v) = parse_bool_env("ENABLE_CLOUD_STORAGE_DISCOVERY") {
+                builder = builder.set_override("enable_cloud_storage_discovery", v)?;
+            }
+            if let Some(v) = parse_bool_env("ENABLE_WIKIDATA") {
+                builder = builder.set_override("enable_wikidata", v)?;
+            }
+            if let Some(v) = parse_bool_env("ENABLE_OPENCORPORATES") {
+                builder = builder.set_override("enable_opencorporates", v)?;
+            }
+            if let Some(v) = parse_bool_env("RATE_LIMIT_ENABLED") {
+                builder = builder.set_override("rate_limit_enabled", v)?;
+            }
         }
-
-        fn parse_bool_env(key: &str) -> Option<bool> {
-            read_env(key).and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
-                "true" | "1" => Some(true),
-                "false" | "0" => Some(false),
-                _ => None,
-            })
-        }
-
-        // String overrides (UPPERCASE only, special-case database_url to also consider lowercase for tests)
-        if let Some(v) = read_env("ENVIRONMENT") { builder = builder.set_override("environment", v)?; }
-        if let Some(v) = read_env("DATABASE_URL").or_else(|| std::env::var("database_url").ok()) { builder = builder.set_override("database_url", v)?; }
-        if let Some(v) = read_env("ELASTICSEARCH_URL") { builder = builder.set_override("elasticsearch_url", v)?; }
-        if let Some(v) = read_env("ELASTICSEARCH_ASSET_INDEX") { builder = builder.set_override("elasticsearch_asset_index", v)?; }
-        if let Some(v) = read_env("ELASTICSEARCH_FINDING_INDEX") { builder = builder.set_override("elasticsearch_finding_index", v)?; }
-        if let Some(v) = read_env("CERTSPOTTER_API_TOKEN") { builder = builder.set_override("certspotter_api_token", v)?; }
-        if let Some(v) = read_env("VIRUSTOTAL_API_KEY") { builder = builder.set_override("virustotal_api_key", v)?; }
-        if let Some(v) = read_env("SHODAN_API_KEY") { builder = builder.set_override("shodan_api_key", v)?; }
-        if let Some(v) = read_env("URLSCAN_API_KEY") { builder = builder.set_override("urlscan_api_key", v)?; }
-        if let Some(v) = read_env("OTX_API_KEY") { builder = builder.set_override("otx_api_key", v)?; }
-        if let Some(v) = read_env("CLEARBIT_API_KEY") { builder = builder.set_override("clearbit_api_key", v)?; }
-        if let Some(v) = read_env("OPENCORPORATES_API_TOKEN") { builder = builder.set_override("opencorporates_api_token", v)?; }
-        if let Some(v) = read_env("CORS_ALLOW_ORIGINS") { builder = builder.set_override("cors_allow_origins", v)?; }
-        if let Some(v) = read_env("API_KEY_HEADER") { builder = builder.set_override("api_key_header", v)?; }
-        if let Some(v) = read_env("API_KEYS") { builder = builder.set_override("api_keys", v)?; }
-        
-        // Auth overrides
-        if let Some(v) = read_env("AUTH_SECRET") { builder = builder.set_override("auth_secret", v)?; }
-        if let Some(v) = read_env("GOOGLE_CLIENT_ID") { builder = builder.set_override("google_client_id", v)?; }
-        if let Some(v) = read_env("GOOGLE_CLIENT_SECRET") { builder = builder.set_override("google_client_secret", v)?; }
-        if let Some(v) = read_env("GOOGLE_DISCOVERY_URL") { builder = builder.set_override("google_discovery_url", v)?; }
-        if let Some(v) = read_env("GOOGLE_REDIRECT_URI") { builder = builder.set_override("google_redirect_uri", v)?; }
-        if let Some(v) = read_env("GOOGLE_ALLOWED_DOMAINS") { builder = builder.set_override("google_allowed_domains", v)?; }
-        if let Some(v) = read_env("KEYCLOAK_CLIENT_ID") { builder = builder.set_override("keycloak_client_id", v)?; }
-        if let Some(v) = read_env("KEYCLOAK_CLIENT_SECRET") { builder = builder.set_override("keycloak_client_secret", v)?; }
-        if let Some(v) = read_env("KEYCLOAK_DISCOVERY_URL") { builder = builder.set_override("keycloak_discovery_url", v)?; }
-        if let Some(v) = read_env("KEYCLOAK_REDIRECT_URI") { builder = builder.set_override("keycloak_redirect_uri", v)?; }
-        if let Some(v) = read_env("KEYCLOAK_REALM") { builder = builder.set_override("keycloak_realm", v)?; }
-
-        if let Some(v) = read_env("LOG_LEVEL") { builder = builder.set_override("log_level", v)?; }
-        if let Some(v) = read_env("LOG_FORMAT") { builder = builder.set_override("log_format", v)?; }
-        if let Some(v) = read_env("SQL_LOG_LEVEL") { builder = builder.set_override("sql_log_level", v)?; }
-        if let Some(v) = read_env("EVIDENCE_ALLOWED_TYPES") { builder = builder.set_override("evidence_allowed_types", v)?; }
-        if let Some(v) = read_env("EVIDENCE_STORAGE_PATH") { builder = builder.set_override("evidence_storage_path", v)?; }
-
-        // Numeric overrides
-        if let Some(v) = read_env("MAX_EVIDENCE_BYTES").and_then(|s| s.parse::<u64>().ok()) { builder = builder.set_override("max_evidence_bytes", v)?; }
-        if let Some(v) = read_env("HTTP_TIMEOUT_SECONDS").and_then(|s| s.parse::<f64>().ok()) { builder = builder.set_override("http_timeout_seconds", v)?; }
-        if let Some(v) = read_env("TLS_TIMEOUT_SECONDS").and_then(|s| s.parse::<f64>().ok()) { builder = builder.set_override("tls_timeout_seconds", v)?; }
-        if let Some(v) = read_env("DNS_CONCURRENCY").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("dns_concurrency", v)?; }
-        if let Some(v) = read_env("RDNS_CONCURRENCY").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("rdns_concurrency", v)?; }
-        if let Some(v) = read_env("TCP_SCAN_TIMEOUT").and_then(|s| s.parse::<f64>().ok()) { builder = builder.set_override("tcp_scan_timeout", v)?; }
-        if let Some(v) = read_env("TCP_SCAN_CONCURRENCY").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("tcp_scan_concurrency", v)?; }
-        if let Some(v) = read_env("MAX_CIDR_HOSTS").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("max_cidr_hosts", v)?; }
-        if let Some(v) = read_env("MAX_DISCOVERY_DEPTH").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("max_discovery_depth", v)?; }
-        if let Some(v) = read_env("SUBDOMAIN_ENUM_TIMEOUT").and_then(|s| s.parse::<f64>().ok()) { builder = builder.set_override("subdomain_enum_timeout", v)?; }
-        if let Some(v) = read_env("RELATED_ASSET_CONFIDENCE_DEFAULT").and_then(|s| s.parse::<f64>().ok()) { builder = builder.set_override("related_asset_confidence_default", v)?; }
-        if let Some(v) = read_env("MAX_ASSETS_PER_DISCOVERY").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("max_assets_per_discovery", v)?; }
-        if let Some(v) = read_env("MIN_PIVOT_CONFIDENCE").and_then(|s| s.parse::<f64>().ok()) { builder = builder.set_override("min_pivot_confidence", v)?; }
-        if let Some(v) = read_env("MAX_ORGS_PER_DOMAIN").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("max_orgs_per_domain", v)?; }
-        if let Some(v) = read_env("MAX_DOMAINS_PER_ORG").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("max_domains_per_org", v)?; }
-        if let Some(v) = read_env("RATE_LIMIT_REQUESTS").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("rate_limit_requests", v)?; }
-        if let Some(v) = read_env("RATE_LIMIT_WINDOW_SECONDS").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("rate_limit_window_seconds", v)?; }
-        if let Some(v) = read_env("MAX_CONCURRENT_SCANS").and_then(|s| s.parse::<u32>().ok()) { builder = builder.set_override("max_concurrent_scans", v)?; }
-        if let Some(v) = read_env("SCAN_QUEUE_CHECK_INTERVAL").and_then(|s| s.parse::<f64>().ok()) { builder = builder.set_override("scan_queue_check_interval", v)?; }
-        if let Some(v) = read_env("AUTH_SESSION_EXPIRY_SECONDS").and_then(|s| s.parse::<u64>().ok()) { builder = builder.set_override("auth_session_expiry_seconds", v)?; }
-
-        // Boolean overrides
-        if let Some(v) = parse_bool_env("ENABLE_WAYBACK") { builder = builder.set_override("enable_wayback", v)?; }
-        if let Some(v) = parse_bool_env("ENABLE_URLSCAN") { builder = builder.set_override("enable_urlscan", v)?; }
-        if let Some(v) = parse_bool_env("ENABLE_OTX") { builder = builder.set_override("enable_otx", v)?; }
-        if let Some(v) = parse_bool_env("ENABLE_DNS_RECORD_EXPANSION") { builder = builder.set_override("enable_dns_record_expansion", v)?; }
-        if let Some(v) = parse_bool_env("ENABLE_WEB_CRAWL") { builder = builder.set_override("enable_web_crawl", v)?; }
-        if let Some(v) = parse_bool_env("ENABLE_CLOUD_STORAGE_DISCOVERY") { builder = builder.set_override("enable_cloud_storage_discovery", v)?; }
-        if let Some(v) = parse_bool_env("ENABLE_WIKIDATA") { builder = builder.set_override("enable_wikidata", v)?; }
-        if let Some(v) = parse_bool_env("ENABLE_OPENCORPORATES") { builder = builder.set_override("enable_opencorporates", v)?; }
-        if let Some(v) = parse_bool_env("RATE_LIMIT_ENABLED") { builder = builder.set_override("rate_limit_enabled", v)?; }
 
         let settings = builder.build()?;
 
         let config: Settings = settings.try_deserialize()?;
-        
+
         // Validate configuration
         config.validate()?;
-        
+
         Ok(config)
     }
-    
 
-    
     /// Validate configuration values
     fn validate(&self) -> Result<(), ConfigError> {
         // Validate log format
         if !matches!(self.log_format.as_str(), "json" | "plain") {
             return Err(ConfigError::Validation(
-                "log_format must be 'json' or 'plain'".to_string()
+                "log_format must be 'json' or 'plain'".to_string(),
             ));
         }
-        
+
         // Validate positive numeric values
         if self.max_evidence_bytes == 0 {
             return Err(ConfigError::Validation(
-                "max_evidence_bytes must be greater than 0".to_string()
+                "max_evidence_bytes must be greater than 0".to_string(),
             ));
         }
-        
+
         if self.http_timeout_seconds <= 0.0 {
             return Err(ConfigError::Validation(
-                "http_timeout_seconds must be greater than 0".to_string()
+                "http_timeout_seconds must be greater than 0".to_string(),
             ));
         }
-        
+
         if self.tls_timeout_seconds <= 0.0 {
             return Err(ConfigError::Validation(
-                "tls_timeout_seconds must be greater than 0".to_string()
+                "tls_timeout_seconds must be greater than 0".to_string(),
             ));
         }
-        
+
         if self.tcp_scan_timeout <= 0.0 {
             return Err(ConfigError::Validation(
-                "tcp_scan_timeout must be greater than 0".to_string()
+                "tcp_scan_timeout must be greater than 0".to_string(),
             ));
         }
-        
+
         if self.subdomain_enum_timeout <= 0.0 {
             return Err(ConfigError::Validation(
-                "subdomain_enum_timeout must be greater than 0".to_string()
+                "subdomain_enum_timeout must be greater than 0".to_string(),
             ));
         }
-        
+
         if self.scan_queue_check_interval <= 0.0 {
             return Err(ConfigError::Validation(
-                "scan_queue_check_interval must be greater than 0".to_string()
+                "scan_queue_check_interval must be greater than 0".to_string(),
             ));
         }
-        
+
         // Validate concurrency limits
         if self.dns_concurrency == 0 {
             return Err(ConfigError::Validation(
-                "dns_concurrency must be greater than 0".to_string()
+                "dns_concurrency must be greater than 0".to_string(),
             ));
         }
-        
+
         if self.rdns_concurrency == 0 {
             return Err(ConfigError::Validation(
-                "rdns_concurrency must be greater than 0".to_string()
+                "rdns_concurrency must be greater than 0".to_string(),
             ));
         }
-        
+
         if self.tcp_scan_concurrency == 0 {
             return Err(ConfigError::Validation(
-                "tcp_scan_concurrency must be greater than 0".to_string()
+                "tcp_scan_concurrency must be greater than 0".to_string(),
             ));
         }
-        
+
         if self.max_concurrent_scans == 0 {
             return Err(ConfigError::Validation(
-                "max_concurrent_scans must be greater than 0".to_string()
+                "max_concurrent_scans must be greater than 0".to_string(),
             ));
         }
-        
+
         if self.rate_limit_requests == 0 {
             return Err(ConfigError::Validation(
-                "rate_limit_requests must be greater than 0".to_string()
+                "rate_limit_requests must be greater than 0".to_string(),
             ));
         }
-        
+
         if self.rate_limit_window_seconds == 0 {
             return Err(ConfigError::Validation(
-                "rate_limit_window_seconds must be greater than 0".to_string()
+                "rate_limit_window_seconds must be greater than 0".to_string(),
             ));
         }
-        
+
         // Validate ranges
         if self.max_cidr_hosts == 0 || self.max_cidr_hosts > 20000 {
             return Err(ConfigError::Validation(
-                "max_cidr_hosts must be between 1 and 20000".to_string()
+                "max_cidr_hosts must be between 1 and 20000".to_string(),
             ));
         }
-        
+
         if self.max_discovery_depth == 0 || self.max_discovery_depth > 10 {
             return Err(ConfigError::Validation(
-                "max_discovery_depth must be between 1 and 10".to_string()
+                "max_discovery_depth must be between 1 and 10".to_string(),
             ));
         }
-        
+
         if !(0.0..=1.0).contains(&self.related_asset_confidence_default) {
             return Err(ConfigError::Validation(
-                "related_asset_confidence_default must be between 0.0 and 1.0".to_string()
+                "related_asset_confidence_default must be between 0.0 and 1.0".to_string(),
             ));
         }
-        
+
         // Validate recursive discovery limits
         if self.max_assets_per_discovery == 0 || self.max_assets_per_discovery > 100000 {
             return Err(ConfigError::Validation(
-                "max_assets_per_discovery must be between 1 and 100000".to_string()
+                "max_assets_per_discovery must be between 1 and 100000".to_string(),
             ));
         }
-        
+
         if !(0.0..=1.0).contains(&self.min_pivot_confidence) {
             return Err(ConfigError::Validation(
-                "min_pivot_confidence must be between 0.0 and 1.0".to_string()
+                "min_pivot_confidence must be between 0.0 and 1.0".to_string(),
             ));
         }
-        
+
         if self.max_orgs_per_domain == 0 || self.max_orgs_per_domain > 50 {
             return Err(ConfigError::Validation(
-                "max_orgs_per_domain must be between 1 and 50".to_string()
+                "max_orgs_per_domain must be between 1 and 50".to_string(),
             ));
         }
-        
+
         if self.max_domains_per_org == 0 || self.max_domains_per_org > 500 {
             return Err(ConfigError::Validation(
-                "max_domains_per_org must be between 1 and 500".to_string()
+                "max_domains_per_org must be between 1 and 500".to_string(),
             ));
         }
-        
+
         Ok(())
     }
 }
@@ -479,15 +627,12 @@ static SETTINGS: OnceLock<Settings> = OnceLock::new();
 
 /// Get cached settings instance (equivalent to Python's @lru_cache)
 pub fn get_settings() -> &'static Settings {
-    SETTINGS.get_or_init(|| {
-        Settings::new().expect("Failed to initialize settings")
-    })
+    SETTINGS.get_or_init(|| Settings::new().expect("Failed to initialize settings"))
 }
 
 /// Common ports for scanning (matches Python backend)
 pub const COMMON_PORTS: &[u16] = &[
-    80, 443, 22, 25, 53, 110, 143, 587, 993, 995,
-    3306, 5432, 6379, 8080, 8443, 3389, 5900
+    80, 443, 22, 25, 53, 110, 143, 587, 993, 995, 3306, 5432, 6379, 8080, 8443, 3389, 5900,
 ];
 
 /// HTTP security headers (matches Python backend)
@@ -502,14 +647,76 @@ pub fn security_headers() -> HashMap<&'static str, &'static str> {
 
 /// Subdomain wordlist for brute-force fallback (matches Python backend)
 pub const SUBDOMAIN_WORDLIST: &[&str] = &[
-    "www", "mail", "mx", "smtp", "imap", "pop", "vpn", "dev", "staging", "api",
-    "app", "portal", "intranet", "test", "beta", "cdn", "assets", "static", "gw",
-    "gateway", "sso", "auth", "admin", "docs", "blog", "status", "shop", "store",
-    "pay", "files", "download", "downloads", "jira", "confluence", "git", "gitlab",
-    "grafana", "kibana", "log", "logs", "monitor", "monitoring", "ns1", "ns2",
-    "ns", "devops", "prod", "production", "stage", "ci", "cd", "build", "jenkins",
-    "backup", "db", "database", "mysql", "postgres", "redis", "cache", "queue",
-    "ftp", "sftp", "ssh", "remote", "rdp", "webmail", "cpanel", "whm", "plesk"
+    "www",
+    "mail",
+    "mx",
+    "smtp",
+    "imap",
+    "pop",
+    "vpn",
+    "dev",
+    "staging",
+    "api",
+    "app",
+    "portal",
+    "intranet",
+    "test",
+    "beta",
+    "cdn",
+    "assets",
+    "static",
+    "gw",
+    "gateway",
+    "sso",
+    "auth",
+    "admin",
+    "docs",
+    "blog",
+    "status",
+    "shop",
+    "store",
+    "pay",
+    "files",
+    "download",
+    "downloads",
+    "jira",
+    "confluence",
+    "git",
+    "gitlab",
+    "grafana",
+    "kibana",
+    "log",
+    "logs",
+    "monitor",
+    "monitoring",
+    "ns1",
+    "ns2",
+    "ns",
+    "devops",
+    "prod",
+    "production",
+    "stage",
+    "ci",
+    "cd",
+    "build",
+    "jenkins",
+    "backup",
+    "db",
+    "database",
+    "mysql",
+    "postgres",
+    "redis",
+    "cache",
+    "queue",
+    "ftp",
+    "sftp",
+    "ssh",
+    "remote",
+    "rdp",
+    "webmail",
+    "cpanel",
+    "whm",
+    "plesk",
 ];
 
 #[cfg(test)]

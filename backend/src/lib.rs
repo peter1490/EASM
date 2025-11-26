@@ -1,26 +1,34 @@
-use std::sync::Arc;
 use crate::{
-    config::Settings,
+    config::{Settings, SettingsService, SharedSettings},
     database::DatabasePool,
     repositories::{
-        ScanRepository, FindingRepository, AssetRepository, EvidenceRepository, SeedRepository, UserRepository,
-        DiscoveryRunRepository, DiscoveryQueueRepository, AssetSourceRepository, AssetRelationshipRepository,
-        SecurityScanRepository, SecurityFindingRepository,
-        scan_repo::SqlxScanRepository,
-        finding_repo::SqlxFindingRepository,
         asset_repo::SqlxAssetRepository,
+        discovery_repo::{
+            SqlxAssetRelationshipRepository, SqlxAssetSourceRepository,
+            SqlxDiscoveryQueueRepository, SqlxDiscoveryRunRepository,
+        },
         evidence_repo::SqlxEvidenceRepository,
+        finding_repo::SqlxFindingRepository,
+        scan_repo::SqlxScanRepository,
+        security_repo::{SqlxSecurityFindingRepository, SqlxSecurityScanRepository},
         seed_repo::SqlxSeedRepository,
         user_repo::SqlxUserRepository,
-        discovery_repo::{SqlxDiscoveryRunRepository, SqlxDiscoveryQueueRepository, SqlxAssetSourceRepository, SqlxAssetRelationshipRepository},
-        security_repo::{SqlxSecurityScanRepository, SqlxSecurityFindingRepository},
+        AssetRelationshipRepository, AssetRepository, AssetSourceRepository,
+        DiscoveryQueueRepository, DiscoveryRunRepository, EvidenceRepository, FindingRepository,
+        ScanRepository, SecurityFindingRepository, SecurityScanRepository, SeedRepository,
+        UserRepository,
     },
-    services::{ScanService, DiscoveryService, TaskManager, DriftService, DriftServiceImpl, SearchService, ElasticsearchService, MetricsService, AuthService, RiskService, SecurityScanService},
-    services::external::{ExternalServicesManager, DnsResolver, HttpAnalyzer},
+    services::external::{DnsResolver, ExternalServicesManager, HttpAnalyzer},
+    services::{
+        AuthService, DiscoveryService, DriftService, DriftServiceImpl, ElasticsearchService,
+        MetricsService, RiskService, ScanService, SearchService, SecurityScanService, TaskManager,
+    },
 };
-use axum_extra::extract::cookie::Key;
 use axum::extract::FromRef;
+use axum_extra::extract::cookie::Key;
+use std::sync::Arc;
 
+pub mod auth;
 pub mod config;
 pub mod database;
 pub mod error;
@@ -30,13 +38,12 @@ pub mod models;
 pub mod repositories;
 pub mod services;
 pub mod utils;
-pub mod auth;
 
 /// Shared application state containing all dependencies
 #[derive(Clone)]
 pub struct AppState {
-    pub config: Arc<Settings>,
-    pub settings: Settings, // For compatibility with handlers
+    pub config: SharedSettings,
+    pub settings_service: Arc<SettingsService>,
     pub db_pool: DatabasePool,
     pub scan_service: Arc<ScanService>,
     pub discovery_service: Arc<DiscoveryService>,
@@ -78,81 +85,77 @@ impl AppState {
         let db_pool = crate::database::create_connection_pool(&config.database_url).await?;
         Self::new_with_pool(config, db_pool).await
     }
-    
+
     /// Create new application state with existing database pool
-    pub async fn new_with_pool(config: Settings, db_pool: DatabasePool) -> Result<Self, crate::error::ApiError> {
-        let config_arc = Arc::new(config.clone());
-        
+    pub async fn new_with_pool(
+        config: Settings,
+        db_pool: DatabasePool,
+    ) -> Result<Self, crate::error::ApiError> {
+        let settings_service =
+            Arc::new(SettingsService::initialize(db_pool.clone(), config).await?);
+        let shared_settings = settings_service.shared_settings();
+        let settings_snapshot = shared_settings.load();
+
         // Create cookie key
-        let key = Key::from(config.auth_secret.as_bytes());
-        
+        let key = Key::from(settings_snapshot.auth_secret.as_bytes());
+
         // Create repositories
-        let scan_repository: Arc<dyn ScanRepository + Send + Sync> = Arc::new(
-            SqlxScanRepository::new(db_pool.clone())
-        );
-        let finding_repository: Arc<dyn FindingRepository + Send + Sync> = Arc::new(
-            SqlxFindingRepository::new(db_pool.clone())
-        );
-        let asset_repository: Arc<dyn AssetRepository + Send + Sync> = Arc::new(
-            SqlxAssetRepository::new(db_pool.clone())
-        );
-        let evidence_repository: Arc<dyn EvidenceRepository + Send + Sync> = Arc::new(
-            SqlxEvidenceRepository::new(db_pool.clone())
-        );
-        let seed_repository: Arc<dyn SeedRepository + Send + Sync> = Arc::new(
-            SqlxSeedRepository::new(db_pool.clone())
-        );
-        let user_repository: Arc<dyn UserRepository + Send + Sync> = Arc::new(
-            SqlxUserRepository::new(db_pool.clone())
-        );
-        
+        let scan_repository: Arc<dyn ScanRepository + Send + Sync> =
+            Arc::new(SqlxScanRepository::new(db_pool.clone()));
+        let finding_repository: Arc<dyn FindingRepository + Send + Sync> =
+            Arc::new(SqlxFindingRepository::new(db_pool.clone()));
+        let asset_repository: Arc<dyn AssetRepository + Send + Sync> =
+            Arc::new(SqlxAssetRepository::new(db_pool.clone()));
+        let evidence_repository: Arc<dyn EvidenceRepository + Send + Sync> =
+            Arc::new(SqlxEvidenceRepository::new(db_pool.clone()));
+        let seed_repository: Arc<dyn SeedRepository + Send + Sync> =
+            Arc::new(SqlxSeedRepository::new(db_pool.clone()));
+        let user_repository: Arc<dyn UserRepository + Send + Sync> =
+            Arc::new(SqlxUserRepository::new(db_pool.clone()));
+
         // Create new discovery repositories
-        let discovery_run_repository: Arc<dyn DiscoveryRunRepository + Send + Sync> = Arc::new(
-            SqlxDiscoveryRunRepository::new(db_pool.clone())
-        );
-        let discovery_queue_repository: Arc<dyn DiscoveryQueueRepository + Send + Sync> = Arc::new(
-            SqlxDiscoveryQueueRepository::new(db_pool.clone())
-        );
-        let asset_source_repository: Arc<dyn AssetSourceRepository + Send + Sync> = Arc::new(
-            SqlxAssetSourceRepository::new(db_pool.clone())
-        );
-        let asset_relationship_repository: Arc<dyn AssetRelationshipRepository + Send + Sync> = Arc::new(
-            SqlxAssetRelationshipRepository::new(db_pool.clone())
-        );
-        
+        let discovery_run_repository: Arc<dyn DiscoveryRunRepository + Send + Sync> =
+            Arc::new(SqlxDiscoveryRunRepository::new(db_pool.clone()));
+        let discovery_queue_repository: Arc<dyn DiscoveryQueueRepository + Send + Sync> =
+            Arc::new(SqlxDiscoveryQueueRepository::new(db_pool.clone()));
+        let asset_source_repository: Arc<dyn AssetSourceRepository + Send + Sync> =
+            Arc::new(SqlxAssetSourceRepository::new(db_pool.clone()));
+        let asset_relationship_repository: Arc<dyn AssetRelationshipRepository + Send + Sync> =
+            Arc::new(SqlxAssetRelationshipRepository::new(db_pool.clone()));
+
         // Create security scan repositories
-        let security_scan_repository: Arc<dyn SecurityScanRepository + Send + Sync> = Arc::new(
-            SqlxSecurityScanRepository::new(db_pool.clone())
-        );
-        let security_finding_repository: Arc<dyn SecurityFindingRepository + Send + Sync> = Arc::new(
-            SqlxSecurityFindingRepository::new(db_pool.clone())
-        );
-        
+        let security_scan_repository: Arc<dyn SecurityScanRepository + Send + Sync> =
+            Arc::new(SqlxSecurityScanRepository::new(db_pool.clone()));
+        let security_finding_repository: Arc<dyn SecurityFindingRepository + Send + Sync> =
+            Arc::new(SqlxSecurityFindingRepository::new(db_pool.clone()));
+
         // Create external services and utilities
-        let external_services = Arc::new(ExternalServicesManager::new(config_arc.clone())?);
-        
+        let external_services = Arc::new(ExternalServicesManager::new(shared_settings.clone())?);
+
         // Create DNS resolver with settings configuration
         use crate::services::external::{DnsConfig, HttpConfig};
         let dns_config = DnsConfig {
             query_timeout: std::time::Duration::from_secs(5),
-            max_concurrent: config_arc.dns_concurrency as usize,
-            rate_limit: config_arc.dns_concurrency,
+            max_concurrent: settings_snapshot.dns_concurrency as usize,
+            rate_limit: settings_snapshot.dns_concurrency,
         };
         let dns_resolver = Arc::new(DnsResolver::with_config(dns_config).await?);
-        
+
         // Create HTTP analyzer with settings configuration
         let http_config = HttpConfig {
-            request_timeout: std::time::Duration::from_secs_f64(config_arc.http_timeout_seconds),
-            tls_timeout: std::time::Duration::from_secs_f64(config_arc.tls_timeout_seconds),
+            request_timeout: std::time::Duration::from_secs_f64(
+                settings_snapshot.http_timeout_seconds,
+            ),
+            tls_timeout: std::time::Duration::from_secs_f64(settings_snapshot.tls_timeout_seconds),
             max_redirects: 5,
             max_concurrent: 20,
             rate_limit: 50,
             user_agent: "EASM-Scanner/1.0".to_string(),
         };
         let http_analyzer = Arc::new(HttpAnalyzer::with_config(http_config)?);
-        
-        let task_manager = Arc::new(TaskManager::new(config_arc.clone()));
-        
+
+        let task_manager = Arc::new(TaskManager::new(shared_settings.clone()));
+
         // Create services with dependency injection
         let scan_service = Arc::new(ScanService::new(
             scan_repository.clone(),
@@ -163,9 +166,9 @@ impl AppState {
             http_analyzer.clone(),
             http_analyzer.clone(), // TlsAnalyzer is an alias for HttpAnalyzer
             task_manager.clone(),
-            config_arc.clone(),
+            shared_settings.clone(),
         ));
-        
+
         // Create security scan service FIRST (discovery service depends on it)
         let security_scan_service = Arc::new(SecurityScanService::new(
             asset_repository.clone(),
@@ -176,9 +179,9 @@ impl AppState {
             http_analyzer.clone(), // HttpProber
             http_analyzer.clone(), // TlsAnalyzer
             task_manager.clone(),
-            config_arc.clone(),
+            shared_settings.clone(),
         ));
-        
+
         // Create discovery service with security scan service for auto-scan functionality
         let discovery_service = Arc::new(
             DiscoveryService::new(
@@ -192,21 +195,20 @@ impl AppState {
                 dns_resolver.clone(),
                 http_analyzer.clone(),
                 task_manager.clone(),
-                config_arc.clone(),
-            ).with_security_scan_service(security_scan_service.clone())
-        );
-        
-        // Create drift service
-        let drift_service: Arc<dyn DriftService + Send + Sync> = Arc::new(
-            DriftServiceImpl::new(
-                finding_repository.clone(),
-                scan_repository.clone(),
+                shared_settings.clone(),
             )
+            .with_security_scan_service(security_scan_service.clone()),
         );
-        
+
+        // Create drift service
+        let drift_service: Arc<dyn DriftService + Send + Sync> = Arc::new(DriftServiceImpl::new(
+            finding_repository.clone(),
+            scan_repository.clone(),
+        ));
+
         // Create search service (optional, only if Elasticsearch is configured)
-        let search_service = if config_arc.elasticsearch_url.is_some() {
-            match ElasticsearchService::new(config_arc.clone()) {
+        let search_service = if settings_snapshot.elasticsearch_url.is_some() {
+            match ElasticsearchService::new(settings_snapshot.clone()) {
                 Ok(service) => {
                     let service: Arc<dyn SearchService + Send + Sync> = Arc::new(service);
                     // Initialize indices on startup
@@ -224,15 +226,15 @@ impl AppState {
             tracing::info!("Elasticsearch not configured, search service disabled");
             None
         };
-        
+
         // Create metrics service
         let metrics_service = Arc::new(MetricsService::new());
 
         // Create auth service
         let auth_service = Arc::new(AuthService::new(
-            config_arc.clone(),
+            shared_settings.clone(),
             user_repository.clone(),
-        ).await?);
+        ));
 
         // Create risk service (uses security findings for proper risk calculation)
         let risk_service = Arc::new(RiskService::new(
@@ -240,10 +242,10 @@ impl AppState {
             security_finding_repository.clone(),
             db_pool.clone(),
         ));
-        
+
         Ok(Self {
-            config: config_arc,
-            settings: config,
+            config: shared_settings.clone(),
+            settings_service,
             db_pool,
             scan_service,
             discovery_service,

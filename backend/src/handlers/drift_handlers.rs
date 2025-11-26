@@ -1,16 +1,11 @@
 use axum::{
     extract::{Path, State},
-
     response::Json,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{
-    error::ApiError,
-
-    AppState,
-};
+use crate::{error::ApiError, AppState};
 
 #[derive(Debug, Serialize)]
 pub struct DriftDetectionResponse {
@@ -40,7 +35,7 @@ pub async fn detect_port_drift(
     // Ensure the scan is completed
     if scan.status != crate::models::ScanStatus::Completed {
         return Err(ApiError::validation(
-            "Port drift detection can only be performed on completed scans"
+            "Port drift detection can only be performed on completed scans",
         ));
     }
 
@@ -59,10 +54,7 @@ pub async fn detect_port_drift(
     // Update asset metadata for each drift
     for drift in &drifts {
         // Extract current port state from findings
-        let current_findings = app_state
-            .finding_repo
-            .list_by_scan(&scan_id)
-            .await?;
+        let current_findings = app_state.finding_repo.list_by_scan(&scan_id).await?;
 
         let mut current_ports = std::collections::HashSet::new();
         for finding in current_findings {
@@ -98,10 +90,7 @@ pub async fn get_drift_findings(
     State(app_state): State<AppState>,
     Path(scan_id): Path<Uuid>,
 ) -> Result<Json<Vec<crate::models::Finding>>, ApiError> {
-    let findings = app_state
-        .finding_repo
-        .list_by_type("port_drift")
-        .await?;
+    let findings = app_state.finding_repo.list_by_type("port_drift").await?;
 
     // Filter findings for the specific scan
     let scan_findings: Vec<_> = findings

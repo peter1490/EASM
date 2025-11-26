@@ -10,12 +10,7 @@ use governor::{
     state::{InMemoryState, NotKeyed},
     Quota, RateLimiter,
 };
-use std::{
-    net::IpAddr,
-    num::NonZeroU32,
-    sync::Arc,
-    time::Duration,
-};
+use std::{net::IpAddr, num::NonZeroU32, sync::Arc, time::Duration};
 
 use crate::config::Settings;
 
@@ -25,13 +20,13 @@ pub type AppRateLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoO
 pub fn create_rate_limiter(settings: &Settings) -> AppRateLimiter {
     let requests_per_window = NonZeroU32::new(settings.rate_limit_requests)
         .unwrap_or_else(|| NonZeroU32::new(100).unwrap());
-    
+
     let window_duration = Duration::from_secs(settings.rate_limit_window_seconds as u64);
-    
+
     let quota = Quota::with_period(window_duration)
         .unwrap()
         .allow_burst(requests_per_window);
-    
+
     RateLimiter::direct(quota)
 }
 
@@ -70,13 +65,13 @@ impl IpRateLimiter {
     pub fn new(settings: &Settings) -> Self {
         let requests_per_window = NonZeroU32::new(settings.rate_limit_requests)
             .unwrap_or_else(|| NonZeroU32::new(100).unwrap());
-        
+
         let window_duration = Duration::from_secs(settings.rate_limit_window_seconds as u64);
-        
+
         let quota = Quota::with_period(window_duration)
             .unwrap()
             .allow_burst(requests_per_window);
-        
+
         Self {
             limiter: RateLimiter::keyed(quota),
         }
@@ -120,8 +115,8 @@ pub async fn ip_rate_limit_middleware(
     next: Next,
 ) -> Result<Response, StatusCode> {
     // Extract client IP
-    let client_ip = extract_client_ip(request.headers())
-        .unwrap_or_else(|| "127.0.0.1".parse().unwrap()); // Default to localhost
+    let client_ip =
+        extract_client_ip(request.headers()).unwrap_or_else(|| "127.0.0.1".parse().unwrap()); // Default to localhost
 
     // Check rate limit for this IP
     if ip_limiter.check_ip(client_ip) {
@@ -134,19 +129,16 @@ pub async fn ip_rate_limit_middleware(
 }
 
 /// Performance monitoring middleware
-pub async fn performance_middleware(
-    request: Request,
-    next: Next,
-) -> Response {
+pub async fn performance_middleware(request: Request, next: Next) -> Response {
     let start = std::time::Instant::now();
     let method = request.method().clone();
     let uri = request.uri().clone();
-    
+
     let response = next.run(request).await;
-    
+
     let duration = start.elapsed();
     let status = response.status();
-    
+
     // Log slow requests
     if duration > Duration::from_millis(1000) {
         tracing::warn!(
@@ -165,7 +157,7 @@ pub async fn performance_middleware(
             status
         );
     }
-    
+
     response
 }
 
@@ -197,13 +189,13 @@ mod tests {
     async fn test_rate_limiter_creation() {
         let settings = create_test_settings();
         let limiter = create_rate_limiter(&settings);
-        
+
         // First request should succeed
         assert!(limiter.check().is_ok());
-        
+
         // Second request should succeed
         assert!(limiter.check().is_ok());
-        
+
         // Third request should fail (rate limited)
         assert!(limiter.check().is_err());
     }
@@ -212,15 +204,15 @@ mod tests {
     async fn test_ip_rate_limiter() {
         let settings = create_test_settings();
         let limiter = IpRateLimiter::new(&settings);
-        
+
         let ip1: IpAddr = "192.168.1.1".parse().unwrap();
         let ip2: IpAddr = "192.168.1.2".parse().unwrap();
-        
+
         // First IP should be allowed
         assert!(limiter.check_ip(ip1));
         assert!(limiter.check_ip(ip1));
         assert!(!limiter.check_ip(ip1)); // Third request fails
-        
+
         // Second IP should still be allowed
         assert!(limiter.check_ip(ip2));
         assert!(limiter.check_ip(ip2));
@@ -230,18 +222,18 @@ mod tests {
     #[tokio::test]
     async fn test_extract_client_ip() {
         let mut headers = HeaderMap::new();
-        
+
         // Test X-Forwarded-For header
         headers.insert("x-forwarded-for", "192.168.1.1, 10.0.0.1".parse().unwrap());
         let ip = extract_client_ip(&headers);
         assert_eq!(ip, Some("192.168.1.1".parse().unwrap()));
-        
+
         // Test X-Real-IP header
         headers.clear();
         headers.insert("x-real-ip", "192.168.1.2".parse().unwrap());
         let ip = extract_client_ip(&headers);
         assert_eq!(ip, Some("192.168.1.2".parse().unwrap()));
-        
+
         // Test no headers
         headers.clear();
         let ip = extract_client_ip(&headers);
@@ -252,7 +244,7 @@ mod tests {
     async fn test_rate_limit_middleware_integration() {
         let settings = create_test_settings();
         let limiter = Arc::new(create_rate_limiter(&settings));
-        
+
         let app = Router::new()
             .route("/test", get(test_handler))
             .layer(middleware::from_fn_with_state(
@@ -262,26 +254,17 @@ mod tests {
             .with_state(limiter);
 
         // First request should succeed
-        let request = Request::builder()
-            .uri("/test")
-            .body(Body::empty())
-            .unwrap();
+        let request = Request::builder().uri("/test").body(Body::empty()).unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
         // Second request should succeed
-        let request = Request::builder()
-            .uri("/test")
-            .body(Body::empty())
-            .unwrap();
+        let request = Request::builder().uri("/test").body(Body::empty()).unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
         // Third request should be rate limited
-        let request = Request::builder()
-            .uri("/test")
-            .body(Body::empty())
-            .unwrap();
+        let request = Request::builder().uri("/test").body(Body::empty()).unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     }

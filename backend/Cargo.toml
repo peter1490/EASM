@@ -66,6 +66,9 @@ rustls-pemfile = "2.0"
 tokio-rustls = "0.25"
 webpki-roots = "0.26"
 x509-parser = "0.16"
+aes-gcm = "0.10"
+sha2 = "0.10"
+arc-swap = "1.6"
 
 # HTML parsing and regex
 regex = "1.10"

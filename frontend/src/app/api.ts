@@ -804,6 +804,137 @@ export async function updateUserRole(userId: string, role: string, action: "add"
 }
 
 // ============================================================================
+// SETTINGS API
+// ============================================================================
+
+export type SecretField = {
+  is_set: boolean;
+  value?: string | null;
+};
+
+export type SettingsView = {
+  google_client_id: string | null;
+  google_client_secret: SecretField;
+  google_discovery_url: string | null;
+  google_redirect_uri: string | null;
+  google_allowed_domains: string[];
+  keycloak_client_id: string | null;
+  keycloak_client_secret: SecretField;
+  keycloak_discovery_url: string | null;
+  keycloak_redirect_uri: string | null;
+  keycloak_realm: string | null;
+  certspotter_api_token: SecretField;
+  virustotal_api_key: SecretField;
+  shodan_api_key: SecretField;
+  urlscan_api_key: SecretField;
+  otx_api_key: SecretField;
+  clearbit_api_key: SecretField;
+  opencorporates_api_token: SecretField;
+  cors_allow_origins: string[];
+  log_level: string;
+  log_format: string;
+  rate_limit_enabled: boolean;
+  rate_limit_requests: number;
+  rate_limit_window_seconds: number;
+  http_timeout_seconds: number;
+  tls_timeout_seconds: number;
+  dns_concurrency: number;
+  rdns_concurrency: number;
+  max_concurrent_scans: number;
+  max_evidence_bytes: number;
+  evidence_allowed_types: string[];
+  max_cidr_hosts: number;
+  max_discovery_depth: number;
+  subdomain_enum_timeout: number;
+  enable_wayback: boolean;
+  enable_urlscan: boolean;
+  enable_otx: boolean;
+  enable_dns_record_expansion: boolean;
+  enable_web_crawl: boolean;
+  enable_cloud_storage_discovery: boolean;
+  enable_wikidata: boolean;
+  enable_opencorporates: boolean;
+  max_assets_per_discovery: number;
+  min_pivot_confidence: number;
+  max_orgs_per_domain: number;
+  max_domains_per_org: number;
+};
+
+export type SettingsResponse = {
+  settings: SettingsView;
+  updated_at: string;
+  updated_by?: string | null;
+};
+
+export type SettingsUpdatePayload = {
+  google_client_id?: string | null;
+  google_client_secret?: string | null;
+  google_discovery_url?: string | null;
+  google_redirect_uri?: string | null;
+  google_allowed_domains?: string[];
+  keycloak_client_id?: string | null;
+  keycloak_client_secret?: string | null;
+  keycloak_discovery_url?: string | null;
+  keycloak_redirect_uri?: string | null;
+  keycloak_realm?: string | null;
+  certspotter_api_token?: string | null;
+  virustotal_api_key?: string | null;
+  shodan_api_key?: string | null;
+  urlscan_api_key?: string | null;
+  otx_api_key?: string | null;
+  clearbit_api_key?: string | null;
+  opencorporates_api_token?: string | null;
+  cors_allow_origins?: string[];
+  log_level?: string;
+  log_format?: string;
+  rate_limit_enabled?: boolean;
+  rate_limit_requests?: number;
+  rate_limit_window_seconds?: number;
+  http_timeout_seconds?: number;
+  tls_timeout_seconds?: number;
+  dns_concurrency?: number;
+  rdns_concurrency?: number;
+  max_concurrent_scans?: number;
+  max_evidence_bytes?: number;
+  evidence_allowed_types?: string[];
+  max_cidr_hosts?: number;
+  max_discovery_depth?: number;
+  subdomain_enum_timeout?: number;
+  enable_wayback?: boolean;
+  enable_urlscan?: boolean;
+  enable_otx?: boolean;
+  enable_dns_record_expansion?: boolean;
+  enable_web_crawl?: boolean;
+  enable_cloud_storage_discovery?: boolean;
+  enable_wikidata?: boolean;
+  enable_opencorporates?: boolean;
+  max_assets_per_discovery?: number;
+  min_pivot_confidence?: number;
+  max_orgs_per_domain?: number;
+  max_domains_per_org?: number;
+};
+
+export async function getSettings(revealSecrets = false): Promise<SettingsResponse> {
+  const res = await fetch(`${API_BASE}/api/admin/settings?reveal_secrets=${revealSecrets}`, {
+    cache: "no-store",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to load settings: ${res.status}`);
+  return res.json();
+}
+
+export async function updateSettings(payload: SettingsUpdatePayload, revealSecrets = false): Promise<SettingsResponse> {
+  const res = await fetch(`${API_BASE}/api/admin/settings?reveal_secrets=${revealSecrets}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to update settings: ${res.status}`);
+  return res.json();
+}
+
+// ============================================================================
 // EVIDENCE API
 // ============================================================================
 

@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use std::collections::HashMap;
-use uuid::Uuid;
-use serde_json::json;
 use crate::{
-    error::ApiError,
-    repositories::{AssetRepository, SecurityFindingRepository},
-    models::asset::Asset,
     database::DatabasePool,
+    error::ApiError,
+    models::asset::Asset,
+    repositories::{AssetRepository, SecurityFindingRepository},
 };
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
+use uuid::Uuid;
 
 pub struct RiskService {
     asset_repo: Arc<dyn AssetRepository + Send + Sync>,
@@ -31,25 +31,31 @@ impl RiskService {
     /// Calculate risk score for a single asset based on its security findings
     pub async fn calculate_asset_risk(&self, asset_id: Uuid) -> Result<Asset, ApiError> {
         // 1. Get Asset
-        let asset = self.asset_repo.get_by_id(&asset_id).await?
+        let asset = self
+            .asset_repo
+            .get_by_id(&asset_id)
+            .await?
             .ok_or_else(|| ApiError::NotFound(format!("Asset {} not found", asset_id)))?;
 
         // 2. Get Security Findings for Asset (proper security findings with severity)
-        let findings = self.security_finding_repo.list_by_asset(&asset_id, 1000).await?;
-        
+        let findings = self
+            .security_finding_repo
+            .list_by_asset(&asset_id, 1000)
+            .await?;
+
         // 3. Calculate Score based on findings severity and type
         let mut finding_score = 0.0;
         let mut severity_counts: HashMap<String, i32> = HashMap::new();
-        
+
         for finding in &findings {
             // Skip resolved or false positive findings
             if finding.status == "resolved" || finding.status == "false_positive" {
                 continue;
             }
-            
+
             // Count by severity
             *severity_counts.entry(finding.severity.clone()).or_insert(0) += 1;
-            
+
             // Score based on severity
             let severity_score = match finding.severity.as_str() {
                 "critical" => 40.0,
@@ -59,10 +65,10 @@ impl RiskService {
                 "info" => 0.5,
                 _ => 1.0,
             };
-            
+
             // Add CVSS score if available (weighted)
             let cvss_bonus = finding.cvss_score.map(|s| s * 2.0).unwrap_or(0.0);
-            
+
             // Additional scoring based on finding type
             let type_multiplier = match finding.finding_type.as_str() {
                 "expired_certificate" | "weak_tls_version" => 1.5,
@@ -73,36 +79,36 @@ impl RiskService {
                     // Check for critical ports
                     if let Some(port) = finding.data.get("port").and_then(|p| p.as_i64()) {
                         match port {
-                            22 | 3389 | 23 => 1.5,      // Remote access
-                            3306 | 5432 | 6379 => 1.8,  // Databases
-                            _ => 1.0
+                            22 | 3389 | 23 => 1.5,     // Remote access
+                            3306 | 5432 | 6379 => 1.8, // Databases
+                            _ => 1.0,
                         }
                     } else {
                         1.0
                     }
-                },
-                _ => 1.0
+                }
+                _ => 1.0,
             };
-            
+
             finding_score += (severity_score + cvss_bonus) * type_multiplier;
         }
-        
+
         // 4. Base risk from asset type and exposure
         let exposure_score = match asset.asset_type {
-            crate::models::asset::AssetType::Ip => 10.0,     // Public IP most exposed
-            crate::models::asset::AssetType::Domain => 8.0,  // Domains are exposed
+            crate::models::asset::AssetType::Ip => 10.0, // Public IP most exposed
+            crate::models::asset::AssetType::Domain => 8.0, // Domains are exposed
             crate::models::asset::AssetType::Certificate => 3.0,
-            _ => 1.0
+            _ => 1.0,
         };
-        
+
         // 5. Apply importance multiplier (0-5 mapped to 1.0 - 2.0)
         let importance_multiplier = 1.0 + (asset.importance as f64 * 0.2);
-        
+
         let mut risk_score = (exposure_score + finding_score) * importance_multiplier;
-        
+
         // Cap at 100 for display purposes
         risk_score = risk_score.min(100.0);
-        
+
         // 6. Determine Risk Level
         let risk_level = if risk_score >= 80.0 {
             "critical"
@@ -115,7 +121,7 @@ impl RiskService {
         } else {
             "info"
         };
-        
+
         // 7. Store factors for history and debugging
         let factors = json!({
             "exposure_score": exposure_score,
@@ -127,29 +133,30 @@ impl RiskService {
         });
 
         // 8. Update Asset with new risk data
-        let updated_asset = self.asset_repo.update_risk(
-            &asset.id, 
-            risk_score, 
-            risk_level, 
-            &factors
-        ).await?;
-        
+        let updated_asset = self
+            .asset_repo
+            .update_risk(&asset.id, risk_score, risk_level, &factors)
+            .await?;
+
         tracing::info!(
             "Calculated risk for asset {}: score={:.1}, level={}, findings={}",
-            asset.identifier, risk_score, risk_level, findings.len()
+            asset.identifier,
+            risk_score,
+            risk_level,
+            findings.len()
         );
-        
+
         Ok(updated_asset)
     }
-    
+
     /// Recalculate risk for all assets
     pub async fn recalculate_all_risks(&self) -> Result<RiskRecalculationResult, ApiError> {
         let assets = self.asset_repo.list(None, Some(10000), None).await?;
-        
+
         let mut success_count = 0;
         let mut error_count = 0;
         let mut errors: Vec<String> = Vec::new();
-        
+
         for asset in assets {
             match self.calculate_asset_risk(asset.id).await {
                 Ok(_) => success_count += 1,
@@ -161,14 +168,14 @@ impl RiskService {
                 }
             }
         }
-        
+
         Ok(RiskRecalculationResult {
             success_count,
             error_count,
             errors,
         })
     }
-    
+
     /// Get real risk overview with actual data from database
     pub async fn get_risk_overview(&self) -> Result<serde_json::Value, ApiError> {
         // Query assets grouped by risk level
@@ -178,24 +185,24 @@ impl RiskService {
             FROM assets
             WHERE risk_level IS NOT NULL
             GROUP BY risk_level
-            "#
+            "#,
         )
         .fetch_all(&self.db_pool)
         .await?;
-        
+
         let mut assets_by_level: HashMap<String, i64> = HashMap::new();
         assets_by_level.insert("critical".to_string(), 0);
         assets_by_level.insert("high".to_string(), 0);
         assets_by_level.insert("medium".to_string(), 0);
         assets_by_level.insert("low".to_string(), 0);
         assets_by_level.insert("info".to_string(), 0);
-        
+
         for (level, count) in risk_levels {
             if let Some(l) = level {
                 assets_by_level.insert(l, count);
             }
         }
-        
+
         // Get total and average risk score
         let stats = sqlx::query_as::<_, (i64, Option<f64>, Option<f64>)>(
             r#"
@@ -205,19 +212,19 @@ impl RiskService {
                 SUM(risk_score) as total_score
             FROM assets
             WHERE risk_score IS NOT NULL
-            "#
+            "#,
         )
         .fetch_one(&self.db_pool)
         .await?;
-        
+
         let (total_with_scores, avg_score, total_score) = stats;
-        
+
         // Get total assets
         let total_assets = self.asset_repo.count(None).await?;
-        
+
         // Get findings summary
         let findings_summary = self.security_finding_repo.count_by_severity().await?;
-        
+
         Ok(json!({
             "total_risk_score": total_score.unwrap_or(0.0),
             "average_risk_score": avg_score.unwrap_or(0.0),
@@ -228,7 +235,7 @@ impl RiskService {
             "findings_by_severity": findings_summary,
         }))
     }
-    
+
     /// Get assets with highest risk scores
     pub async fn get_high_risk_assets(&self, limit: i64) -> Result<Vec<Asset>, ApiError> {
         let rows = sqlx::query_as::<_, crate::models::asset::AssetRow>(
@@ -246,7 +253,7 @@ impl RiskService {
         .bind(limit)
         .fetch_all(&self.db_pool)
         .await?;
-        
+
         Ok(rows.into_iter().map(Asset::from).collect())
     }
 }

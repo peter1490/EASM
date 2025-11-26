@@ -1,11 +1,7 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-};
+use crate::{error::ApiError, AppState};
+use axum::{extract::State, http::StatusCode, response::Json};
 use serde_json::{json, Value};
 use sqlx::Row;
-use crate::{AppState, error::ApiError};
 
 /// Enhanced health check endpoint with database connectivity check
 pub async fn health_check(State(app_state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -78,9 +74,9 @@ async fn check_database_health(app_state: &AppState) -> Value {
 pub async fn readiness_check(State(app_state): State<AppState>) -> Result<Json<Value>, ApiError> {
     // Check if the service is ready to accept traffic
     let db_ready = check_database_health(&app_state).await;
-    
+
     let ready = db_ready["healthy"].as_bool().unwrap_or(false);
-    
+
     let readiness_status = json!({
         "ready": ready,
         "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -120,14 +116,15 @@ mod tests {
     async fn create_test_app_state() -> AppState {
         let settings = Settings::new_with_env_file(false).unwrap();
         // Requires DATABASE_URL to be set to a valid PostgreSQL URL in test env
-        let db_pool = create_database_pool(&settings.database_url).await.expect("DB pool");
+        let db_pool = create_database_pool(&settings.database_url)
+            .await
+            .expect("DB pool");
         AppState::new_with_pool(settings, db_pool).await.unwrap()
     }
 
     #[tokio::test]
     async fn test_health_check_simple() {
-        let app = Router::new()
-            .route("/health", get(health_check_simple));
+        let app = Router::new().route("/health", get(health_check_simple));
 
         let request = Request::builder()
             .uri("/health")
@@ -140,8 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_liveness_check() {
-        let app = Router::new()
-            .route("/liveness", get(liveness_check));
+        let app = Router::new().route("/liveness", get(liveness_check));
 
         let request = Request::builder()
             .uri("/liveness")
@@ -155,7 +151,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_check_with_database() {
         let app_state = create_test_app_state().await;
-        
+
         let app = Router::new()
             .route("/health", get(health_check))
             .with_state(app_state);
@@ -167,13 +163,16 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         // Should be OK if database is available, or 500 if not
-        assert!(matches!(response.status(), StatusCode::OK | StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(matches!(
+            response.status(),
+            StatusCode::OK | StatusCode::INTERNAL_SERVER_ERROR
+        ));
     }
 
     #[tokio::test]
     async fn test_readiness_check() {
         let app_state = create_test_app_state().await;
-        
+
         let app = Router::new()
             .route("/ready", get(readiness_check))
             .with_state(app_state);
@@ -185,6 +184,9 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         // Should be OK if database is available, or 500 if not
-        assert!(matches!(response.status(), StatusCode::OK | StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(matches!(
+            response.status(),
+            StatusCode::OK | StatusCode::INTERNAL_SERVER_ERROR
+        ));
     }
 }

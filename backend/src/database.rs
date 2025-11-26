@@ -1,6 +1,6 @@
+use crate::error::ApiError;
 use sqlx::{Pool, Postgres};
 use std::sync::OnceLock;
-use crate::error::ApiError;
 
 pub type DatabasePool = Pool<Postgres>;
 
@@ -26,7 +26,7 @@ pub async fn run_migrations(pool: &DatabasePool) -> Result<(), ApiError> {
         return Ok(());
     }
     tracing::info!("Running database migrations...");
-    
+
     match sqlx::migrate!("./migrations").run(pool).await {
         Ok(()) => {
             tracing::info!("Database migrations completed successfully");

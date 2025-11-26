@@ -1,10 +1,10 @@
-use async_trait::async_trait;
-use uuid::Uuid;
 use crate::{
     database::DatabasePool,
     error::ApiError,
     models::{Finding, FindingCreate, FindingFilter, FindingListResponse},
 };
+use async_trait::async_trait;
+use uuid::Uuid;
 
 #[async_trait]
 pub trait FindingRepository {
@@ -32,13 +32,13 @@ impl FindingRepository for SqlxFindingRepository {
     async fn create(&self, finding: &FindingCreate) -> Result<Finding, ApiError> {
         let id = Uuid::new_v4();
         let now = chrono::Utc::now();
-        
+
         let result = sqlx::query_as::<_, Finding>(
             r#"
             INSERT INTO findings (id, scan_id, finding_type, data, created_at)
             VALUES ($1, $2, $3, $4, $5)
             RETURNING id, scan_id, finding_type, data, created_at
-            "#
+            "#,
         )
         .bind(id)
         .bind(finding.scan_id)
@@ -58,7 +58,7 @@ impl FindingRepository for SqlxFindingRepository {
             FROM findings
             WHERE scan_id = $1
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .bind(scan_id)
         .fetch_all(&self.pool)
@@ -74,7 +74,7 @@ impl FindingRepository for SqlxFindingRepository {
             FROM findings
             WHERE finding_type = $1
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .bind(finding_type)
         .fetch_all(&self.pool)
@@ -91,7 +91,7 @@ impl FindingRepository for SqlxFindingRepository {
             JOIN scans s ON f.scan_id = s.id
             WHERE LOWER(TRIM(s.target)) = LOWER(TRIM($1))
             ORDER BY f.created_at DESC
-            "#
+            "#,
         )
         .bind(asset_identifier)
         .fetch_all(&self.pool)
@@ -102,7 +102,7 @@ impl FindingRepository for SqlxFindingRepository {
 
     async fn search(&self, query: &str) -> Result<Vec<Finding>, ApiError> {
         let search_pattern = format!("%{}%", query);
-        
+
         #[cfg(test)]
         let results = sqlx::query_as::<_, Finding>(
             r#"
@@ -110,7 +110,7 @@ impl FindingRepository for SqlxFindingRepository {
             FROM findings
             WHERE finding_type LIKE $1 OR json_extract(data, '$') LIKE $1
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .bind(&search_pattern)
         .fetch_all(&self.pool)
@@ -123,7 +123,7 @@ impl FindingRepository for SqlxFindingRepository {
             FROM findings
             WHERE finding_type ILIKE $1 OR data::text ILIKE $1
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .bind(&search_pattern)
         .fetch_all(&self.pool)
@@ -138,7 +138,7 @@ impl FindingRepository for SqlxFindingRepository {
             SELECT COUNT(*)
             FROM findings
             WHERE scan_id = $1
-            "#
+            "#,
         )
         .bind(scan_id)
         .fetch_one(&self.pool)
@@ -150,134 +150,141 @@ impl FindingRepository for SqlxFindingRepository {
     async fn filter(&self, filter: &FindingFilter) -> Result<FindingListResponse, ApiError> {
         let mut where_clauses = Vec::new();
         let mut param_index = 1;
-        
+
         if let Some(ref types) = filter.finding_types {
             if !types.is_empty() {
                 where_clauses.push(format!("finding_type = ANY(${})", param_index));
                 param_index += 1;
             }
         }
-        
+
         if let Some(ref scan_ids) = filter.scan_ids {
             if !scan_ids.is_empty() {
                 where_clauses.push(format!("scan_id = ANY(${})", param_index));
                 param_index += 1;
             }
         }
-        
+
         if filter.created_after.is_some() {
             where_clauses.push(format!("created_at >= ${}", param_index));
             param_index += 1;
         }
-        
+
         if filter.created_before.is_some() {
             where_clauses.push(format!("created_at <= ${}", param_index));
             param_index += 1;
         }
-        
+
         if let Some(ref search_text) = filter.search_text {
             if !search_text.is_empty() {
                 #[cfg(test)]
-                where_clauses.push(format!("(finding_type LIKE ${} OR json_extract(data, '$') LIKE ${})", param_index, param_index));
-                
+                where_clauses.push(format!(
+                    "(finding_type LIKE ${} OR json_extract(data, '$') LIKE ${})",
+                    param_index, param_index
+                ));
+
                 #[cfg(not(test))]
-                where_clauses.push(format!("(finding_type ILIKE ${} OR data::text ILIKE ${})", param_index, param_index));
-                
+                where_clauses.push(format!(
+                    "(finding_type ILIKE ${} OR data::text ILIKE ${})",
+                    param_index, param_index
+                ));
+
                 param_index += 1;
             }
         }
-        
+
         let where_sql = if where_clauses.is_empty() {
             String::new()
         } else {
             format!("WHERE {}", where_clauses.join(" AND "))
         };
-        
+
         let sort_field = match filter.sort_by.as_str() {
             "created_at" | "finding_type" => &filter.sort_by,
             _ => "created_at",
         };
-        
+
         let sort_direction = match filter.sort_direction.to_lowercase().as_str() {
             "asc" | "desc" => filter.sort_direction.to_uppercase(),
             _ => "DESC".to_string(),
         };
-        
+
         let order_sql = format!("ORDER BY {} {}", sort_field, sort_direction);
-        
+
         let limit = filter.limit.max(1).min(1000);
         let offset = filter.offset.max(0);
-        
+
         let count_sql = format!("SELECT COUNT(*) FROM findings {}", where_sql);
-        
+
         let main_sql = format!(
             "SELECT id, scan_id, finding_type, data, created_at FROM findings {} {} LIMIT ${} OFFSET ${}",
             where_sql, order_sql, param_index, param_index + 1
         );
-        
-        let search_pattern = filter.search_text
+
+        let search_pattern = filter
+            .search_text
             .as_ref()
             .filter(|s| !s.is_empty())
             .map(|s| format!("%{}%", s));
-        
+
         let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
-        
+
         if let Some(ref types) = filter.finding_types {
             if !types.is_empty() {
                 count_query = count_query.bind(types);
             }
         }
-        
+
         if let Some(ref scan_ids) = filter.scan_ids {
             if !scan_ids.is_empty() {
                 count_query = count_query.bind(scan_ids);
             }
         }
-        
+
         if let Some(ref created_after) = filter.created_after {
             count_query = count_query.bind(created_after);
         }
-        
+
         if let Some(ref created_before) = filter.created_before {
             count_query = count_query.bind(created_before);
         }
-        
+
         if let Some(ref pattern) = search_pattern {
             count_query = count_query.bind(pattern);
         }
-        
+
         let total_count = count_query.fetch_one(&self.pool).await?;
-        
+
         let mut main_query = sqlx::query_as::<_, Finding>(&main_sql);
-        
+
         if let Some(ref types) = filter.finding_types {
             if !types.is_empty() {
                 main_query = main_query.bind(types);
             }
         }
-        
+
         if let Some(ref scan_ids) = filter.scan_ids {
             if !scan_ids.is_empty() {
                 main_query = main_query.bind(scan_ids);
             }
         }
-        
+
         if let Some(ref created_after) = filter.created_after {
             main_query = main_query.bind(created_after);
         }
-        
+
         if let Some(ref created_before) = filter.created_before {
             main_query = main_query.bind(created_before);
         }
-        
+
         if let Some(ref pattern) = search_pattern {
             main_query = main_query.bind(pattern);
         }
-        
+
         main_query = main_query.bind(limit).bind(offset);
-        
+
         let findings = main_query.fetch_all(&self.pool).await?;
-        
+
         Ok(FindingListResponse {
             findings,
             total_count,

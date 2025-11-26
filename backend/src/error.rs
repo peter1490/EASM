@@ -10,49 +10,49 @@ use uuid::Uuid;
 pub enum ApiError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
-    
+
     #[error("External service error: {0}")]
     ExternalService(String),
-    
+
     #[error("Validation error: {0}")]
     Validation(String),
-    
+
     #[error("Not found: {0}")]
     NotFound(String),
-    
+
     #[error("Configuration error: {0}")]
     Config(#[from] config::ConfigError),
 
     #[error("Configuration error: {0}")]
     Configuration(String),
-    
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
-    
+
     #[error("HTTP client error: {0}")]
     HttpClient(#[from] reqwest::Error),
-    
+
     #[error("Migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
-    
+
     #[error("Authentication error: {0}")]
     Authentication(String),
-    
+
     #[error("Authorization error: {0}")]
     Authorization(String),
-    
+
     #[error("Rate limit exceeded: {0}")]
     RateLimit(String),
-    
+
     #[error("Timeout error: {0}")]
     Timeout(String),
-    
+
     #[error("Conflict error: {0}")]
     Conflict(String),
-    
+
     #[error("Internal server error: {0}")]
     Internal(String),
 
@@ -65,42 +65,42 @@ impl ApiError {
     pub fn validation<T: Into<String>>(msg: T) -> Self {
         Self::Validation(msg.into())
     }
-    
+
     /// Create a new not found error
     pub fn not_found<T: Into<String>>(msg: T) -> Self {
         Self::NotFound(msg.into())
     }
-    
+
     /// Create a new internal error
     pub fn internal<T: Into<String>>(msg: T) -> Self {
         Self::Internal(msg.into())
     }
-    
+
     /// Create a new external service error
     pub fn external_service<T: Into<String>>(msg: T) -> Self {
         Self::ExternalService(msg.into())
     }
-    
+
     /// Create a new authentication error
     pub fn authentication<T: Into<String>>(msg: T) -> Self {
         Self::Authentication(msg.into())
     }
-    
+
     /// Create a new authorization error
     pub fn authorization<T: Into<String>>(msg: T) -> Self {
         Self::Authorization(msg.into())
     }
-    
+
     /// Create a new rate limit error
     pub fn rate_limit<T: Into<String>>(msg: T) -> Self {
         Self::RateLimit(msg.into())
     }
-    
+
     /// Create a new timeout error
     pub fn timeout<T: Into<String>>(msg: T) -> Self {
         Self::Timeout(msg.into())
     }
-    
+
     /// Create a new conflict error
     pub fn conflict<T: Into<String>>(msg: T) -> Self {
         Self::Conflict(msg.into())
@@ -110,7 +110,7 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let error_id = Uuid::new_v4();
-        
+
         let (status, error_message, error_code) = match self {
             ApiError::Database(ref err) => {
                 tracing::error!(
@@ -118,7 +118,11 @@ impl IntoResponse for ApiError {
                     error = %err,
                     "database error occurred"
                 );
-                (StatusCode::INTERNAL_SERVER_ERROR, "Database error", "DATABASE_ERROR")
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Database error",
+                    "DATABASE_ERROR",
+                )
             }
             ApiError::ExternalService(ref msg) => {
                 tracing::error!(
@@ -126,7 +130,11 @@ impl IntoResponse for ApiError {
                     error = %msg,
                     "external service error occurred"
                 );
-                (StatusCode::BAD_GATEWAY, msg.as_str(), "EXTERNAL_SERVICE_ERROR")
+                (
+                    StatusCode::BAD_GATEWAY,
+                    msg.as_str(),
+                    "EXTERNAL_SERVICE_ERROR",
+                )
             }
             ApiError::Validation(ref msg) => {
                 tracing::warn!(
@@ -150,7 +158,11 @@ impl IntoResponse for ApiError {
                     error = %err,
                     "configuration error occurred"
                 );
-                (StatusCode::INTERNAL_SERVER_ERROR, "Configuration error", "CONFIG_ERROR")
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Configuration error",
+                    "CONFIG_ERROR",
+                )
             }
             ApiError::Configuration(ref msg) => {
                 tracing::error!(
@@ -158,7 +170,11 @@ impl IntoResponse for ApiError {
                     error = %msg,
                     "configuration error occurred"
                 );
-                (StatusCode::INTERNAL_SERVER_ERROR, msg.as_str(), "CONFIG_ERROR")
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    msg.as_str(),
+                    "CONFIG_ERROR",
+                )
             }
             ApiError::Io(ref err) => {
                 tracing::error!(
@@ -174,7 +190,11 @@ impl IntoResponse for ApiError {
                     error = %err,
                     "serialization error occurred"
                 );
-                (StatusCode::INTERNAL_SERVER_ERROR, "Serialization error", "SERIALIZATION_ERROR")
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Serialization error",
+                    "SERIALIZATION_ERROR",
+                )
             }
             ApiError::HttpClient(ref err) => {
                 tracing::error!(
@@ -182,7 +202,11 @@ impl IntoResponse for ApiError {
                     error = %err,
                     "HTTP client error occurred"
                 );
-                (StatusCode::BAD_GATEWAY, "External service unavailable", "HTTP_CLIENT_ERROR")
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "External service unavailable",
+                    "HTTP_CLIENT_ERROR",
+                )
             }
             ApiError::Migration(ref err) => {
                 tracing::error!(
@@ -190,7 +214,11 @@ impl IntoResponse for ApiError {
                     error = %err,
                     "database migration error occurred"
                 );
-                (StatusCode::INTERNAL_SERVER_ERROR, "Database migration error", "MIGRATION_ERROR")
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Database migration error",
+                    "MIGRATION_ERROR",
+                )
             }
             ApiError::Authentication(ref msg) => {
                 tracing::warn!(
@@ -198,7 +226,11 @@ impl IntoResponse for ApiError {
                     error = %msg,
                     "authentication error occurred"
                 );
-                (StatusCode::UNAUTHORIZED, msg.as_str(), "AUTHENTICATION_ERROR")
+                (
+                    StatusCode::UNAUTHORIZED,
+                    msg.as_str(),
+                    "AUTHENTICATION_ERROR",
+                )
             }
             ApiError::Authorization(ref msg) => {
                 tracing::warn!(
@@ -214,7 +246,11 @@ impl IntoResponse for ApiError {
                     error = %msg,
                     "rate limit exceeded"
                 );
-                (StatusCode::TOO_MANY_REQUESTS, msg.as_str(), "RATE_LIMIT_EXCEEDED")
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    msg.as_str(),
+                    "RATE_LIMIT_EXCEEDED",
+                )
             }
             ApiError::Timeout(ref msg) => {
                 tracing::warn!(
@@ -238,7 +274,11 @@ impl IntoResponse for ApiError {
                     error = %msg,
                     "internal server error occurred"
                 );
-                (StatusCode::INTERNAL_SERVER_ERROR, msg.as_str(), "INTERNAL_ERROR")
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    msg.as_str(),
+                    "INTERNAL_ERROR",
+                )
             }
             ApiError::Anyhow(ref err) => {
                 tracing::error!(
@@ -246,7 +286,11 @@ impl IntoResponse for ApiError {
                     error = %err,
                     "unexpected error occurred"
                 );
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error", "INTERNAL_ERROR")
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error",
+                    "INTERNAL_ERROR",
+                )
             }
         };
 
@@ -272,7 +316,6 @@ mod tests {
     use axum::{
         body::Body,
         http::{Request, StatusCode},
-
         routing::get,
         Router,
     };
@@ -292,13 +335,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_validation_error_response() {
-        let app = Router::new()
-            .route("/test", get(test_error_handler));
+        let app = Router::new().route("/test", get(test_error_handler));
 
-        let request = Request::builder()
-            .uri("/test")
-            .body(Body::empty())
-            .unwrap();
+        let request = Request::builder().uri("/test").body(Body::empty()).unwrap();
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -306,13 +345,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_not_found_error_response() {
-        let app = Router::new()
-            .route("/test", get(test_not_found_handler));
+        let app = Router::new().route("/test", get(test_not_found_handler));
 
-        let request = Request::builder()
-            .uri("/test")
-            .body(Body::empty())
-            .unwrap();
+        let request = Request::builder().uri("/test").body(Body::empty()).unwrap();
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -320,13 +355,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_internal_error_response() {
-        let app = Router::new()
-            .route("/test", get(test_internal_error_handler));
+        let app = Router::new().route("/test", get(test_internal_error_handler));
 
-        let request = Request::builder()
-            .uri("/test")
-            .body(Body::empty())
-            .unwrap();
+        let request = Request::builder().uri("/test").body(Body::empty()).unwrap();
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);

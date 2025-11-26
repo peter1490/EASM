@@ -1,9 +1,9 @@
-use async_trait::async_trait;
-use sqlx::PgPool;
 use crate::error::ApiError;
-use uuid::Uuid;
 use crate::models::asset::{Seed, SeedCreate, SeedType};
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use sqlx::PgPool;
+use uuid::Uuid;
 
 #[async_trait]
 pub trait SeedRepository: Send + Sync {
@@ -59,13 +59,13 @@ impl SeedRepository for SqlxSeedRepository {
     async fn create(&self, seed: &SeedCreate) -> Result<Seed, ApiError> {
         let id = Uuid::new_v4();
         let seed_type_str = seed.seed_type.to_string();
-        
+
         let row = sqlx::query_as::<_, SeedRow>(
             r#"
             INSERT INTO seeds (id, seed_type, value, note, created_at, updated_at)
             VALUES ($1, $2::seed_type, $3, $4, NOW(), NOW())
             RETURNING id, seed_type::text, value, note, created_at, updated_at
-            "#
+            "#,
         )
         .bind(id)
         .bind(&seed_type_str)
@@ -81,10 +81,10 @@ impl SeedRepository for SqlxSeedRepository {
             }
             ApiError::from(e) // Convert sqlx::Error to ApiError::Database
         })?;
-        
+
         Ok(row.into())
     }
-    
+
     async fn list(&self) -> Result<Vec<Seed>, ApiError> {
         let rows = sqlx::query_as::<_, SeedRow>(
             r#"
@@ -95,20 +95,20 @@ impl SeedRepository for SqlxSeedRepository {
         )
         .fetch_all(&self.pool)
         .await?; // Use ? operator - #[from] will convert sqlx::Error to ApiError::Database
-        
+
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
-    
+
     async fn delete(&self, id: Uuid) -> Result<(), ApiError> {
         let result = sqlx::query("DELETE FROM seeds WHERE id = $1")
             .bind(id)
             .execute(&self.pool)
             .await?; // Use ? operator
-        
+
         if result.rows_affected() == 0 {
             return Err(ApiError::NotFound(format!("Seed {} not found", id)));
         }
-        
+
         Ok(())
     }
 }

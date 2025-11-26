@@ -110,7 +110,7 @@ pub struct Asset {
     pub updated_at: DateTime<Utc>,
     pub seed_id: Option<Uuid>,
     pub parent_id: Option<Uuid>,
-    
+
     // Lifecycle tracking (new fields)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_seen_at: Option<DateTime<Utc>>,
@@ -122,14 +122,14 @@ pub struct Asset {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discovery_method: Option<String>,
-    
+
     // Risk related fields
     #[serde(default)]
     pub importance: i32,
     pub risk_score: Option<f64>,
     pub risk_level: Option<String>,
     pub last_risk_run: Option<DateTime<Utc>>,
-    
+
     // Security scan tracking
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_scan_id: Option<String>,

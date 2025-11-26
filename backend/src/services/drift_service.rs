@@ -28,9 +28,18 @@ pub struct AssetPortState {
 
 #[async_trait]
 pub trait DriftService {
-    async fn detect_port_drift(&self, current_scan_id: &Uuid, target: &str) -> Result<Vec<PortDrift>, ApiError>;
-    async fn generate_drift_findings(&self, drifts: &[PortDrift]) -> Result<Vec<Finding>, ApiError>;
-    async fn update_asset_metadata(&self, asset_identifier: &str, port_state: &HashSet<u16>) -> Result<(), ApiError>;
+    async fn detect_port_drift(
+        &self,
+        current_scan_id: &Uuid,
+        target: &str,
+    ) -> Result<Vec<PortDrift>, ApiError>;
+    async fn generate_drift_findings(&self, drifts: &[PortDrift])
+        -> Result<Vec<Finding>, ApiError>;
+    async fn update_asset_metadata(
+        &self,
+        asset_identifier: &str,
+        port_state: &HashSet<u16>,
+    ) -> Result<(), ApiError>;
 }
 
 pub struct DriftServiceImpl {
@@ -50,7 +59,10 @@ impl DriftServiceImpl {
     }
 
     /// Extract port information from scan findings
-    async fn extract_port_states(&self, scan_id: &Uuid) -> Result<HashMap<String, AssetPortState>, ApiError> {
+    async fn extract_port_states(
+        &self,
+        scan_id: &Uuid,
+    ) -> Result<HashMap<String, AssetPortState>, ApiError> {
         let findings = self.finding_repo.list_by_scan(scan_id).await?;
         let mut asset_ports: HashMap<String, HashSet<u16>> = HashMap::new();
 
@@ -85,9 +97,13 @@ impl DriftServiceImpl {
     }
 
     /// Find the most recent completed scan for the same target
-    async fn find_previous_scan(&self, current_scan_id: &Uuid, target: &str) -> Result<Option<Uuid>, ApiError> {
+    async fn find_previous_scan(
+        &self,
+        current_scan_id: &Uuid,
+        target: &str,
+    ) -> Result<Option<Uuid>, ApiError> {
         let scans = self.scan_repo.list().await?;
-        
+
         // Find completed scans for the same target, excluding the current scan
         let mut previous_scans: Vec<_> = scans
             .into_iter()
@@ -147,7 +163,11 @@ impl DriftServiceImpl {
 
 #[async_trait]
 impl DriftService for DriftServiceImpl {
-    async fn detect_port_drift(&self, current_scan_id: &Uuid, target: &str) -> Result<Vec<PortDrift>, ApiError> {
+    async fn detect_port_drift(
+        &self,
+        current_scan_id: &Uuid,
+        target: &str,
+    ) -> Result<Vec<PortDrift>, ApiError> {
         // Find the previous scan for comparison
         let previous_scan_id = match self.find_previous_scan(current_scan_id, target).await? {
             Some(id) => id,
@@ -169,7 +189,10 @@ impl DriftService for DriftServiceImpl {
         Ok(drifts)
     }
 
-    async fn generate_drift_findings(&self, drifts: &[PortDrift]) -> Result<Vec<Finding>, ApiError> {
+    async fn generate_drift_findings(
+        &self,
+        drifts: &[PortDrift],
+    ) -> Result<Vec<Finding>, ApiError> {
         let mut findings = Vec::new();
 
         for drift in drifts {
@@ -195,7 +218,11 @@ impl DriftService for DriftServiceImpl {
         Ok(findings)
     }
 
-    async fn update_asset_metadata(&self, _asset_identifier: &str, _port_state: &HashSet<u16>) -> Result<(), ApiError> {
+    async fn update_asset_metadata(
+        &self,
+        _asset_identifier: &str,
+        _port_state: &HashSet<u16>,
+    ) -> Result<(), ApiError> {
         // This would update asset metadata in the asset repository
         // For now, we'll leave this as a placeholder since we need to integrate with AssetRepository
         // In a full implementation, this would:
@@ -242,7 +269,10 @@ mod tests {
                 created_at: Utc::now(),
             };
 
-            self.findings.entry(scan_id).or_insert_with(Vec::new).push(finding);
+            self.findings
+                .entry(scan_id)
+                .or_insert_with(Vec::new)
+                .push(finding);
         }
     }
 
@@ -275,10 +305,17 @@ mod tests {
         }
 
         async fn count_by_scan(&self, scan_id: &Uuid) -> Result<i64, ApiError> {
-            Ok(self.findings.get(scan_id).map(|v| v.len() as i64).unwrap_or(0))
+            Ok(self
+                .findings
+                .get(scan_id)
+                .map(|v| v.len() as i64)
+                .unwrap_or(0))
         }
 
-        async fn filter(&self, _filter: &crate::models::FindingFilter) -> Result<crate::models::FindingListResponse, ApiError> {
+        async fn filter(
+            &self,
+            _filter: &crate::models::FindingFilter,
+        ) -> Result<crate::models::FindingListResponse, ApiError> {
             // Mock implementation returns empty results
             Ok(crate::models::FindingListResponse {
                 findings: Vec::new(),
@@ -298,7 +335,13 @@ mod tests {
             Self { scans: Vec::new() }
         }
 
-        fn add_scan(&mut self, id: Uuid, target: &str, status: ScanStatus, created_at: chrono::DateTime<Utc>) {
+        fn add_scan(
+            &mut self,
+            id: Uuid,
+            target: &str,
+            status: ScanStatus,
+            created_at: chrono::DateTime<Utc>,
+        ) {
             self.scans.push(Scan {
                 id,
                 target: target.to_string(),
@@ -347,7 +390,10 @@ mod tests {
         let service = DriftServiceImpl::new(Arc::new(finding_repo), Arc::new(scan_repo));
 
         let current_scan_id = Uuid::new_v4();
-        let drifts = service.detect_port_drift(&current_scan_id, "example.com").await.unwrap();
+        let drifts = service
+            .detect_port_drift(&current_scan_id, "example.com")
+            .await
+            .unwrap();
 
         assert!(drifts.is_empty());
     }
@@ -364,7 +410,7 @@ mod tests {
         // Set up scans
         let now = Utc::now();
         let earlier = now - chrono::Duration::hours(1);
-        
+
         scan_repo.add_scan(previous_scan_id, target, ScanStatus::Completed, earlier);
         scan_repo.add_scan(current_scan_id, target, ScanStatus::Completed, now);
 
@@ -377,7 +423,10 @@ mod tests {
         finding_repo.add_port_finding(current_scan_id, "192.168.1.1", 8080);
 
         let service = DriftServiceImpl::new(Arc::new(finding_repo), Arc::new(scan_repo));
-        let drifts = service.detect_port_drift(&current_scan_id, target).await.unwrap();
+        let drifts = service
+            .detect_port_drift(&current_scan_id, target)
+            .await
+            .unwrap();
 
         assert_eq!(drifts.len(), 1);
         let drift = &drifts[0];
@@ -400,7 +449,7 @@ mod tests {
         // Set up scans
         let now = Utc::now();
         let earlier = now - chrono::Duration::hours(1);
-        
+
         scan_repo.add_scan(previous_scan_id, target, ScanStatus::Completed, earlier);
         scan_repo.add_scan(current_scan_id, target, ScanStatus::Completed, now);
 
@@ -411,7 +460,10 @@ mod tests {
         finding_repo.add_port_finding(current_scan_id, "192.168.1.1", 443);
 
         let service = DriftServiceImpl::new(Arc::new(finding_repo), Arc::new(scan_repo));
-        let drifts = service.detect_port_drift(&current_scan_id, target).await.unwrap();
+        let drifts = service
+            .detect_port_drift(&current_scan_id, target)
+            .await
+            .unwrap();
 
         assert!(drifts.is_empty());
     }
@@ -422,7 +474,7 @@ mod tests {
         let scan_repo = MockScanRepository::new();
 
         let scan_id = Uuid::new_v4();
-        
+
         // Add port findings for different assets
         finding_repo.add_port_finding(scan_id, "192.168.1.1", 80);
         finding_repo.add_port_finding(scan_id, "192.168.1.1", 443);
@@ -432,7 +484,7 @@ mod tests {
         let states = service.extract_port_states(&scan_id).await.unwrap();
 
         assert_eq!(states.len(), 2);
-        
+
         let asset1_state = states.get("192.168.1.1").unwrap();
         assert_eq!(asset1_state.ports.len(), 2);
         assert!(asset1_state.ports.contains(&80));

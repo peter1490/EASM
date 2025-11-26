@@ -1,9 +1,9 @@
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use serde::{Deserialize, Serialize};
 use sysinfo::System;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,7 +65,7 @@ impl MetricsService {
     pub fn new() -> Self {
         let mut system = System::new_all();
         system.refresh_all();
-        
+
         Self {
             start_time: Instant::now(),
             endpoint_stats: Arc::new(Mutex::new(HashMap::new())),
@@ -75,20 +75,14 @@ impl MetricsService {
     }
 
     /// Record a request for metrics collection
-    pub fn record_request(
-        &self,
-        endpoint: &str,
-        method: &str,
-        duration: Duration,
-        success: bool,
-    ) {
+    pub fn record_request(&self, endpoint: &str, method: &str, duration: Duration, success: bool) {
         let mut stats = self.endpoint_stats.lock().unwrap();
-        let endpoint_stats = stats.entry(endpoint.to_string()).or_insert_with(|| {
-            EndpointStats {
+        let endpoint_stats = stats
+            .entry(endpoint.to_string())
+            .or_insert_with(|| EndpointStats {
                 method: method.to_string(),
                 records: Vec::new(),
-            }
-        });
+            });
 
         endpoint_stats.records.push(RequestRecord {
             timestamp: Instant::now(),
@@ -98,7 +92,9 @@ impl MetricsService {
 
         // Clean old records outside the window
         let cutoff = Instant::now() - self.window_duration;
-        endpoint_stats.records.retain(|record| record.timestamp > cutoff);
+        endpoint_stats
+            .records
+            .retain(|record| record.timestamp > cutoff);
     }
 
     /// Calculate metrics for a set of request records
@@ -119,7 +115,8 @@ impl MetricsService {
         let successful_requests = records.iter().filter(|r| r.success).count() as u64;
         let failed_requests = total_requests - successful_requests;
 
-        let durations: Vec<u64> = records.iter()
+        let durations: Vec<u64> = records
+            .iter()
             .map(|r| r.duration.as_millis() as u64)
             .collect();
 
@@ -155,12 +152,12 @@ impl MetricsService {
     /// Get current system metrics using sysinfo
     fn get_system_metrics(&self) -> SystemMetrics {
         let uptime_seconds = self.start_time.elapsed().as_secs();
-        
+
         // Refresh system info
         let mut system = self.system_monitor.lock().unwrap();
         system.refresh_cpu_all();
         system.refresh_memory();
-        
+
         let memory_usage_bytes = system.used_memory();
         let total_memory_bytes = system.total_memory();
         let cpu_usage_percent = system.global_cpu_usage() as f64;
@@ -177,7 +174,7 @@ impl MetricsService {
     /// Generate a comprehensive performance report
     pub fn generate_report(&self) -> PerformanceReport {
         let stats = self.endpoint_stats.lock().unwrap();
-        
+
         let mut endpoints = Vec::new();
         let mut all_records: Vec<RequestRecord> = Vec::new();
 
@@ -261,10 +258,10 @@ mod tests {
     #[test]
     fn test_record_request() {
         let service = MetricsService::new();
-        
+
         service.record_request("/api/test", "GET", Duration::from_millis(100), true);
         service.record_request("/api/test", "GET", Duration::from_millis(200), false);
-        
+
         let metrics = service.get_endpoint_metrics("/api/test").unwrap();
         assert_eq!(metrics.metrics.total_requests, 2);
         assert_eq!(metrics.metrics.successful_requests, 1);
@@ -275,10 +272,10 @@ mod tests {
     #[test]
     fn test_overall_metrics() {
         let service = MetricsService::new();
-        
+
         service.record_request("/api/test1", "GET", Duration::from_millis(100), true);
         service.record_request("/api/test2", "POST", Duration::from_millis(200), true);
-        
+
         let overall = service.get_overall_metrics();
         assert_eq!(overall.total_requests, 2);
         assert_eq!(overall.successful_requests, 2);
@@ -289,9 +286,9 @@ mod tests {
     #[test]
     fn test_performance_report() {
         let service = MetricsService::new();
-        
+
         service.record_request("/api/test", "GET", Duration::from_millis(100), true);
-        
+
         let report = service.generate_report();
         assert_eq!(report.endpoints.len(), 1);
         assert_eq!(report.overall.total_requests, 1);
@@ -302,10 +299,10 @@ mod tests {
     #[test]
     fn test_clear_metrics() {
         let service = MetricsService::new();
-        
+
         service.record_request("/api/test", "GET", Duration::from_millis(100), true);
         assert_eq!(service.get_endpoint_count(), 1);
-        
+
         service.clear_metrics();
         assert_eq!(service.get_endpoint_count(), 0);
     }
@@ -313,19 +310,19 @@ mod tests {
     #[test]
     fn test_metrics_calculation_edge_cases() {
         let service = MetricsService::new();
-        
+
         // Test with no records
         let empty_metrics = service.calculate_metrics(&[]);
         assert_eq!(empty_metrics.total_requests, 0);
         assert_eq!(empty_metrics.average_response_time_ms, 0.0);
-        
+
         // Test with single record
         let single_record = vec![RequestRecord {
             timestamp: Instant::now(),
             duration: Duration::from_millis(500),
             success: true,
         }];
-        
+
         let single_metrics = service.calculate_metrics(&single_record);
         assert_eq!(single_metrics.total_requests, 1);
         assert_eq!(single_metrics.average_response_time_ms, 500.0);

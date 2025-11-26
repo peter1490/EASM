@@ -11,7 +11,8 @@ pub mod risk_handlers;
 pub mod scan_handlers;
 pub mod search_handlers;
 pub mod security_handlers;
+pub mod settings_handlers;
 pub mod static_handlers;
 
-pub use health_handlers::{health_check, health_check_simple, readiness_check, liveness_check};
+pub use health_handlers::{health_check, health_check_simple, liveness_check, readiness_check};
 pub use static_handlers::{serve_evidence_file, static_files_health_check};

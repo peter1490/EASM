@@ -1,13 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { 
   getHealth, 
   getMetrics, 
   listUsers, 
   updateUserRole, 
+  getSettings,
+  updateSettings,
   type SystemMetrics, 
-  type UserWithRoles 
+  type UserWithRoles,
+  type SettingsResponse,
+  type SettingsView,
 } from "@/app/api";
 import { useAuth } from "@/context/AuthContext";
 import Header from "@/components/Header";
@@ -19,8 +23,10 @@ import Select from "@/components/ui/Select";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import EmptyState from "@/components/ui/EmptyState";
 import Modal from "@/components/ui/Modal";
+import Input from "@/components/ui/Input";
+import Checkbox from "@/components/ui/Checkbox";
 
-type TabType = "status" | "users";
+type TabType = "status" | "users" | "config";
 
 const ROLE_COLORS: Record<string, "error" | "warning" | "info" | "secondary" | "success"> = {
   admin: "error",
@@ -38,6 +44,231 @@ const ROLE_DESCRIPTIONS: Record<string, string> = {
 
 const ALL_ROLES = ["admin", "operator", "analyst", "viewer"];
 
+const HELP_TEXT: Record<string, string> = {
+  google_client_id: "Google OAuth client ID.",
+  google_client_secret: "Google OAuth client secret (kept encrypted).",
+  google_discovery_url: "OIDC discovery endpoint for Google.",
+  google_redirect_uri: "Redirect URL configured in your Google OAuth app.",
+  google_allowed_domains: "Restrict Google sign-ins to these domains (comma separated).",
+  keycloak_client_id: "Keycloak client ID for OIDC.",
+  keycloak_client_secret: "Keycloak client secret (encrypted).",
+  keycloak_discovery_url: "Keycloak OIDC discovery URL.",
+  keycloak_redirect_uri: "Redirect URL configured in Keycloak client.",
+  keycloak_realm: "Realm name for Keycloak if discovery URL is derived.",
+  certspotter_api_token: "API token for CertSpotter certificate search.",
+  virustotal_api_key: "API key for VirusTotal enrichment.",
+  shodan_api_key: "API key for Shodan discovery.",
+  urlscan_api_key: "API key for URLScan (planned).",
+  otx_api_key: "API key for AlienVault OTX (planned).",
+  clearbit_api_key: "API key for Clearbit enrichment (planned).",
+  opencorporates_api_token: "API token for OpenCorporates (planned).",
+  cors_allow_origins: "Allowed origins for browser requests (comma separated).",
+  log_level: "Logging verbosity for backend/frontend.",
+  log_format: "Log output format: json or plain.",
+  rate_limit_enabled: "Enable global request rate limiting.",
+  rate_limit_requests: "Max requests per window per instance.",
+  rate_limit_window_seconds: "Window size in seconds for rate limiting.",
+  http_timeout_seconds: "HTTP client request timeout for probes.",
+  tls_timeout_seconds: "TLS handshake timeout for probes.",
+  dns_concurrency: "Concurrent DNS queries allowed.",
+  rdns_concurrency: "Concurrent reverse DNS queries.",
+  max_concurrent_scans: "Max background scans running concurrently.",
+  max_evidence_bytes: "Maximum allowed upload size for evidence.",
+  evidence_allowed_types: "Allowed MIME types for evidence uploads.",
+  max_cidr_hosts: "Maximum hosts allowed per CIDR scan.",
+  max_discovery_depth: "Maximum recursion depth for discovery pivots.",
+  subdomain_enum_timeout: "Timeout (seconds) for subdomain enumeration.",
+  enable_wayback: "Toggle Wayback Machine integration (planned).",
+  enable_urlscan: "Toggle URLScan integration (planned).",
+  enable_otx: "Toggle OTX integration (planned).",
+  enable_dns_record_expansion: "Expand related DNS records during discovery.",
+  enable_web_crawl: "Enable web crawling for link extraction (planned).",
+  enable_cloud_storage_discovery: "Discover cloud storage buckets (planned).",
+  enable_wikidata: "Toggle Wikidata enrichment (planned).",
+  enable_opencorporates: "Toggle OpenCorporates enrichment (planned).",
+  max_assets_per_discovery: "Cap total assets per discovery run.",
+  min_pivot_confidence: "Minimum confidence required to pivot relationships.",
+  max_orgs_per_domain: "Max organizations pivoted from a domain.",
+  max_domains_per_org: "Max domains pivoted from an organization.",
+};
+
+type SettingsFormState = {
+  google_client_id: string;
+  google_client_secret: string;
+  google_discovery_url: string;
+  google_redirect_uri: string;
+  google_allowed_domains: string;
+  keycloak_client_id: string;
+  keycloak_client_secret: string;
+  keycloak_discovery_url: string;
+  keycloak_redirect_uri: string;
+  keycloak_realm: string;
+  certspotter_api_token: string;
+  virustotal_api_key: string;
+  shodan_api_key: string;
+  urlscan_api_key: string;
+  otx_api_key: string;
+  clearbit_api_key: string;
+  opencorporates_api_token: string;
+  cors_allow_origins: string;
+  log_level: string;
+  log_format: string;
+  rate_limit_enabled: boolean;
+  rate_limit_requests: string;
+  rate_limit_window_seconds: string;
+  http_timeout_seconds: string;
+  tls_timeout_seconds: string;
+  dns_concurrency: string;
+  rdns_concurrency: string;
+  max_concurrent_scans: string;
+  max_evidence_bytes: string;
+  evidence_allowed_types: string;
+  max_cidr_hosts: string;
+  max_discovery_depth: string;
+  subdomain_enum_timeout: string;
+  enable_wayback: boolean;
+  enable_urlscan: boolean;
+  enable_otx: boolean;
+  enable_dns_record_expansion: boolean;
+  enable_web_crawl: boolean;
+  enable_cloud_storage_discovery: boolean;
+  enable_wikidata: boolean;
+  enable_opencorporates: boolean;
+  max_assets_per_discovery: string;
+  min_pivot_confidence: string;
+  max_orgs_per_domain: string;
+  max_domains_per_org: string;
+};
+
+const createEmptySettingsForm = (): SettingsFormState => ({
+  google_client_id: "",
+  google_client_secret: "",
+  google_discovery_url: "",
+  google_redirect_uri: "",
+  google_allowed_domains: "",
+  keycloak_client_id: "",
+  keycloak_client_secret: "",
+  keycloak_discovery_url: "",
+  keycloak_redirect_uri: "",
+  keycloak_realm: "",
+  certspotter_api_token: "",
+  virustotal_api_key: "",
+  shodan_api_key: "",
+  urlscan_api_key: "",
+  otx_api_key: "",
+  clearbit_api_key: "",
+  opencorporates_api_token: "",
+  cors_allow_origins: "",
+  log_level: "INFO",
+  log_format: "json",
+  rate_limit_enabled: true,
+  rate_limit_requests: "",
+  rate_limit_window_seconds: "",
+  http_timeout_seconds: "",
+  tls_timeout_seconds: "",
+  dns_concurrency: "",
+  rdns_concurrency: "",
+  max_concurrent_scans: "",
+  max_evidence_bytes: "",
+  evidence_allowed_types: "",
+  max_cidr_hosts: "",
+  max_discovery_depth: "",
+  subdomain_enum_timeout: "",
+  enable_wayback: true,
+  enable_urlscan: false,
+  enable_otx: false,
+  enable_dns_record_expansion: true,
+  enable_web_crawl: true,
+  enable_cloud_storage_discovery: true,
+  enable_wikidata: true,
+  enable_opencorporates: false,
+  max_assets_per_discovery: "",
+  min_pivot_confidence: "",
+  max_orgs_per_domain: "",
+  max_domains_per_org: "",
+});
+
+const listToString = (items: string[]) => items.join(", ");
+
+const settingsToForm = (view: SettingsView): SettingsFormState => ({
+  google_client_id: view.google_client_id || "",
+  google_client_secret: view.google_client_secret.value || "",
+  google_discovery_url: view.google_discovery_url || "",
+  google_redirect_uri: view.google_redirect_uri || "",
+  google_allowed_domains: listToString(view.google_allowed_domains),
+  keycloak_client_id: view.keycloak_client_id || "",
+  keycloak_client_secret: view.keycloak_client_secret.value || "",
+  keycloak_discovery_url: view.keycloak_discovery_url || "",
+  keycloak_redirect_uri: view.keycloak_redirect_uri || "",
+  keycloak_realm: view.keycloak_realm || "",
+  certspotter_api_token: view.certspotter_api_token.value || "",
+  virustotal_api_key: view.virustotal_api_key.value || "",
+  shodan_api_key: view.shodan_api_key.value || "",
+  urlscan_api_key: view.urlscan_api_key.value || "",
+  otx_api_key: view.otx_api_key.value || "",
+  clearbit_api_key: view.clearbit_api_key.value || "",
+  opencorporates_api_token: view.opencorporates_api_token.value || "",
+  cors_allow_origins: listToString(view.cors_allow_origins),
+  log_level: view.log_level,
+  log_format: view.log_format,
+  rate_limit_enabled: view.rate_limit_enabled,
+  rate_limit_requests: view.rate_limit_requests.toString(),
+  rate_limit_window_seconds: view.rate_limit_window_seconds.toString(),
+  http_timeout_seconds: view.http_timeout_seconds.toString(),
+  tls_timeout_seconds: view.tls_timeout_seconds.toString(),
+  dns_concurrency: view.dns_concurrency.toString(),
+  rdns_concurrency: view.rdns_concurrency.toString(),
+  max_concurrent_scans: view.max_concurrent_scans.toString(),
+  max_evidence_bytes: view.max_evidence_bytes.toString(),
+  evidence_allowed_types: listToString(view.evidence_allowed_types),
+  max_cidr_hosts: view.max_cidr_hosts.toString(),
+  max_discovery_depth: view.max_discovery_depth.toString(),
+  subdomain_enum_timeout: view.subdomain_enum_timeout.toString(),
+  enable_wayback: view.enable_wayback,
+  enable_urlscan: view.enable_urlscan,
+  enable_otx: view.enable_otx,
+  enable_dns_record_expansion: view.enable_dns_record_expansion,
+  enable_web_crawl: view.enable_web_crawl,
+  enable_cloud_storage_discovery: view.enable_cloud_storage_discovery,
+  enable_wikidata: view.enable_wikidata,
+  enable_opencorporates: view.enable_opencorporates,
+  max_assets_per_discovery: view.max_assets_per_discovery.toString(),
+  min_pivot_confidence: view.min_pivot_confidence.toString(),
+  max_orgs_per_domain: view.max_orgs_per_domain.toString(),
+  max_domains_per_org: view.max_domains_per_org.toString(),
+});
+
+const splitList = (value: string): string[] =>
+  value
+    .split(/[,\n]/)
+    .map((v) => v.trim())
+    .filter((v) => v.length > 0);
+
+const toNumber = (value: string): number | undefined => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const InfoLabel = ({ text, keyName }: { text: string; keyName: string }) => {
+  const help = HELP_TEXT[keyName] || "No description available";
+  return (
+    <div className="flex items-center gap-2">
+      <span>{text}</span>
+      <span className="relative inline-flex items-center group z-30">
+        <span
+          className="inline-flex items-center justify-center w-4 h-4 text-xs rounded-full border border-border text-muted-foreground hover:text-foreground cursor-help bg-background/90"
+          aria-label={help}
+        >
+          i
+        </span>
+        <span className="pointer-events-none absolute left-full top-1/2 -translate-y-1/2 ml-2 hidden whitespace-pre-wrap rounded-md border border-border bg-popover/95 backdrop-blur-sm px-3 py-2 text-xs text-foreground shadow-xl ring-1 ring-border group-hover:block group-focus-within:block z-40">
+          {help}
+        </span>
+      </span>
+    </div>
+  );
+};
+
 export default function SettingsPage() {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<TabType>("status");
@@ -47,6 +278,13 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [updating, setUpdating] = useState<string | null>(null);
+  const [settingsData, setSettingsData] = useState<SettingsResponse | null>(null);
+  const [settingsForm, setSettingsForm] = useState<SettingsFormState>(createEmptySettingsForm());
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [secretsRevealed, setSecretsRevealed] = useState(false);
+  const [secretTouched, setSecretTouched] = useState<Record<string, boolean>>({});
+  const [secretVisibility, setSecretVisibility] = useState<Record<string, boolean>>({});
   
   // Edit user modal
   const [selectedUser, setSelectedUser] = useState<UserWithRoles | null>(null);
@@ -64,6 +302,8 @@ export default function SettingsPage() {
       if (isAdmin) {
         const usersData = await listUsers();
         setUsers(usersData);
+      } else {
+        setUsers([]);
       }
       
       setError(null);
@@ -74,8 +314,29 @@ export default function SettingsPage() {
     }
   }
 
+  async function loadSettings(reveal = false) {
+    if (!isAdmin) return;
+    try {
+      setSettingsLoading(true);
+      const data = await getSettings(reveal);
+      setSettingsData(data);
+      setSettingsForm(settingsToForm(data.settings));
+      setSecretsRevealed(reveal);
+      setSecretTouched({});
+      setSecretVisibility({});
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSettingsLoading(false);
+    }
+  }
+
   useEffect(() => {
     loadData();
+    if (isAdmin) {
+      loadSettings(false);
+    }
     const iv = setInterval(loadData, 10000);
     return () => clearInterval(iv);
   }, [isAdmin]);
@@ -93,6 +354,141 @@ export default function SettingsPage() {
       setUpdating(null);
     }
   }
+
+  function updateFormField<K extends keyof SettingsFormState>(key: K, value: SettingsFormState[K]) {
+    setSettingsForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function buildSettingsPayload() {
+    const payload: Parameters<typeof updateSettings>[0] = {
+      google_client_id: settingsForm.google_client_id || null,
+      google_discovery_url: settingsForm.google_discovery_url || null,
+      google_redirect_uri: settingsForm.google_redirect_uri || null,
+      google_allowed_domains: splitList(settingsForm.google_allowed_domains),
+      keycloak_client_id: settingsForm.keycloak_client_id || null,
+      keycloak_discovery_url: settingsForm.keycloak_discovery_url || null,
+      keycloak_redirect_uri: settingsForm.keycloak_redirect_uri || null,
+      keycloak_realm: settingsForm.keycloak_realm || null,
+      cors_allow_origins: splitList(settingsForm.cors_allow_origins),
+      log_level: settingsForm.log_level,
+      log_format: settingsForm.log_format,
+      rate_limit_enabled: settingsForm.rate_limit_enabled,
+      rate_limit_requests: toNumber(settingsForm.rate_limit_requests),
+      rate_limit_window_seconds: toNumber(settingsForm.rate_limit_window_seconds),
+      http_timeout_seconds: toNumber(settingsForm.http_timeout_seconds),
+      tls_timeout_seconds: toNumber(settingsForm.tls_timeout_seconds),
+      dns_concurrency: toNumber(settingsForm.dns_concurrency),
+      rdns_concurrency: toNumber(settingsForm.rdns_concurrency),
+      max_concurrent_scans: toNumber(settingsForm.max_concurrent_scans),
+      max_evidence_bytes: toNumber(settingsForm.max_evidence_bytes),
+      evidence_allowed_types: splitList(settingsForm.evidence_allowed_types),
+      max_cidr_hosts: toNumber(settingsForm.max_cidr_hosts),
+      max_discovery_depth: toNumber(settingsForm.max_discovery_depth),
+      subdomain_enum_timeout: toNumber(settingsForm.subdomain_enum_timeout),
+      enable_wayback: settingsForm.enable_wayback,
+      enable_urlscan: settingsForm.enable_urlscan,
+      enable_otx: settingsForm.enable_otx,
+      enable_dns_record_expansion: settingsForm.enable_dns_record_expansion,
+      enable_web_crawl: settingsForm.enable_web_crawl,
+      enable_cloud_storage_discovery: settingsForm.enable_cloud_storage_discovery,
+      enable_wikidata: settingsForm.enable_wikidata,
+      enable_opencorporates: settingsForm.enable_opencorporates,
+      max_assets_per_discovery: toNumber(settingsForm.max_assets_per_discovery),
+      min_pivot_confidence: toNumber(settingsForm.min_pivot_confidence),
+      max_orgs_per_domain: toNumber(settingsForm.max_orgs_per_domain),
+      max_domains_per_org: toNumber(settingsForm.max_domains_per_org),
+    };
+
+    if (secretTouched.google_client_secret) {
+      payload.google_client_secret = settingsForm.google_client_secret || null;
+    }
+    if (secretTouched.keycloak_client_secret) {
+      payload.keycloak_client_secret = settingsForm.keycloak_client_secret || null;
+    }
+    if (secretTouched.certspotter_api_token) {
+      payload.certspotter_api_token = settingsForm.certspotter_api_token || null;
+    }
+    if (secretTouched.virustotal_api_key) {
+      payload.virustotal_api_key = settingsForm.virustotal_api_key || null;
+    }
+    if (secretTouched.shodan_api_key) {
+      payload.shodan_api_key = settingsForm.shodan_api_key || null;
+    }
+    if (secretTouched.urlscan_api_key) {
+      payload.urlscan_api_key = settingsForm.urlscan_api_key || null;
+    }
+    if (secretTouched.otx_api_key) {
+      payload.otx_api_key = settingsForm.otx_api_key || null;
+    }
+    if (secretTouched.clearbit_api_key) {
+      payload.clearbit_api_key = settingsForm.clearbit_api_key || null;
+    }
+    if (secretTouched.opencorporates_api_token) {
+      payload.opencorporates_api_token = settingsForm.opencorporates_api_token || null;
+    }
+
+    return payload;
+  }
+
+  async function handleSaveSettings() {
+    try {
+      setSettingsSaving(true);
+      const payload = buildSettingsPayload();
+      const data = await updateSettings(payload, secretsRevealed);
+      setSettingsData(data);
+      setSettingsForm(settingsToForm(data.settings));
+      setSecretTouched({});
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSettingsSaving(false);
+    }
+  }
+
+  async function handleRevealSecrets() {
+    await loadSettings(true);
+  }
+
+  function resetSettingsForm() {
+    if (settingsData) {
+      setSettingsForm(settingsToForm(settingsData.settings));
+      setSecretTouched({});
+    }
+  }
+
+  const toggleSecretVisibility = (field: string) => {
+    if (!secretsRevealed) return;
+    setSecretVisibility((prev) => ({ ...prev, [field]: !prev[field] }));
+  };
+
+  const secretInput = (
+    field: keyof SettingsFormState,
+    label: string,
+    placeholder?: string
+  ) => (
+    <Input
+      label={<InfoLabel text={label} keyName={field} />}
+      type={secretVisibility[field] && secretsRevealed ? "text" : "password"}
+      value={settingsForm[field] as string}
+      placeholder={placeholder}
+      onChange={(e) => {
+        updateFormField(field, e.target.value as never);
+        setSecretTouched((prev) => ({ ...prev, [field]: true }));
+      }}
+      rightSlot={
+        <button
+          type="button"
+          className={`text-xs px-2 py-1 rounded ${secretsRevealed ? "text-foreground" : "text-muted-foreground cursor-not-allowed"}`}
+          onClick={() => toggleSecretVisibility(field)}
+          disabled={!secretsRevealed}
+          title={secretsRevealed ? "Toggle visibility" : "Click Reveal Secrets first"}
+        >
+          {secretVisibility[field] && secretsRevealed ? "🙈" : "👁"}
+        </button>
+      }
+    />
+  );
 
   async function handleRemoveRole(userId: string, role: string) {
     setUpdating(userId);
@@ -123,7 +519,10 @@ export default function SettingsPage() {
 
   const tabs = [
     { id: "status" as TabType, label: "System Status", icon: "⚙️" },
-    ...(isAdmin ? [{ id: "users" as TabType, label: "User Management", icon: "👥", badge: users.length }] : []),
+    ...(isAdmin ? [
+      { id: "config" as TabType, label: "Configuration", icon: "🛡️" },
+      { id: "users" as TabType, label: "User Management", icon: "👥", badge: users.length },
+    ] : []),
   ];
 
   return (
@@ -290,6 +689,350 @@ export default function SettingsPage() {
             </div>
           ) : null}
         </>
+      )}
+
+      {/* Configuration Tab */}
+      {activeTab === "config" && isAdmin && (
+        <div className="space-y-6 stagger-children">
+          {settingsLoading && !settingsData ? (
+            <div className="flex items-center justify-center py-12">
+              <LoadingSpinner size="lg" />
+            </div>
+          ) : null}
+
+          {settingsData && (
+            <>
+              <Card>
+                <CardHeader className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <CardTitle>Configuration</CardTitle>
+                    <CardDescription>
+                      Application, authentication, and discovery controls. Secrets stay hidden unless you choose to reveal them.
+                    </CardDescription>
+                  </div>
+                  <div className="flex gap-3 flex-wrap">
+                    <Button variant="outline" onClick={handleRevealSecrets} disabled={settingsLoading}>
+                      {secretsRevealed ? "Refresh Secrets" : "Reveal Secrets"}
+                    </Button>
+                    <Button variant="outline" onClick={resetSettingsForm} disabled={settingsLoading || settingsSaving}>
+                      Reset Changes
+                    </Button>
+                    <Button onClick={handleSaveSettings} disabled={settingsSaving || settingsLoading}>
+                      {settingsSaving ? "Saving..." : "Save Settings"}
+                    </Button>
+                  </div>
+                </CardHeader>
+                <CardContent className="flex flex-wrap gap-4 text-sm text-muted-foreground">
+                  <span>
+                    Last updated: {new Date(settingsData.updated_at).toLocaleString()}
+                  </span>
+                  <span>Secrets revealed: {secretsRevealed ? "yes" : "no"}</span>
+                  {settingsData.updated_by && (
+                    <span className="font-mono text-xs bg-muted px-2 py-1 rounded">
+                      Updated by {settingsData.updated_by.slice(0, 8)}...
+                    </span>
+                  )}
+                </CardContent>
+              </Card>
+
+              <div className="grid gap-6 md:grid-cols-2">
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Authentication & SSO</CardTitle>
+                    <CardDescription>Google and Keycloak identity providers</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="grid md:grid-cols-2 gap-4">
+                      <Input
+                        label={<InfoLabel text="Google Client ID" keyName="google_client_id" />}
+                        value={settingsForm.google_client_id}
+                        onChange={(e) => updateFormField("google_client_id", e.target.value)}
+                        placeholder="client-id.apps.googleusercontent.com"
+                      />
+                      {secretInput("google_client_secret", "Google Client Secret", settingsData.settings.google_client_secret.is_set ? "••••••••" : "Enter secret")}
+                    </div>
+                    <div className="grid md:grid-cols-2 gap-4">
+                      <Input
+                        label={<InfoLabel text="Google Discovery URL" keyName="google_discovery_url" />}
+                        value={settingsForm.google_discovery_url}
+                        onChange={(e) => updateFormField("google_discovery_url", e.target.value)}
+                      />
+                      <Input
+                        label={<InfoLabel text="Google Redirect URI" keyName="google_redirect_uri" />}
+                        value={settingsForm.google_redirect_uri}
+                        onChange={(e) => updateFormField("google_redirect_uri", e.target.value)}
+                      />
+                    </div>
+                    <Input
+                      label={<InfoLabel text="Google Allowed Domains" keyName="google_allowed_domains" />}
+                      value={settingsForm.google_allowed_domains}
+                      onChange={(e) => updateFormField("google_allowed_domains", e.target.value)}
+                      placeholder="comma separated domains"
+                    />
+                    <div className="grid md:grid-cols-2 gap-4 pt-2">
+                      <Input
+                        label={<InfoLabel text="Keycloak Client ID" keyName="keycloak_client_id" />}
+                        value={settingsForm.keycloak_client_id}
+                        onChange={(e) => updateFormField("keycloak_client_id", e.target.value)}
+                      />
+                      {secretInput("keycloak_client_secret", "Keycloak Client Secret", settingsData.settings.keycloak_client_secret.is_set ? "••••••••" : "Enter secret")}
+                    </div>
+                    <div className="grid md:grid-cols-2 gap-4">
+                      <Input
+                        label={<InfoLabel text="Keycloak Discovery URL" keyName="keycloak_discovery_url" />}
+                        value={settingsForm.keycloak_discovery_url}
+                        onChange={(e) => updateFormField("keycloak_discovery_url", e.target.value)}
+                        placeholder="https://idp.example.com/realms/<realm>"
+                      />
+                      <Input
+                        label={<InfoLabel text="Keycloak Redirect URI" keyName="keycloak_redirect_uri" />}
+                        value={settingsForm.keycloak_redirect_uri}
+                        onChange={(e) => updateFormField("keycloak_redirect_uri", e.target.value)}
+                      />
+                    </div>
+                    <Input
+                      label={<InfoLabel text="Keycloak Realm" keyName="keycloak_realm" />}
+                      value={settingsForm.keycloak_realm}
+                      onChange={(e) => updateFormField("keycloak_realm", e.target.value)}
+                    />
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle>External API Keys</CardTitle>
+                    <CardDescription>Threat intel and enrichment providers</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    {[
+                      { key: "certspotter_api_token", label: "CertSpotter API Token" },
+                      { key: "virustotal_api_key", label: "VirusTotal API Key" },
+                      { key: "shodan_api_key", label: "Shodan API Key" },
+                      { key: "urlscan_api_key", label: "URLScan API Key" },
+                      { key: "otx_api_key", label: "OTX API Key" },
+                      { key: "clearbit_api_key", label: "Clearbit API Key" },
+                      { key: "opencorporates_api_token", label: "OpenCorporates Token" },
+                    ].map((field) => (
+                      <div key={field.key}>
+                        {secretInput(
+                          field.key as keyof SettingsFormState,
+                          field.label,
+                          (settingsData.settings as Record<string, any>)[field.key].is_set ? "••••••••" : "Not set"
+                        )}
+                        <div className="text-xs text-muted-foreground mt-1">
+                          {(settingsData.settings as Record<string, any>)[field.key].is_set ? "Stored" : "Not set"}
+                        </div>
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+              </div>
+
+              <div className="grid gap-6 md:grid-cols-2">
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Application Controls</CardTitle>
+                    <CardDescription>CORS, logging, rate limits, and performance</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <Input
+                      label={<InfoLabel text="CORS Allow Origins" keyName="cors_allow_origins" />}
+                      value={settingsForm.cors_allow_origins}
+                      onChange={(e) => updateFormField("cors_allow_origins", e.target.value)}
+                      placeholder="http://localhost:3000, http://127.0.0.1:3000"
+                    />
+                    <div className="grid md:grid-cols-2 gap-4">
+                      <Input
+                        label={<InfoLabel text="Log Level" keyName="log_level" />}
+                        value={settingsForm.log_level}
+                        onChange={(e) => updateFormField("log_level", e.target.value.toUpperCase())}
+                        placeholder="INFO"
+                      />
+                      <Input
+                        label={<InfoLabel text="Log Format" keyName="log_format" />}
+                        value={settingsForm.log_format}
+                        onChange={(e) => updateFormField("log_format", e.target.value)}
+                        placeholder="json or plain"
+                      />
+                    </div>
+                    <div className="grid md:grid-cols-2 gap-4">
+                      <Input
+                        label={<InfoLabel text="Rate Limit Requests" keyName="rate_limit_requests" />}
+                        type="number"
+                        value={settingsForm.rate_limit_requests}
+                        onChange={(e) => updateFormField("rate_limit_requests", e.target.value)}
+                      />
+                      <Input
+                        label={<InfoLabel text="Rate Limit Window (seconds)" keyName="rate_limit_window_seconds" />}
+                        type="number"
+                        value={settingsForm.rate_limit_window_seconds}
+                        onChange={(e) => updateFormField("rate_limit_window_seconds", e.target.value)}
+                      />
+                    </div>
+                    <Checkbox
+                      checked={settingsForm.rate_limit_enabled}
+                      onChange={(checked) => updateFormField("rate_limit_enabled", checked)}
+                      label={<InfoLabel text="Enable rate limiting" keyName="rate_limit_enabled" />}
+                    />
+                    <div className="grid md:grid-cols-2 gap-4">
+                      <Input
+                        label={<InfoLabel text="HTTP Timeout (s)" keyName="http_timeout_seconds" />}
+                        type="number"
+                        value={settingsForm.http_timeout_seconds}
+                        onChange={(e) => updateFormField("http_timeout_seconds", e.target.value)}
+                      />
+                      <Input
+                        label={<InfoLabel text="TLS Timeout (s)" keyName="tls_timeout_seconds" />}
+                        type="number"
+                        value={settingsForm.tls_timeout_seconds}
+                        onChange={(e) => updateFormField("tls_timeout_seconds", e.target.value)}
+                      />
+                    </div>
+                    <div className="grid md:grid-cols-2 gap-4">
+                      <Input
+                        label={<InfoLabel text="DNS Concurrency" keyName="dns_concurrency" />}
+                        type="number"
+                        value={settingsForm.dns_concurrency}
+                        onChange={(e) => updateFormField("dns_concurrency", e.target.value)}
+                      />
+                      <Input
+                        label={<InfoLabel text="rDNS Concurrency" keyName="rdns_concurrency" />}
+                        type="number"
+                        value={settingsForm.rdns_concurrency}
+                        onChange={(e) => updateFormField("rdns_concurrency", e.target.value)}
+                      />
+                    </div>
+                    <Input
+                      label={<InfoLabel text="Max Concurrent Scans" keyName="max_concurrent_scans" />}
+                      type="number"
+                      value={settingsForm.max_concurrent_scans}
+                      onChange={(e) => updateFormField("max_concurrent_scans", e.target.value)}
+                    />
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Evidence, Discovery & Limits</CardTitle>
+                    <CardDescription>Storage, recursion, and performance guardrails</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <Input
+                      label={<InfoLabel text="Max Evidence Size (bytes)" keyName="max_evidence_bytes" />}
+                      type="number"
+                      value={settingsForm.max_evidence_bytes}
+                      onChange={(e) => updateFormField("max_evidence_bytes", e.target.value)}
+                    />
+                    <Input
+                      label={<InfoLabel text="Allowed Evidence Types" keyName="evidence_allowed_types" />}
+                      value={settingsForm.evidence_allowed_types}
+                      onChange={(e) => updateFormField("evidence_allowed_types", e.target.value)}
+                      placeholder="image/png, image/jpeg, application/pdf"
+                    />
+                    <div className="grid md:grid-cols-2 gap-4">
+                      <Input
+                        label={<InfoLabel text="Max CIDR Hosts" keyName="max_cidr_hosts" />}
+                        type="number"
+                        value={settingsForm.max_cidr_hosts}
+                        onChange={(e) => updateFormField("max_cidr_hosts", e.target.value)}
+                      />
+                      <Input
+                        label={<InfoLabel text="Max Discovery Depth" keyName="max_discovery_depth" />}
+                        type="number"
+                        value={settingsForm.max_discovery_depth}
+                        onChange={(e) => updateFormField("max_discovery_depth", e.target.value)}
+                      />
+                    </div>
+                    <Input
+                      label={<InfoLabel text="Subdomain Enumeration Timeout (s)" keyName="subdomain_enum_timeout" />}
+                      type="number"
+                      value={settingsForm.subdomain_enum_timeout}
+                      onChange={(e) => updateFormField("subdomain_enum_timeout", e.target.value)}
+                    />
+                    <div className="grid md:grid-cols-2 gap-4">
+                      <Input
+                        label={<InfoLabel text="Max Assets per Discovery" keyName="max_assets_per_discovery" />}
+                        type="number"
+                        value={settingsForm.max_assets_per_discovery}
+                        onChange={(e) => updateFormField("max_assets_per_discovery", e.target.value)}
+                      />
+                      <Input
+                        label={<InfoLabel text="Min Pivot Confidence" keyName="min_pivot_confidence" />}
+                        type="number"
+                        step="0.01"
+                        value={settingsForm.min_pivot_confidence}
+                        onChange={(e) => updateFormField("min_pivot_confidence", e.target.value)}
+                      />
+                    </div>
+                    <div className="grid md:grid-cols-2 gap-4">
+                      <Input
+                        label={<InfoLabel text="Max Orgs per Domain" keyName="max_orgs_per_domain" />}
+                        type="number"
+                        value={settingsForm.max_orgs_per_domain}
+                        onChange={(e) => updateFormField("max_orgs_per_domain", e.target.value)}
+                      />
+                      <Input
+                        label={<InfoLabel text="Max Domains per Org" keyName="max_domains_per_org" />}
+                        type="number"
+                        value={settingsForm.max_domains_per_org}
+                        onChange={(e) => updateFormField("max_domains_per_org", e.target.value)}
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>OSINT Toggles</CardTitle>
+                  <CardDescription>Enable or disable enrichment providers</CardDescription>
+                </CardHeader>
+                <CardContent className="grid md:grid-cols-3 gap-4">
+                  <Checkbox
+                    checked={settingsForm.enable_wayback}
+                    onChange={(checked) => updateFormField("enable_wayback", checked)}
+                    label={<InfoLabel text="Wayback Machine" keyName="enable_wayback" />}
+                  />
+                  <Checkbox
+                    checked={settingsForm.enable_urlscan}
+                    onChange={(checked) => updateFormField("enable_urlscan", checked)}
+                    label={<InfoLabel text="URLScan" keyName="enable_urlscan" />}
+                  />
+                  <Checkbox
+                    checked={settingsForm.enable_otx}
+                    onChange={(checked) => updateFormField("enable_otx", checked)}
+                    label={<InfoLabel text="OTX" keyName="enable_otx" />}
+                  />
+                  <Checkbox
+                    checked={settingsForm.enable_dns_record_expansion}
+                    onChange={(checked) => updateFormField("enable_dns_record_expansion", checked)}
+                    label={<InfoLabel text="DNS Record Expansion" keyName="enable_dns_record_expansion" />}
+                  />
+                  <Checkbox
+                    checked={settingsForm.enable_web_crawl}
+                    onChange={(checked) => updateFormField("enable_web_crawl", checked)}
+                    label={<InfoLabel text="Web Crawl" keyName="enable_web_crawl" />}
+                  />
+                  <Checkbox
+                    checked={settingsForm.enable_cloud_storage_discovery}
+                    onChange={(checked) => updateFormField("enable_cloud_storage_discovery", checked)}
+                    label={<InfoLabel text="Cloud Storage Discovery" keyName="enable_cloud_storage_discovery" />}
+                  />
+                  <Checkbox
+                    checked={settingsForm.enable_wikidata}
+                    onChange={(checked) => updateFormField("enable_wikidata", checked)}
+                    label={<InfoLabel text="Wikidata" keyName="enable_wikidata" />}
+                  />
+                  <Checkbox
+                    checked={settingsForm.enable_opencorporates}
+                    onChange={(checked) => updateFormField("enable_opencorporates", checked)}
+                    label={<InfoLabel text="OpenCorporates" keyName="enable_opencorporates" />}
+                  />
+                </CardContent>
+              </Card>
+            </>
+          )}
+        </div>
       )}
 
       {/* User Management Tab */}

@@ -16,8 +16,10 @@ pub use confidence::ConfidenceScorer;
 pub use discovery_service::{DiscoveryService, DiscoveryStatus};
 pub use drift_service::{DriftService, DriftServiceImpl};
 pub use metrics_service::MetricsService;
-pub use risk_service::{RiskService, RiskRecalculationResult};
+pub use risk_service::{RiskRecalculationResult, RiskService};
 pub use scan_service::ScanService;
-pub use search_service::{SearchService, ElasticsearchService, SearchQuery, IndexedAsset, IndexedFinding};
+pub use search_service::{
+    ElasticsearchService, IndexedAsset, IndexedFinding, SearchQuery, SearchService,
+};
 pub use security_scan_service::SecurityScanService;
 pub use task_manager::TaskManager;

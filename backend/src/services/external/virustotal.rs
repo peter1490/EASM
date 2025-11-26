@@ -1,5 +1,5 @@
-use crate::error::ApiError;
 use super::rate_limited_client::RateLimitedClient;
+use crate::error::ApiError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -99,46 +99,55 @@ impl VirusTotalClient {
     pub fn new(api_key: Option<String>) -> Result<Self, ApiError> {
         // Free tier: 4 requests per minute, so roughly 1 request per 15 seconds
         let client = RateLimitedClient::new(1, 3)?;
-        
-        Ok(Self {
-            client,
-            api_key,
-        })
+
+        Ok(Self { client, api_key })
     }
 
     /// Get domain report from VirusTotal
-    pub async fn get_domain_report(&self, domain: &str) -> Result<VirusTotalDomainReport, ApiError> {
-        let api_key = self.api_key.as_ref()
-            .ok_or_else(|| ApiError::ExternalService("VirusTotal API key not configured".to_string()))?;
+    pub async fn get_domain_report(
+        &self,
+        domain: &str,
+    ) -> Result<VirusTotalDomainReport, ApiError> {
+        let api_key = self.api_key.as_ref().ok_or_else(|| {
+            ApiError::ExternalService("VirusTotal API key not configured".to_string())
+        })?;
 
         if domain.is_empty() {
             return Err(ApiError::Validation("Domain cannot be empty".to_string()));
         }
 
         let url = format!("https://www.virustotal.com/api/v3/domains/{}", domain);
-        
+
         tracing::debug!("Querying VirusTotal domain: {}", domain);
-        
+
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("x-apikey", reqwest::header::HeaderValue::from_str(api_key)
-            .map_err(|e| ApiError::Validation(format!("Invalid API key format: {}", e)))?);
-        
+        headers.insert(
+            "x-apikey",
+            reqwest::header::HeaderValue::from_str(api_key)
+                .map_err(|e| ApiError::Validation(format!("Invalid API key format: {}", e)))?,
+        );
+
         let response = self.client.get_with_headers(&url, headers).await?;
         let response_text = response.text().await?;
-        
-        let vt_response: VirusTotalResponse<VirusTotalDomainReport> = serde_json::from_str(&response_text)
-            .map_err(|e| ApiError::ExternalService(format!("Failed to parse VirusTotal response: {}", e)))?;
+
+        let vt_response: VirusTotalResponse<VirusTotalDomainReport> =
+            serde_json::from_str(&response_text).map_err(|e| {
+                ApiError::ExternalService(format!("Failed to parse VirusTotal response: {}", e))
+            })?;
 
         Ok(vt_response.data)
     }
 
     /// Get IP address report from VirusTotal
     pub async fn get_ip_report(&self, ip: &str) -> Result<VirusTotalIpReport, ApiError> {
-        let api_key = self.api_key.as_ref()
-            .ok_or_else(|| ApiError::ExternalService("VirusTotal API key not configured".to_string()))?;
+        let api_key = self.api_key.as_ref().ok_or_else(|| {
+            ApiError::ExternalService("VirusTotal API key not configured".to_string())
+        })?;
 
         if ip.is_empty() {
-            return Err(ApiError::Validation("IP address cannot be empty".to_string()));
+            return Err(ApiError::Validation(
+                "IP address cannot be empty".to_string(),
+            ));
         }
 
         // Basic IP validation
@@ -147,51 +156,73 @@ impl VirusTotalClient {
         }
 
         let url = format!("https://www.virustotal.com/api/v3/ip_addresses/{}", ip);
-        
+
         tracing::debug!("Querying VirusTotal IP: {}", ip);
-        
+
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("x-apikey", reqwest::header::HeaderValue::from_str(api_key)
-            .map_err(|e| ApiError::Validation(format!("Invalid API key format: {}", e)))?);
-        
+        headers.insert(
+            "x-apikey",
+            reqwest::header::HeaderValue::from_str(api_key)
+                .map_err(|e| ApiError::Validation(format!("Invalid API key format: {}", e)))?,
+        );
+
         let response = self.client.get_with_headers(&url, headers).await?;
         let response_text = response.text().await?;
-        
-        let vt_response: VirusTotalResponse<VirusTotalIpReport> = serde_json::from_str(&response_text)
-            .map_err(|e| ApiError::ExternalService(format!("Failed to parse VirusTotal response: {}", e)))?;
+
+        let vt_response: VirusTotalResponse<VirusTotalIpReport> =
+            serde_json::from_str(&response_text).map_err(|e| {
+                ApiError::ExternalService(format!("Failed to parse VirusTotal response: {}", e))
+            })?;
 
         Ok(vt_response.data)
     }
 
     /// Get subdomains for a domain from VirusTotal
     pub async fn get_subdomains(&self, domain: &str) -> Result<Vec<String>, ApiError> {
-        let api_key = self.api_key.as_ref()
-            .ok_or_else(|| ApiError::ExternalService("VirusTotal API key not configured".to_string()))?;
+        let api_key = self.api_key.as_ref().ok_or_else(|| {
+            ApiError::ExternalService("VirusTotal API key not configured".to_string())
+        })?;
 
         if domain.is_empty() {
             return Err(ApiError::Validation("Domain cannot be empty".to_string()));
         }
 
-        let url = format!("https://www.virustotal.com/api/v3/domains/{}/subdomains", domain);
-        
+        let url = format!(
+            "https://www.virustotal.com/api/v3/domains/{}/subdomains",
+            domain
+        );
+
         tracing::debug!("Querying VirusTotal subdomains: {}", domain);
-        
+
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("x-apikey", reqwest::header::HeaderValue::from_str(api_key)
-            .map_err(|e| ApiError::Validation(format!("Invalid API key format: {}", e)))?);
-        
+        headers.insert(
+            "x-apikey",
+            reqwest::header::HeaderValue::from_str(api_key)
+                .map_err(|e| ApiError::Validation(format!("Invalid API key format: {}", e)))?,
+        );
+
         let response = self.client.get_with_headers(&url, headers).await?;
         let response_text = response.text().await?;
-        
-        let vt_response: VirusTotalListResponse<VirusTotalDomainReport> = serde_json::from_str(&response_text)
-            .map_err(|e| ApiError::ExternalService(format!("Failed to parse VirusTotal subdomains response: {}", e)))?;
 
-        let subdomains: Vec<String> = vt_response.data
+        let vt_response: VirusTotalListResponse<VirusTotalDomainReport> =
+            serde_json::from_str(&response_text).map_err(|e| {
+                ApiError::ExternalService(format!(
+                    "Failed to parse VirusTotal subdomains response: {}",
+                    e
+                ))
+            })?;
+
+        let subdomains: Vec<String> = vt_response
+            .data
             .into_iter()
             .map(|report| report.id)
             .collect();
 
-        tracing::info!("Found {} subdomains for {} from VirusTotal", subdomains.len(), domain);
+        tracing::info!(
+            "Found {} subdomains for {} from VirusTotal",
+            subdomains.len(),
+            domain
+        );
         Ok(subdomains)
     }
 
@@ -227,8 +258,6 @@ impl VirusTotalClient {
     pub fn is_configured(&self) -> bool {
         self.api_key.is_some()
     }
-
-
 }
 
 #[cfg(test)]
@@ -239,7 +268,7 @@ mod tests {
     async fn test_virustotal_client_creation() {
         let client = VirusTotalClient::new(Some("test_key".to_string())).unwrap();
         assert!(client.is_configured());
-        
+
         let client_no_key = VirusTotalClient::new(None).unwrap();
         assert!(!client_no_key.is_configured());
     }
@@ -248,7 +277,7 @@ mod tests {
     async fn test_virustotal_empty_domain() {
         let client = VirusTotalClient::new(Some("test_key".to_string())).unwrap();
         let result = client.get_domain_report("").await;
-        
+
         assert!(result.is_err());
         match result.unwrap_err() {
             ApiError::Validation(msg) => assert!(msg.contains("empty")),
@@ -260,7 +289,7 @@ mod tests {
     async fn test_virustotal_invalid_ip() {
         let client = VirusTotalClient::new(Some("test_key".to_string())).unwrap();
         let result = client.get_ip_report("invalid_ip").await;
-        
+
         assert!(result.is_err());
         match result.unwrap_err() {
             ApiError::Validation(msg) => assert!(msg.contains("Invalid IP")),
@@ -272,7 +301,7 @@ mod tests {
     async fn test_virustotal_no_api_key() {
         let client = VirusTotalClient::new(None).unwrap();
         let result = client.get_domain_report("example.com").await;
-        
+
         assert!(result.is_err());
         match result.unwrap_err() {
             ApiError::ExternalService(msg) => assert!(msg.contains("not configured")),
@@ -283,7 +312,7 @@ mod tests {
     #[tokio::test]
     async fn test_virustotal_reputation_analysis() {
         let client = VirusTotalClient::new(Some("test_key".to_string())).unwrap();
-        
+
         // Test malicious domain detection
         let malicious_report = VirusTotalDomainReport {
             id: "malicious.com".to_string(),
@@ -303,10 +332,10 @@ mod tests {
                 subdomains: None,
             },
         };
-        
+
         assert!(client.is_malicious_domain(&malicious_report));
         assert_eq!(client.get_domain_reputation(&malicious_report), Some(-50));
-        
+
         // Test clean domain
         let clean_report = VirusTotalDomainReport {
             id: "clean.com".to_string(),
@@ -326,7 +355,7 @@ mod tests {
                 subdomains: None,
             },
         };
-        
+
         assert!(!client.is_malicious_domain(&clean_report));
         assert_eq!(client.get_domain_reputation(&clean_report), Some(80));
     }

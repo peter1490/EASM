@@ -1,15 +1,15 @@
+use crate::{
+    auth::{context::UserContext, rbac::Role},
+    error::ApiError,
+    models::{Asset, Seed, SeedCreate},
+    AppState,
+};
 use axum::{
-    extract::{Path, Query, State, Extension},
+    extract::{Extension, Path, Query, State},
     response::Json,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::{
-    error::ApiError,
-    models::{Asset, Seed, SeedCreate},
-    AppState,
-    auth::{context::UserContext, rbac::Role},
-};
 
 #[derive(Debug, Deserialize)]
 pub struct AssetQuery {
@@ -42,9 +42,7 @@ pub async fn create_seed(
     Ok(Json(seed))
 }
 
-pub async fn list_seeds(
-    State(app_state): State<AppState>,
-) -> Result<Json<Vec<Seed>>, ApiError> {
+pub async fn list_seeds(State(app_state): State<AppState>) -> Result<Json<Vec<Seed>>, ApiError> {
     let seeds = app_state.discovery_service.list_seeds().await?;
     Ok(Json(seeds))
 }
@@ -63,17 +61,17 @@ pub async fn list_assets(
 ) -> Result<Json<AssetListResponse>, ApiError> {
     let limit = params.limit.unwrap_or(25);
     let offset = params.offset.unwrap_or(0);
-    
-    let assets = app_state.discovery_service.list_assets(
-        params.confidence_threshold,
-        Some(limit),
-        Some(offset),
-    ).await?;
-    
-    let total_count = app_state.discovery_service.count_assets(
-        params.confidence_threshold,
-    ).await?;
-    
+
+    let assets = app_state
+        .discovery_service
+        .list_assets(params.confidence_threshold, Some(limit), Some(offset))
+        .await?;
+
+    let total_count = app_state
+        .discovery_service
+        .count_assets(params.confidence_threshold)
+        .await?;
+
     Ok(Json(AssetListResponse {
         assets,
         total_count,
@@ -86,7 +84,10 @@ pub async fn get_asset(
     State(app_state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Asset>, ApiError> {
-    let asset = app_state.discovery_service.get_asset(&id).await?
+    let asset = app_state
+        .discovery_service
+        .get_asset(&id)
+        .await?
         .ok_or_else(|| ApiError::NotFound(format!("Asset {} not found", id)))?;
     Ok(Json(asset))
 }
@@ -105,14 +106,24 @@ pub async fn update_asset_importance(
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateImportanceRequest>,
 ) -> Result<Json<Asset>, ApiError> {
-    if !user.has_role(Role::Analyst) && !user.has_role(Role::Operator) && !user.has_role(Role::Admin) {
-         return Err(ApiError::Authorization("Analyst role or higher required".to_string()));
-    }
-    
-    if payload.importance < 0 || payload.importance > 5 {
-        return Err(ApiError::Validation("Importance must be between 0 and 5".to_string()));
+    if !user.has_role(Role::Analyst)
+        && !user.has_role(Role::Operator)
+        && !user.has_role(Role::Admin)
+    {
+        return Err(ApiError::Authorization(
+            "Analyst role or higher required".to_string(),
+        ));
     }
 
-    let asset = app_state.asset_repository.update_importance(&id, payload.importance).await?;
+    if payload.importance < 0 || payload.importance > 5 {
+        return Err(ApiError::Validation(
+            "Importance must be between 0 and 5".to_string(),
+        ));
+    }
+
+    let asset = app_state
+        .asset_repository
+        .update_importance(&id, payload.importance)
+        .await?;
     Ok(Json(asset))
 }

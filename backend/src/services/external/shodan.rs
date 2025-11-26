@@ -1,5 +1,5 @@
-use crate::error::ApiError;
 use super::rate_limited_client::RateLimitedClient;
+use crate::error::ApiError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -85,20 +85,20 @@ impl ShodanClient {
     /// Create a new Shodan client with rate limiting (1 request per second for free tier)
     pub fn new(api_key: Option<String>) -> Result<Self, ApiError> {
         let client = RateLimitedClient::new(1, 3)?;
-        
-        Ok(Self {
-            client,
-            api_key,
-        })
+
+        Ok(Self { client, api_key })
     }
 
     /// Search Shodan for hosts matching the query
     pub async fn search(&self, query: &str) -> Result<Vec<ShodanResult>, ApiError> {
-        let api_key = self.api_key.as_ref()
-            .ok_or_else(|| ApiError::ExternalService("Shodan API key not configured".to_string()))?;
+        let api_key = self.api_key.as_ref().ok_or_else(|| {
+            ApiError::ExternalService("Shodan API key not configured".to_string())
+        })?;
 
         if query.is_empty() {
-            return Err(ApiError::Validation("Search query cannot be empty".to_string()));
+            return Err(ApiError::Validation(
+                "Search query cannot be empty".to_string(),
+            ));
         }
 
         let url = format!(
@@ -106,26 +106,35 @@ impl ShodanClient {
             api_key,
             urlencoding::encode(query)
         );
-        
+
         tracing::debug!("Querying Shodan: {}", query);
-        
+
         let response = self.client.get(&url).await?;
         let response_text = response.text().await?;
-        
-        let search_response: ShodanSearchResponse = serde_json::from_str(&response_text)
-            .map_err(|e| ApiError::ExternalService(format!("Failed to parse Shodan response: {}", e)))?;
 
-        tracing::info!("Found {} Shodan results for query: {}", search_response.matches.len(), query);
+        let search_response: ShodanSearchResponse =
+            serde_json::from_str(&response_text).map_err(|e| {
+                ApiError::ExternalService(format!("Failed to parse Shodan response: {}", e))
+            })?;
+
+        tracing::info!(
+            "Found {} Shodan results for query: {}",
+            search_response.matches.len(),
+            query
+        );
         Ok(search_response.matches)
     }
 
     /// Get detailed information about a specific host
     pub async fn get_host(&self, ip: &str) -> Result<ShodanHostInfo, ApiError> {
-        let api_key = self.api_key.as_ref()
-            .ok_or_else(|| ApiError::ExternalService("Shodan API key not configured".to_string()))?;
+        let api_key = self.api_key.as_ref().ok_or_else(|| {
+            ApiError::ExternalService("Shodan API key not configured".to_string())
+        })?;
 
         if ip.is_empty() {
-            return Err(ApiError::Validation("IP address cannot be empty".to_string()));
+            return Err(ApiError::Validation(
+                "IP address cannot be empty".to_string(),
+            ));
         }
 
         // Basic IP validation
@@ -134,14 +143,15 @@ impl ShodanClient {
         }
 
         let url = format!("https://api.shodan.io/shodan/host/{}?key={}", ip, api_key);
-        
+
         tracing::debug!("Querying Shodan host info: {}", ip);
-        
+
         let response = self.client.get(&url).await?;
         let response_text = response.text().await?;
-        
-        let host_info: ShodanHostInfo = serde_json::from_str(&response_text)
-            .map_err(|e| ApiError::ExternalService(format!("Failed to parse Shodan host response: {}", e)))?;
+
+        let host_info: ShodanHostInfo = serde_json::from_str(&response_text).map_err(|e| {
+            ApiError::ExternalService(format!("Failed to parse Shodan host response: {}", e))
+        })?;
 
         Ok(host_info)
     }
@@ -174,14 +184,14 @@ impl ShodanClient {
         // Use Shodan's hostname filter to find subdomains
         // We search for hostnames containing the domain
         let query = format!("hostname:{}", domain);
-        
+
         tracing::info!("Searching Shodan for subdomains of: {}", domain);
-        
+
         let results = self.search(&query).await?;
-        
+
         // Extract unique hostnames from results
         let mut subdomains = std::collections::HashSet::new();
-        
+
         for result in results {
             // Add hostnames from the hostnames field
             if let Some(ref hostnames) = result.hostnames {
@@ -192,7 +202,7 @@ impl ShodanClient {
                     }
                 }
             }
-            
+
             // Also check domains field if available
             if let Some(ref domains) = result.domains {
                 for domain_name in domains {
@@ -202,38 +212,54 @@ impl ShodanClient {
                 }
             }
         }
-        
+
         let subdomain_list: Vec<String> = subdomains.into_iter().collect();
-        tracing::info!("Found {} unique subdomains from Shodan for {}", subdomain_list.len(), domain);
-        
+        tracing::info!(
+            "Found {} unique subdomains from Shodan for {}",
+            subdomain_list.len(),
+            domain
+        );
+
         Ok(subdomain_list)
     }
 
     /// Comprehensive search that extracts ALL asset types from Shodan results
     /// Returns IPs, domains, ASNs, organizations, and certificate information
-    pub async fn search_comprehensive(&self, query: &str) -> Result<ShodanExtractedAssets, ApiError> {
+    pub async fn search_comprehensive(
+        &self,
+        query: &str,
+    ) -> Result<ShodanExtractedAssets, ApiError> {
         tracing::info!("Performing comprehensive Shodan search for: {}", query);
-        
+
         let results = self.search(query).await?;
         let extracted = self.extract_assets_from_results(&results);
-        
+
         Ok(extracted)
     }
-    
+
     /// Search by domain and extract all related assets (IPs, subdomains, ASNs, orgs, certs)
-    pub async fn search_domain_comprehensive(&self, domain: &str) -> Result<ShodanExtractedAssets, ApiError> {
+    pub async fn search_domain_comprehensive(
+        &self,
+        domain: &str,
+    ) -> Result<ShodanExtractedAssets, ApiError> {
         let query = format!("hostname:{}", domain);
         self.search_comprehensive(&query).await
     }
-    
+
     /// Search by organization and extract all related assets
-    pub async fn search_org_comprehensive(&self, org: &str) -> Result<ShodanExtractedAssets, ApiError> {
+    pub async fn search_org_comprehensive(
+        &self,
+        org: &str,
+    ) -> Result<ShodanExtractedAssets, ApiError> {
         let query = format!("org:\"{}\"", org);
         self.search_comprehensive(&query).await
     }
-    
+
     /// Search by ASN and extract all related assets
-    pub async fn search_asn_comprehensive(&self, asn: &str) -> Result<ShodanExtractedAssets, ApiError> {
+    pub async fn search_asn_comprehensive(
+        &self,
+        asn: &str,
+    ) -> Result<ShodanExtractedAssets, ApiError> {
         let query = format!("asn:{}", asn);
         self.search_comprehensive(&query).await
     }
@@ -247,11 +273,11 @@ impl ShodanClient {
     /// Returns IPs, domains, ASNs, organizations, and certificate info
     pub fn extract_assets_from_results(&self, results: &[ShodanResult]) -> ShodanExtractedAssets {
         let mut extracted = ShodanExtractedAssets::default();
-        
+
         for result in results {
             // Extract IP addresses
             extracted.ips.insert(result.ip_str.clone());
-            
+
             // Extract hostnames/domains
             if let Some(ref hostnames) = result.hostnames {
                 for hostname in hostnames {
@@ -260,7 +286,7 @@ impl ShodanClient {
                     }
                 }
             }
-            
+
             // Extract additional domains field
             if let Some(ref domains) = result.domains {
                 for domain in domains {
@@ -269,7 +295,7 @@ impl ShodanClient {
                     }
                 }
             }
-            
+
             // Extract ASN information
             if let Some(ref asn) = result.asn {
                 if !asn.is_empty() {
@@ -282,25 +308,27 @@ impl ShodanClient {
                     extracted.asns.insert(normalized_asn);
                 }
             }
-            
+
             // Extract organization information
             if let Some(ref org) = result.org {
                 if !org.is_empty() && org.len() > 2 {
                     extracted.organizations.insert(org.clone());
                 }
             }
-            
+
             // Extract certificate information from SSL/TLS data
             // Check if the data contains SSL/TLS certificate information
             if result.port == 443 || result.data.contains("ssl") || result.data.contains("tls") {
                 // Try to extract certificate details from the data field
                 // This is a simplified extraction - in production you might want to parse more thoroughly
-                if let Some(cert_info) = self.extract_certificate_from_data(&result.data, &result.hostnames) {
+                if let Some(cert_info) =
+                    self.extract_certificate_from_data(&result.data, &result.hostnames)
+                {
                     extracted.certificates.push(cert_info);
                 }
             }
         }
-        
+
         tracing::info!(
             "Extracted from Shodan results: {} IPs, {} domains, {} ASNs, {} orgs, {} certs",
             extracted.ips.len(),
@@ -309,45 +337,53 @@ impl ShodanClient {
             extracted.organizations.len(),
             extracted.certificates.len()
         );
-        
+
         extracted
     }
-    
+
     /// Extract certificate information from Shodan data field
-    fn extract_certificate_from_data(&self, data: &str, hostnames: &Option<Vec<String>>) -> Option<ShodanCertificateInfo> {
+    fn extract_certificate_from_data(
+        &self,
+        data: &str,
+        hostnames: &Option<Vec<String>>,
+    ) -> Option<ShodanCertificateInfo> {
         // Look for common certificate patterns in the data
         // This is a simplified implementation - Shodan's data field can be complex
-        
+
         // Check if data contains certificate-related keywords
-        if !data.to_lowercase().contains("certificate") 
-            && !data.to_lowercase().contains("subject") 
-            && !data.to_lowercase().contains("issuer") {
+        if !data.to_lowercase().contains("certificate")
+            && !data.to_lowercase().contains("subject")
+            && !data.to_lowercase().contains("issuer")
+        {
             return None;
         }
-        
+
         let mut cert_info = ShodanCertificateInfo {
             subject: String::new(),
             issuer: None,
             domains: Vec::new(),
             organization: None,
         };
-        
+
         // Try to extract subject
         if let Some(subject_start) = data.find("Subject:") {
             if let Some(subject_end) = data[subject_start..].find('\n') {
                 let subject = &data[subject_start + 8..subject_start + subject_end];
                 cert_info.subject = subject.trim().to_string();
-                
+
                 // Extract organization from subject (CN=..., O=...)
                 if let Some(org_start) = subject.find("O=") {
-                    if let Some(org_end) = subject[org_start..].find(',').or(Some(subject[org_start..].len())) {
+                    if let Some(org_end) = subject[org_start..]
+                        .find(',')
+                        .or(Some(subject[org_start..].len()))
+                    {
                         let org = &subject[org_start + 2..org_start + org_end];
                         cert_info.organization = Some(org.trim().to_string());
                     }
                 }
             }
         }
-        
+
         // Try to extract issuer
         if let Some(issuer_start) = data.find("Issuer:") {
             if let Some(issuer_end) = data[issuer_start..].find('\n') {
@@ -355,14 +391,17 @@ impl ShodanClient {
                 cert_info.issuer = Some(issuer.trim().to_string());
             }
         }
-        
+
         // Add hostnames as certificate domains
         if let Some(ref host_vec) = hostnames {
             cert_info.domains = host_vec.clone();
         }
-        
+
         // Only return if we extracted meaningful information
-        if !cert_info.subject.is_empty() || cert_info.organization.is_some() || !cert_info.domains.is_empty() {
+        if !cert_info.subject.is_empty()
+            || cert_info.organization.is_some()
+            || !cert_info.domains.is_empty()
+        {
             Some(cert_info)
         } else {
             None
@@ -373,12 +412,15 @@ impl ShodanClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{matchers::{method, query_param}, Mock, MockServer, ResponseTemplate};
+    use wiremock::{
+        matchers::{method, query_param},
+        Mock, MockServer, ResponseTemplate,
+    };
 
     #[tokio::test]
     async fn test_shodan_search_success() {
         let mock_server = MockServer::start().await;
-        
+
         let mock_response = r#"{
             "matches": [
                 {
@@ -397,7 +439,7 @@ mod tests {
             ],
             "total": 1
         }"#;
-        
+
         Mock::given(method("GET"))
             .and(query_param("q", "apache"))
             .respond_with(ResponseTemplate::new(200).set_body_string(mock_response))
@@ -408,7 +450,7 @@ mod tests {
         // but we can test the client creation and validation
         let client = ShodanClient::new(Some("test_key".to_string())).unwrap();
         assert!(client.is_configured());
-        
+
         let client_no_key = ShodanClient::new(None).unwrap();
         assert!(!client_no_key.is_configured());
     }
@@ -417,7 +459,7 @@ mod tests {
     async fn test_shodan_empty_query() {
         let client = ShodanClient::new(Some("test_key".to_string())).unwrap();
         let result = client.search("").await;
-        
+
         assert!(result.is_err());
         match result.unwrap_err() {
             ApiError::Validation(msg) => assert!(msg.contains("empty")),
@@ -429,7 +471,7 @@ mod tests {
     async fn test_shodan_no_api_key() {
         let client = ShodanClient::new(None).unwrap();
         let result = client.search("apache").await;
-        
+
         assert!(result.is_err());
         match result.unwrap_err() {
             ApiError::ExternalService(msg) => assert!(msg.contains("not configured")),
@@ -441,7 +483,7 @@ mod tests {
     async fn test_shodan_invalid_ip() {
         let client = ShodanClient::new(Some("test_key".to_string())).unwrap();
         let result = client.get_host("invalid_ip").await;
-        
+
         assert!(result.is_err());
         match result.unwrap_err() {
             ApiError::Validation(msg) => assert!(msg.contains("Invalid IP")),

@@ -11,7 +11,7 @@ pub fn create_cors_layer(allowed_origins: Vec<String>) -> CorsLayer {
     ];
 
     if allowed_origins.is_empty() || allowed_origins.contains(&"*".to_string()) {
-        // Development mode - allow all origins
+        // Development mode - allow all origins (still allow credentials for cookie auth)
         tracing::debug!("CORS: Allowing all origins (development mode)");
         CorsLayer::new()
             .allow_origin(Any)
@@ -24,7 +24,7 @@ pub fn create_cors_layer(allowed_origins: Vec<String>) -> CorsLayer {
                 Method::OPTIONS,
             ])
             .allow_headers(allowed_headers)
-            .allow_credentials(false)
+            .allow_credentials(true)
     } else {
         // Production mode - restrict origins
         let origins: Vec<_> = allowed_origins

@@ -2,11 +2,13 @@
 # Build with: docker build --build-arg ENVIRONMENT=development|production
 
 ARG ENVIRONMENT=production
+ARG NEXT_PUBLIC_API_BASE
 
 # ============================================================================
 # Development Stage
 # ============================================================================
 FROM node:20-alpine AS development
+ARG NEXT_PUBLIC_API_BASE
 
 WORKDIR /app
 
@@ -28,6 +30,7 @@ EXPOSE 3000
 # Set environment variables for development
 ENV NODE_ENV=development
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE}
 
 # Run in development mode with hot reload
 CMD ["npm", "run", "dev"]
@@ -49,6 +52,7 @@ RUN npm ci --include=optional
 # Production Build Stage
 # ============================================================================
 FROM node:20-alpine AS build
+ARG NEXT_PUBLIC_API_BASE
 
 WORKDIR /app
 
@@ -57,18 +61,21 @@ RUN apk add --no-cache python3 make g++
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+ENV NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE}
 RUN npm run build
 
 # ============================================================================
 # Production Runtime Stage
 # ============================================================================
 FROM node:20-alpine AS production
+ARG NEXT_PUBLIC_API_BASE
 
 WORKDIR /app
 
 # Set production environment
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE}
 
 # Install only production dependencies for the runtime image
 COPY --from=build /app/package.json /app/package-lock.json ./

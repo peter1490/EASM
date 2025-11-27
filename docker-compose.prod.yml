@@ -8,7 +8,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://easm:easm@db:5432/easm
+      - DATABASE_URL=postgresql://easm:easm@172.19.8.37:5432/easm
       - VIRUSTOTAL_API_KEY=${VIRUSTOTAL_API_KEY}
       - SHODAN_API_KEY=${SHODAN_API_KEY}
       - CERTSPOTTER_API_TOKEN=${CERTSPOTTER_API_TOKEN}
@@ -36,8 +36,6 @@ services:
     volumes:
       # Mount evidence directory
       - ./backend/evidence:/app/evidence
-    depends_on:
-      - db
 
   frontend:
     build:
@@ -53,17 +51,3 @@ services:
       - "3000:3000"
     depends_on:
       - backend
-
-  db:
-    image: postgres:16
-    environment:
-      POSTGRES_PASSWORD: easm
-      POSTGRES_USER: easm
-      POSTGRES_DB: easm
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-
-volumes:
-  pgdata:

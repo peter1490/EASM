@@ -43,7 +43,7 @@ WORKDIR /app
 RUN apk add --no-cache python3 make g++
 
 COPY package.json package-lock.json ./
-RUN npm ci --only=production --include=optional
+RUN npm ci --include=optional
 
 # ============================================================================
 # Production Build Stage
@@ -70,11 +70,13 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
-# Copy built files
+# Install only production dependencies for the runtime image
+COPY --from=build /app/package.json /app/package-lock.json ./
+RUN npm ci --omit=dev --include=optional
+
+# Copy built assets
 COPY --from=build /app/.next ./.next
 COPY --from=build /app/public ./public
-COPY --from=build /app/package.json ./package.json
-COPY --from=build /app/node_modules ./node_modules
 
 # Expose port
 EXPOSE 3000

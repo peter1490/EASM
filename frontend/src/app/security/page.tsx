@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import {
   listSecurityScans,
   listSecurityFindings,
@@ -78,7 +78,7 @@ export default function SecurityPage() {
   const [selectedLegacyFinding, setSelectedLegacyFinding] = useState<Finding | null>(null);
   const [updating, setUpdating] = useState(false);
 
-  async function loadData() {
+  const loadData = useCallback(async () => {
     try {
       setLoading(true);
       const [scansData, summaryData] = await Promise.all([
@@ -107,13 +107,13 @@ export default function SecurityPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [limit, offset, severityFilter, statusFilter]);
 
   useEffect(() => {
     loadData();
     const interval = setInterval(loadData, 10000);
     return () => clearInterval(interval);
-  }, [severityFilter, statusFilter, offset]);
+  }, [loadData, severityFilter, statusFilter, offset]);
 
   async function handleStatusUpdate(findingId: string, newStatus: FindingStatus) {
     setUpdating(true);

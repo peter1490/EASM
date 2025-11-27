@@ -15,7 +15,6 @@ export interface FindingFilterPanelProps {
 
 export default function FindingFilterPanel({ onFilterChange, initialFilters }: FindingFilterPanelProps) {
   // State for filter values
-  const [findingTypes, setFindingTypes] = useState<string[]>([]);
   const [scans, setScans] = useState<Array<{ id: string; target: string }>>([]);
   const [availableFindingTypes, setAvailableFindingTypes] = useState<string[]>([]);
   
@@ -241,4 +240,3 @@ export default function FindingFilterPanel({ onFilterChange, initialFilters }: F
     </Card>
   );
 }
-

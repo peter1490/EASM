@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { 
   getHealth, 
   getMetrics, 
@@ -91,6 +91,25 @@ const HELP_TEXT: Record<string, string> = {
   max_orgs_per_domain: "Max organizations pivoted from a domain.",
   max_domains_per_org: "Max domains pivoted from an organization.",
 };
+
+type SecretFieldKey =
+  | "certspotter_api_token"
+  | "virustotal_api_key"
+  | "shodan_api_key"
+  | "urlscan_api_key"
+  | "otx_api_key"
+  | "clearbit_api_key"
+  | "opencorporates_api_token";
+
+const SECRET_FIELDS: Array<{ key: SecretFieldKey; label: string }> = [
+  { key: "certspotter_api_token", label: "CertSpotter API Token" },
+  { key: "virustotal_api_key", label: "VirusTotal API Key" },
+  { key: "shodan_api_key", label: "Shodan API Key" },
+  { key: "urlscan_api_key", label: "URLScan API Key" },
+  { key: "otx_api_key", label: "OTX API Key" },
+  { key: "clearbit_api_key", label: "Clearbit API Key" },
+  { key: "opencorporates_api_token", label: "OpenCorporates Token" },
+];
 
 type SettingsFormState = {
   google_client_id: string;
@@ -292,12 +311,16 @@ export default function SettingsPage() {
 
   const isAdmin = user?.roles?.includes("admin");
 
-  async function loadData() {
+  const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [m, h] = await Promise.all([getMetrics(), getHealth()]);
-      setMetrics(m);
-      setHealth(h);
+      const [metricsData, healthData] = await Promise.all([
+        getMetrics(),
+        getHealth(),
+      ]);
+      
+      setMetrics(metricsData);
+      setHealth(healthData);
       
       if (isAdmin) {
         const usersData = await listUsers();
@@ -312,9 +335,9 @@ export default function SettingsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [isAdmin]);
 
-  async function loadSettings(reveal = false) {
+  const loadSettings = useCallback(async (reveal = false) => {
     if (!isAdmin) return;
     try {
       setSettingsLoading(true);
@@ -330,7 +353,7 @@ export default function SettingsPage() {
     } finally {
       setSettingsLoading(false);
     }
-  }
+  }, [isAdmin]);
 
   useEffect(() => {
     loadData();
@@ -339,7 +362,7 @@ export default function SettingsPage() {
     }
     const iv = setInterval(loadData, 10000);
     return () => clearInterval(iv);
-  }, [isAdmin]);
+  }, [isAdmin, loadData, loadSettings]);
 
   async function handleAddRole(userId: string, role: string) {
     if (!role) return;
@@ -804,26 +827,21 @@ export default function SettingsPage() {
                     <CardDescription>Threat intel and enrichment providers</CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-3">
-                    {[
-                      { key: "certspotter_api_token", label: "CertSpotter API Token" },
-                      { key: "virustotal_api_key", label: "VirusTotal API Key" },
-                      { key: "shodan_api_key", label: "Shodan API Key" },
-                      { key: "urlscan_api_key", label: "URLScan API Key" },
-                      { key: "otx_api_key", label: "OTX API Key" },
-                      { key: "clearbit_api_key", label: "Clearbit API Key" },
-                      { key: "opencorporates_api_token", label: "OpenCorporates Token" },
-                    ].map((field) => (
-                      <div key={field.key}>
-                        {secretInput(
-                          field.key as keyof SettingsFormState,
-                          field.label,
-                          (settingsData.settings as Record<string, any>)[field.key].is_set ? "••••••••" : "Not set"
-                        )}
-                        <div className="text-xs text-muted-foreground mt-1">
-                          {(settingsData.settings as Record<string, any>)[field.key].is_set ? "Stored" : "Not set"}
+                    {SECRET_FIELDS.map((field) => {
+                      const secretField = settingsData.settings[field.key];
+                      return (
+                        <div key={field.key}>
+                          {secretInput(
+                            field.key,
+                            field.label,
+                            secretField.is_set ? "••••••••" : "Not set"
+                          )}
+                          <div className="text-xs text-muted-foreground mt-1">
+                            {secretField.is_set ? "Stored" : "Not set"}
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </CardContent>
                 </Card>
               </div>

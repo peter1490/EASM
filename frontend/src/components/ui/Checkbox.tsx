@@ -1,7 +1,7 @@
 export interface CheckboxProps {
   checked: boolean;
   onChange: (checked: boolean) => void;
-  label?: string;
+  label?: React.ReactNode;
   disabled?: boolean;
   indeterminate?: boolean;
 }
@@ -56,4 +56,3 @@ export default function Checkbox({ checked, onChange, label, disabled = false, i
     </label>
   );
 }
-

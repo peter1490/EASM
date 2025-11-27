@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 
 interface User {
@@ -26,11 +26,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const router = useRouter();
   const apiBase = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000';
 
-  useEffect(() => {
-    checkAuth();
-  }, []);
-
-  const checkAuth = async () => {
+  const checkAuth = useCallback(async () => {
     try {
       // We use credentials: 'include' to send cookies
       const res = await fetch(`${apiBase}/api/auth/me`, {
@@ -49,7 +45,11 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [apiBase]);
+
+  useEffect(() => {
+    checkAuth();
+  }, [checkAuth]);
 
   const login = () => {
     router.push('/login');
@@ -105,4 +105,3 @@ export const useAuth = () => {
   }
   return context;
 };
-

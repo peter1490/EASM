@@ -54,7 +54,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY migrations ./migrations
 
-ENV DATABASE_URL=postgresql://easm:easm@192.168.10.178:5432/easm
+ENV DATABASE_URL=postgresql://easm:easm@172.19.8.37:5432/easm
 
 # Build the application in release mode with optimizations
 RUN cargo update -p base64ct --precise 1.7.1 && cargo build --release

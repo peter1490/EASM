@@ -1,5 +1,5 @@
 use axum::http::{HeaderName, Method};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{Any, CorsLayer, AllowOrigin};
 
 /// Create CORS layer with configurable origins from settings
 pub fn create_cors_layer(allowed_origins: Vec<String>) -> CorsLayer {
@@ -11,10 +11,10 @@ pub fn create_cors_layer(allowed_origins: Vec<String>) -> CorsLayer {
     ];
 
     if allowed_origins.is_empty() || allowed_origins.contains(&"*".to_string()) {
-        // Development mode - allow all origins (still allow credentials for cookie auth)
+        // Development mode - allow all origins (mirror request origin so header is set)
         tracing::debug!("CORS: Allowing all origins (development mode)");
         CorsLayer::new()
-            .allow_origin(Any)
+            .allow_origin(AllowOrigin::mirror_request())
             .allow_methods([
                 Method::GET,
                 Method::POST,

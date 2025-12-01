@@ -8,6 +8,7 @@ pub mod risk_service;
 pub mod scan_service;
 pub mod search_service;
 pub mod security_scan_service;
+pub mod tag_service;
 pub mod task_manager;
 
 // Re-export commonly used types
@@ -22,4 +23,5 @@ pub use search_service::{
     ElasticsearchService, IndexedAsset, IndexedFinding, SearchQuery, SearchService,
 };
 pub use security_scan_service::SecurityScanService;
+pub use tag_service::TagService;
 pub use task_manager::TaskManager;

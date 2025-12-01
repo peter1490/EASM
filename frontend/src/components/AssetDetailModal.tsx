@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Modal from "@/components/ui/Modal";
-import { Asset, getAsset, createScan, Scan, listScans } from "@/app/api";
+import { Asset, getAsset, createScan, Scan, listScans, getAssetTags, AssetTagDetail } from "@/app/api";
 import Button from "@/components/ui/Button";
 import Badge from "@/components/ui/Badge";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
@@ -21,6 +21,7 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [relatedScans, setRelatedScans] = useState<Scan[]>([]);
+  const [assetTags, setAssetTags] = useState<AssetTagDetail[]>([]);
   const [scanningNow, setScanningNow] = useState(false);
   const [scanSuccess, setScanSuccess] = useState(false);
 
@@ -31,8 +32,12 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
       setLoading(true);
       setError(null);
       try {
-        const data = await getAsset(assetId);
+        const [data, tags] = await Promise.all([
+          getAsset(assetId),
+          getAssetTags(assetId).catch(() => []),
+        ]);
         setAsset(data);
+        setAssetTags(tags);
 
         // Fetch related scans
         const scans = await listScans();
@@ -155,6 +160,32 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
               </div>
             </CardContent>
           </Card>
+
+          {/* Tags */}
+          {assetTags.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Tags</CardTitle>
+                <CardDescription>Categorization labels for this asset</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex flex-wrap gap-2">
+                  {assetTags.map((assetTag) => (
+                    <div
+                      key={assetTag.tag.id}
+                      className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-medium text-white"
+                      style={{ backgroundColor: assetTag.tag.color || "#6366f1" }}
+                    >
+                      <span>{assetTag.tag.name}</span>
+                      {assetTag.applied_by === "auto_rule" && (
+                        <span className="text-xs opacity-75" title="Auto-tagged">⚡</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
           {/* Metadata */}
           <Card>

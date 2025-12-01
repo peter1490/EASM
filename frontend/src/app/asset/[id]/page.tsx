@@ -13,11 +13,17 @@ import {
   listScans,
   updateSecurityFinding,
   resolveSecurityFinding,
+  getAssetTags,
+  tagAsset,
+  untagAsset,
+  listTags,
   type Asset,
   type SecurityFinding,
   type SecurityScan,
   type Scan,
   type FindingStatus,
+  type AssetTagDetail,
+  type TagWithCount,
 } from "@/app/api";
 import Header from "@/components/Header";
 import Button from "@/components/ui/Button";
@@ -72,6 +78,8 @@ export default function AssetDetailPage() {
   const [findings, setFindings] = useState<SecurityFinding[]>([]);
   const [securityScans, setSecurityScans] = useState<SecurityScan[]>([]);
   const [legacyScans, setLegacyScans] = useState<Scan[]>([]);
+  const [assetTags, setAssetTags] = useState<AssetTagDetail[]>([]);
+  const [allTags, setAllTags] = useState<TagWithCount[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -86,6 +94,10 @@ export default function AssetDetailPage() {
   // Finding modal state
   const [selectedFinding, setSelectedFinding] = useState<SecurityFinding | null>(null);
   const [updatingFinding, setUpdatingFinding] = useState(false);
+
+  // Tag modal state
+  const [showTagModal, setShowTagModal] = useState(false);
+  const [taggingInProgress, setTaggingInProgress] = useState(false);
   
   const hasInitialLoadRef = useRef(false);
 
@@ -100,16 +112,20 @@ export default function AssetDetailPage() {
       }
       // For auto-refresh in background, don't change any loading states
       
-      const [assetData, findingsData, securityScansData, legacyScansData] = await Promise.all([
+      const [assetData, findingsData, securityScansData, legacyScansData, assetTagsData, allTagsData] = await Promise.all([
         getAsset(id),
         getAssetFindings(id).catch(() => []),
         listSecurityScans(50, 0, id).catch(() => []),
         listScans().catch(() => []),
+        getAssetTags(id).catch(() => []),
+        listTags(100, 0).catch(() => ({ tags: [], total_count: 0 })),
       ]);
       
       setAsset(assetData);
       setFindings(findingsData);
       setSecurityScans(securityScansData);
+      setAssetTags(assetTagsData);
+      setAllTags(allTagsData.tags);
       
       // Filter legacy scans that target this asset's value
       const relatedScans = legacyScansData.filter(
@@ -210,6 +226,37 @@ export default function AssetDetailPage() {
       setError((err as Error).message);
     } finally {
       setUpdatingFinding(false);
+    }
+  }
+
+  async function handleTagAsset(tagId: string) {
+    if (!asset) return;
+    setTaggingInProgress(true);
+    try {
+      await tagAsset(asset.id, tagId);
+      // Refresh tags
+      const updatedTags = await getAssetTags(asset.id);
+      setAssetTags(updatedTags);
+      setShowTagModal(false);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setTaggingInProgress(false);
+    }
+  }
+
+  async function handleUntagAsset(tagId: string) {
+    if (!asset) return;
+    setTaggingInProgress(true);
+    try {
+      await untagAsset(asset.id, tagId);
+      // Refresh tags
+      const updatedTags = await getAssetTags(asset.id);
+      setAssetTags(updatedTags);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setTaggingInProgress(false);
     }
   }
 
@@ -386,16 +433,22 @@ export default function AssetDetailPage() {
         <Card className="group hover:shadow-lg transition-all">
           <CardHeader className="pb-2">
             <CardDescription>Importance</CardDescription>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
               {[1, 2, 3, 4, 5].map((level) => (
                 <button
                   key={level}
                   onClick={() => handleImportanceChange(level)}
                   disabled={updatingImportance}
-                  className={`h-6 w-6 rounded-full transition-all hover:scale-110 ${
-                    level <= asset.importance ? "bg-primary" : "bg-muted"
-                  } ${updatingImportance ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
-                />
+                  className={`transition-all hover:scale-110 ${updatingImportance ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+                >
+                  <svg
+                    className={`w-6 h-6 ${level <= asset.importance ? "text-primary" : "text-muted-foreground/30"}`}
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                  >
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                  </svg>
+                </button>
               ))}
               <span className="ml-2 text-lg font-mono font-semibold">{asset.importance}/5</span>
             </div>
@@ -574,6 +627,61 @@ export default function AssetDetailPage() {
                   </Badge>
                 ))}
               </div>
+            </CardContent>
+          </Card>
+
+          {/* Tags */}
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle>Tags</CardTitle>
+                  <CardDescription>Categorize and organize this asset</CardDescription>
+                </div>
+                <Button 
+                  variant="outline" 
+                  size="sm"
+                  onClick={() => setShowTagModal(true)}
+                >
+                  + Add Tag
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {assetTags.length === 0 ? (
+                <div className="text-sm text-muted-foreground">
+                  No tags applied to this asset.{" "}
+                  <button 
+                    className="text-primary hover:underline"
+                    onClick={() => setShowTagModal(true)}
+                  >
+                    Add one now
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {assetTags.map((assetTag) => (
+                    <div
+                      key={assetTag.tag.id}
+                      className="group inline-flex items-center gap-2 pl-3 pr-1 py-1 rounded-full text-sm font-medium text-white transition-all hover:shadow-md"
+                      style={{ backgroundColor: assetTag.tag.color || "#6366f1" }}
+                    >
+                      <span>{assetTag.tag.name}</span>
+                      {assetTag.applied_by === "auto_rule" && (
+                        <span className="text-xs opacity-75" title="Auto-tagged">⚡</span>
+                      )}
+                      <button
+                        onClick={() => handleUntagAsset(assetTag.tag.id)}
+                        disabled={taggingInProgress}
+                        className="w-5 h-5 rounded-full bg-black/20 hover:bg-black/40 flex items-center justify-center transition-colors opacity-0 group-hover:opacity-100"
+                        title="Remove tag"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -1157,6 +1265,88 @@ export default function AssetDetailPage() {
             </div>
           </div>
         )}
+      </Modal>
+
+      {/* Tag Selection Modal */}
+      <Modal
+        isOpen={showTagModal}
+        onClose={() => setShowTagModal(false)}
+        title="Add Tag to Asset"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Select a tag to apply to this asset. Tags help categorize and organize your assets.
+          </p>
+          
+          {allTags.length === 0 ? (
+            <div className="py-6 text-center">
+              <div className="text-4xl mb-3">🏷️</div>
+              <p className="text-muted-foreground mb-3">No tags defined yet</p>
+              <Link href="/tags">
+                <Button variant="outline">Create Tags</Button>
+              </Link>
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-80 overflow-y-auto">
+              {allTags
+                .filter(tag => !assetTags.some(at => at.tag.id === tag.id))
+                .map((tag) => (
+                  <button
+                    key={tag.id}
+                    onClick={() => handleTagAsset(tag.id)}
+                    disabled={taggingInProgress}
+                    className="w-full flex items-center gap-3 p-3 rounded-lg border border-border hover:bg-muted transition-colors text-left disabled:opacity-50"
+                  >
+                    <div
+                      className="w-4 h-4 rounded-full ring-2 ring-offset-2 ring-offset-background flex-shrink-0"
+                      style={{ backgroundColor: tag.color || "#6366f1", ringColor: tag.color || "#6366f1" }}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium">{tag.name}</div>
+                      {tag.description && (
+                        <div className="text-xs text-muted-foreground truncate">{tag.description}</div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <div className="flex items-center gap-0.5">
+                        {Array.from({ length: 5 }).map((_, i) => (
+                          <svg
+                            key={i}
+                            className={`w-3 h-3 ${i < tag.importance ? "text-primary" : "text-muted-foreground/30"}`}
+                            viewBox="0 0 24 24"
+                            fill="currentColor"
+                          >
+                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                          </svg>
+                        ))}
+                      </div>
+                      {tag.rule_type && (
+                        <Badge variant="secondary" className="text-xs">
+                          {tag.rule_type === "regex" ? "Regex" : "IP"}
+                        </Badge>
+                      )}
+                    </div>
+                  </button>
+                ))}
+              {allTags.filter(tag => !assetTags.some(at => at.tag.id === tag.id)).length === 0 && (
+                <div className="py-6 text-center text-muted-foreground">
+                  All available tags are already applied to this asset.
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex justify-between pt-4 border-t border-border">
+            <Link href="/tags">
+              <Button variant="ghost" size="sm">
+                Manage Tags →
+              </Button>
+            </Link>
+            <Button variant="outline" onClick={() => setShowTagModal(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
       </Modal>
     </div>
   );

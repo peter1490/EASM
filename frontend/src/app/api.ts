@@ -1027,3 +1027,169 @@ export async function listEvidenceByScan(scanId: string): Promise<Array<{ id: st
 export function getEvidenceDownloadUrl(evidenceId: string): string {
   return `${API_BASE}/api/evidence/${evidenceId}/download`;
 }
+
+// ============================================================================
+// TAG TYPES
+// ============================================================================
+
+export type Tag = {
+  id: string;
+  name: string;
+  description: string | null;
+  importance: number;
+  rule_type: "regex" | "ip_range" | null;
+  rule_value: string | null;
+  color: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TagWithCount = {
+  id: string;
+  name: string;
+  description: string | null;
+  importance: number;
+  rule_type: "regex" | "ip_range" | null;
+  rule_value: string | null;
+  color: string | null;
+  created_at: string;
+  updated_at: string;
+  asset_count: number;
+};
+
+export type TagListResponse = {
+  tags: TagWithCount[];
+  total_count: number;
+  limit: number;
+  offset: number;
+};
+
+export type TagCreate = {
+  name: string;
+  description?: string;
+  importance?: number;
+  rule_type?: "regex" | "ip_range";
+  rule_value?: string;
+  color?: string;
+};
+
+export type TagUpdate = {
+  name?: string;
+  description?: string;
+  importance?: number;
+  rule_type?: "regex" | "ip_range";
+  rule_value?: string;
+  color?: string;
+  clear_rule?: boolean;
+};
+
+export type AssetTagDetail = {
+  tag: Tag;
+  applied_by: "manual" | "auto_rule";
+  matched_rule: string | null;
+  tagged_at: string;
+};
+
+export type AutoTagResult = {
+  tags_applied: number;
+  assets_tagged: number;
+  errors: string[];
+};
+
+// ============================================================================
+// TAG API
+// ============================================================================
+
+export async function listTags(limit = 100, offset = 0): Promise<TagListResponse> {
+  const params = new URLSearchParams();
+  params.append("limit", limit.toString());
+  params.append("offset", offset.toString());
+  
+  const res = await fetch(`${API_BASE}/api/tags?${params.toString()}`, { cache: "no-store", credentials: "include" });
+  if (!res.ok) throw new Error(`Failed to list tags: ${res.status}`);
+  return res.json();
+}
+
+export async function getTag(id: string): Promise<Tag> {
+  const res = await fetch(`${API_BASE}/api/tags/${id}`, { cache: "no-store", credentials: "include" });
+  if (!res.ok) throw new Error(`Failed to get tag: ${res.status}`);
+  return res.json();
+}
+
+export async function createTag(tag: TagCreate): Promise<Tag> {
+  const res = await fetch(`${API_BASE}/api/tags`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(tag),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to create tag: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateTag(id: string, update: TagUpdate): Promise<Tag> {
+  const res = await fetch(`${API_BASE}/api/tags/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to update tag: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteTag(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/tags/${id}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to delete tag: ${res.status}`);
+}
+
+export async function getAssetTags(assetId: string): Promise<AssetTagDetail[]> {
+  const res = await fetch(`${API_BASE}/api/assets/${assetId}/tags`, { cache: "no-store", credentials: "include" });
+  if (!res.ok) throw new Error(`Failed to get asset tags: ${res.status}`);
+  return res.json();
+}
+
+export async function tagAsset(assetId: string, tagId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/assets/${assetId}/tags`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tag_id: tagId }),
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to tag asset: ${res.status}`);
+}
+
+export async function untagAsset(assetId: string, tagId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/assets/${assetId}/tags/${tagId}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to untag asset: ${res.status}`);
+}
+
+export async function runAutoTagForTag(tagId: string): Promise<AutoTagResult> {
+  const res = await fetch(`${API_BASE}/api/tags/${tagId}/run-auto-tag`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to run auto-tagging: ${res.status}`);
+  return res.json();
+}
+
+export async function runAutoTagAll(): Promise<AutoTagResult> {
+  const res = await fetch(`${API_BASE}/api/tags/run-auto-tag-all`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to run auto-tagging: ${res.status}`);
+  return res.json();
+}

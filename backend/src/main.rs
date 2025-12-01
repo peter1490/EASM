@@ -271,6 +271,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/metrics/clear",
             post(handlers::metrics_handlers::clear_metrics),
         )
+        // Tag endpoints
+        .route(
+            "/api/tags",
+            get(handlers::tag_handlers::list_tags).post(handlers::tag_handlers::create_tag),
+        )
+        .route(
+            "/api/tags/:id",
+            get(handlers::tag_handlers::get_tag)
+                .patch(handlers::tag_handlers::update_tag)
+                .delete(handlers::tag_handlers::delete_tag),
+        )
+        .route(
+            "/api/tags/:id/run-auto-tag",
+            post(handlers::tag_handlers::run_auto_tag_for_tag),
+        )
+        .route(
+            "/api/tags/run-auto-tag-all",
+            post(handlers::tag_handlers::run_auto_tag_all),
+        )
+        .route(
+            "/api/assets/:id/tags",
+            get(handlers::tag_handlers::get_asset_tags).post(handlers::tag_handlers::tag_asset),
+        )
+        .route(
+            "/api/assets/:asset_id/tags/:tag_id",
+            delete(handlers::tag_handlers::untag_asset),
+        )
         // Add auth middleware
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),

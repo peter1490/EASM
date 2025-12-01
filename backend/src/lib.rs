@@ -12,16 +12,18 @@ use crate::{
         scan_repo::SqlxScanRepository,
         security_repo::{SqlxSecurityFindingRepository, SqlxSecurityScanRepository},
         seed_repo::SqlxSeedRepository,
+        tag_repo::SqlxTagRepository,
         user_repo::SqlxUserRepository,
         AssetRelationshipRepository, AssetRepository, AssetSourceRepository,
         DiscoveryQueueRepository, DiscoveryRunRepository, EvidenceRepository, FindingRepository,
         ScanRepository, SecurityFindingRepository, SecurityScanRepository, SeedRepository,
-        UserRepository,
+        TagRepository, UserRepository,
     },
     services::external::{DnsResolver, ExternalServicesManager, HttpAnalyzer},
     services::{
         AuthService, DiscoveryService, DriftService, DriftServiceImpl, ElasticsearchService,
-        MetricsService, RiskService, ScanService, SearchService, SecurityScanService, TaskManager,
+        MetricsService, RiskService, ScanService, SearchService, SecurityScanService, TagService,
+        TaskManager,
     },
 };
 use axum::extract::FromRef;
@@ -53,6 +55,7 @@ pub struct AppState {
     pub metrics_service: Arc<MetricsService>,
     pub auth_service: Arc<AuthService>,
     pub risk_service: Arc<RiskService>,
+    pub tag_service: Arc<TagService>,
     // Repositories
     pub scan_repository: Arc<dyn ScanRepository + Send + Sync>,
     pub finding_repository: Arc<dyn FindingRepository + Send + Sync>,
@@ -66,6 +69,7 @@ pub struct AppState {
     pub asset_relationship_repository: Arc<dyn AssetRelationshipRepository + Send + Sync>,
     pub security_scan_repository: Arc<dyn SecurityScanRepository + Send + Sync>,
     pub security_finding_repository: Arc<dyn SecurityFindingRepository + Send + Sync>,
+    pub tag_repository: Arc<dyn TagRepository + Send + Sync>,
     // Convenience accessors for handlers
     pub scan_repo: Arc<dyn ScanRepository + Send + Sync>,
     pub finding_repo: Arc<dyn FindingRepository + Send + Sync>,
@@ -128,6 +132,10 @@ impl AppState {
             Arc::new(SqlxSecurityScanRepository::new(db_pool.clone()));
         let security_finding_repository: Arc<dyn SecurityFindingRepository + Send + Sync> =
             Arc::new(SqlxSecurityFindingRepository::new(db_pool.clone()));
+
+        // Create tag repository
+        let tag_repository: Arc<dyn TagRepository + Send + Sync> =
+            Arc::new(SqlxTagRepository::new(db_pool.clone()));
 
         // Create external services and utilities
         let external_services = Arc::new(ExternalServicesManager::new(shared_settings.clone())?);
@@ -243,6 +251,12 @@ impl AppState {
             db_pool.clone(),
         ));
 
+        // Create tag service
+        let tag_service = Arc::new(TagService::new(
+            tag_repository.clone(),
+            asset_repository.clone(),
+        ));
+
         Ok(Self {
             config: shared_settings.clone(),
             settings_service,
@@ -255,6 +269,7 @@ impl AppState {
             metrics_service,
             auth_service,
             risk_service,
+            tag_service,
             // Repositories
             scan_repository: scan_repository.clone(),
             finding_repository: finding_repository.clone(),
@@ -268,6 +283,7 @@ impl AppState {
             asset_relationship_repository,
             security_scan_repository,
             security_finding_repository,
+            tag_repository,
             // Convenience accessors for handlers
             scan_repo: scan_repository,
             finding_repo: finding_repository,

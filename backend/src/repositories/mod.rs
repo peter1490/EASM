@@ -6,6 +6,7 @@ pub mod scan_repo;
 pub mod security_repo;
 pub mod seed_repo;
 pub mod settings_repo;
+pub mod tag_repo;
 pub mod user_repo;
 
 // Re-export commonly used types
@@ -24,4 +25,5 @@ pub use security_repo::{
 };
 pub use seed_repo::SeedRepository;
 pub use settings_repo::SettingsRepository;
+pub use tag_repo::{SqlxTagRepository, TagRepository};
 pub use user_repo::UserRepository;

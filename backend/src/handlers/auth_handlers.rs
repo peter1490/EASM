@@ -25,6 +25,33 @@ pub struct LocalLoginParams {
     password: String,
 }
 
+/// Check if the deployment uses HTTPS by examining CORS origins or redirect URIs.
+/// This determines whether to set the Secure flag on cookies.
+/// Allows HTTP deployments in internal/production environments.
+fn check_uses_https(state: &AppState) -> bool {
+    let config = state.config.load();
+    
+    // Check if any CORS origin uses HTTPS
+    let cors_uses_https = config
+        .cors_allow_origins
+        .iter()
+        .any(|origin| origin.starts_with("https://"));
+    
+    // Check if redirect URIs use HTTPS
+    let redirect_uses_https = config
+        .google_redirect_uri
+        .as_ref()
+        .map(|u| u.starts_with("https://"))
+        .unwrap_or(false)
+        || config
+            .keycloak_redirect_uri
+            .as_ref()
+            .map(|u| u.starts_with("https://"))
+            .unwrap_or(false);
+    
+    cors_uses_https || redirect_uses_https
+}
+
 pub async fn login_google(State(state): State<AppState>) -> Result<Json<LoginResponse>, ApiError> {
     let (url, _csrf_token, _nonce) = state.auth_service.get_google_auth_url().await?;
     // In a real app, store csrf_token in cookie/session to verify state param in callback
@@ -45,11 +72,11 @@ pub async fn login_local(
 
     let session_str = serde_json::to_string(&session).map_err(ApiError::Serialization)?;
 
-    let is_prod = state.config.load().environment == "production";
+    let uses_https = check_uses_https(&state);
 
     let cookie = Cookie::build(("session", session_str))
         .path("/")
-        .secure(is_prod)
+        .secure(uses_https)
         .http_only(true)
         .same_site(SameSite::Lax)
         .build();
@@ -72,11 +99,11 @@ pub async fn callback_google(
     // Serialize session
     let session_str = serde_json::to_string(&session).map_err(ApiError::Serialization)?;
 
-    let is_prod = state.config.load().environment == "production";
+    let uses_https = check_uses_https(&state);
 
     let cookie = Cookie::build(("session", session_str))
         .path("/")
-        .secure(is_prod) // Secure only in production
+        .secure(uses_https)
         .http_only(true)
         .same_site(SameSite::Lax)
         .build();
@@ -108,11 +135,11 @@ pub async fn callback_keycloak(
 
     let session_str = serde_json::to_string(&session).map_err(ApiError::Serialization)?;
 
-    let is_prod = state.config.load().environment == "production";
+    let uses_https = check_uses_https(&state);
 
     let cookie = Cookie::build(("session", session_str))
         .path("/")
-        .secure(is_prod) // Secure only in production
+        .secure(uses_https)
         .http_only(true)
         .same_site(SameSite::Lax)
         .build();

@@ -14,7 +14,7 @@ services:
       - CERTSPOTTER_API_TOKEN=${CERTSPOTTER_API_TOKEN}
       - URLSCAN_API_KEY=${URLSCAN_API_KEY}
       - OTX_API_KEY=${OTX_API_KEY}
-      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-http://localhost:3000}
+      - CORS_ALLOW_ORIGINS=http://itssilpr01:3000
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LOG_FORMAT=${LOG_FORMAT:-json}
       - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
@@ -43,9 +43,9 @@ services:
       dockerfile: Dockerfile
       args:
         ENVIRONMENT: production
-        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8000}
+        NEXT_PUBLIC_API_BASE: http://itssilpr01:8000
     environment:
-      - NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE:-http://localhost:8000}
+      - NEXT_PUBLIC_API_BASE=http://itssilpr01:8000
       - NODE_ENV=production
       - NEXT_PUBLIC_LOG_LEVEL=${LOG_LEVEL:-WARN}
     ports:

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import {
   runDiscovery,
   stopDiscovery,
@@ -60,6 +60,7 @@ export default function DiscoveryPage() {
   const [runs, setRuns] = useState<DiscoveryRun[]>([]);
   const [seeds, setSeeds] = useState<Seed[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
   // Discovery controls
@@ -77,8 +78,11 @@ export default function DiscoveryPage() {
   // Run detail modal
   const [selectedRun, setSelectedRun] = useState<DiscoveryRun | null>(null);
 
-  async function loadData() {
+  const loadData = useCallback(async (isRefresh = false) => {
     try {
+      if (isRefresh) {
+        setRefreshing(true);
+      }
       const [statusData, runsData, seedsData] = await Promise.all([
         getDiscoveryStatus(),
         listDiscoveryRuns(50),
@@ -92,14 +96,15 @@ export default function DiscoveryPage() {
       setError((err as Error).message);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
-  }
+  }, []);
 
   useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, status?.running ? 3000 : 10000);
+    loadData(false);
+    const interval = setInterval(() => loadData(true), status?.running ? 3000 : 10000);
     return () => clearInterval(interval);
-  }, [status?.running]);
+  }, [loadData, status?.running]);
 
   async function handleStartDiscovery() {
     setStarting(true);
@@ -109,7 +114,7 @@ export default function DiscoveryPage() {
         max_depth: maxDepth,
         auto_scan_threshold: autoScanThreshold,
       });
-      loadData();
+      loadData(true);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -122,7 +127,7 @@ export default function DiscoveryPage() {
     setError(null);
     try {
       await stopDiscovery();
-      loadData();
+      loadData(true);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -138,7 +143,7 @@ export default function DiscoveryPage() {
       await createSeed({ seed_type: seedType, value: seedValue.trim(), note: seedNote.trim() || undefined });
       setSeedValue("");
       setSeedNote("");
-      await loadData();
+      await loadData(true);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -149,7 +154,7 @@ export default function DiscoveryPage() {
   async function handleDeleteSeed(id: string) {
     try {
       await deleteSeed(id);
-      await loadData();
+      await loadData(true);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -530,8 +535,8 @@ export default function DiscoveryPage() {
                   <CardTitle>Configured Seeds ({seeds.length})</CardTitle>
                   <CardDescription>All discovery starting points</CardDescription>
                 </div>
-                <Button variant="outline" onClick={loadData}>
-                  Refresh
+                <Button variant="outline" onClick={() => loadData(true)} disabled={refreshing}>
+                  {refreshing ? "Refreshing..." : "Refresh"}
                 </Button>
               </div>
             </CardHeader>
@@ -603,8 +608,8 @@ export default function DiscoveryPage() {
                   <CardTitle>Discovery Run History</CardTitle>
                   <CardDescription>Past and current discovery operations</CardDescription>
                 </div>
-                <Button variant="outline" onClick={loadData}>
-                  Refresh
+                <Button variant="outline" onClick={() => loadData(true)} disabled={refreshing}>
+                  {refreshing ? "Refreshing..." : "Refresh"}
                 </Button>
               </div>
             </CardHeader>

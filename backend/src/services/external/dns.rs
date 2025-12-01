@@ -266,6 +266,172 @@ impl DnsResolver {
     pub fn config(&self) -> &DnsConfig {
         &self.config
     }
+
+    /// Lookup TXT records for a hostname
+    pub async fn lookup_txt(&self, hostname: &str) -> Result<Vec<String>, ApiError> {
+        // Apply rate limiting
+        self.rate_limiter.until_ready().await;
+
+        let hostname_owned = hostname.to_string();
+        let hostname_for_error = hostname_owned.clone();
+        let resolver = self.resolver.clone();
+        let query_timeout = self.config.query_timeout;
+
+        let result = timeout(query_timeout, async move {
+            resolver.txt_lookup(&hostname_owned).await.map_err(|e| {
+                ApiError::ExternalService(format!(
+                    "TXT lookup failed for {}: {}",
+                    hostname_owned, e
+                ))
+            })
+        })
+        .await
+        .map_err(|_| {
+            ApiError::ExternalService(format!("TXT query timeout for {}", hostname_for_error))
+        })?;
+
+        match result {
+            Ok(response) => {
+                let records: Vec<String> = response
+                    .iter()
+                    .map(|txt| {
+                        txt.txt_data()
+                            .iter()
+                            .map(|data| String::from_utf8_lossy(data).to_string())
+                            .collect::<Vec<_>>()
+                            .join("")
+                    })
+                    .collect();
+                Ok(records)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Lookup NS records for a domain
+    pub async fn lookup_ns(&self, domain: &str) -> Result<Vec<String>, ApiError> {
+        // Apply rate limiting
+        self.rate_limiter.until_ready().await;
+
+        let domain_owned = format!("{}.", domain.trim_end_matches('.'));
+        let domain_for_error = domain_owned.clone();
+        let resolver = self.resolver.clone();
+        let query_timeout = self.config.query_timeout;
+
+        let result = timeout(query_timeout, async move {
+            resolver.ns_lookup(&domain_owned).await.map_err(|e| {
+                ApiError::ExternalService(format!(
+                    "NS lookup failed for {}: {}",
+                    domain_owned, e
+                ))
+            })
+        })
+        .await
+        .map_err(|_| {
+            ApiError::ExternalService(format!("NS query timeout for {}", domain_for_error))
+        })?;
+
+        match result {
+            Ok(response) => {
+                let nameservers: Vec<String> = response
+                    .iter()
+                    .map(|ns| ns.to_string().trim_end_matches('.').to_string())
+                    .collect();
+                Ok(nameservers)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Lookup CAA records for a domain
+    pub async fn lookup_caa(&self, domain: &str) -> Result<Vec<String>, ApiError> {
+        // Apply rate limiting
+        self.rate_limiter.until_ready().await;
+
+        let domain_owned = format!("{}.", domain.trim_end_matches('.'));
+        let domain_for_error = domain_owned.clone();
+        let resolver = self.resolver.clone();
+        let query_timeout = self.config.query_timeout;
+
+        let result = timeout(query_timeout, async move {
+            use trust_dns_resolver::proto::rr::RecordType;
+            
+            resolver
+                .lookup(&domain_owned, RecordType::CAA)
+                .await
+                .map_err(|e| {
+                    ApiError::ExternalService(format!(
+                        "CAA lookup failed for {}: {}",
+                        domain_owned, e
+                    ))
+                })
+        })
+        .await
+        .map_err(|_| {
+            ApiError::ExternalService(format!("CAA query timeout for {}", domain_for_error))
+        })?;
+
+        match result {
+            Ok(response) => {
+                let records: Vec<String> = response
+                    .iter()
+                    .filter_map(|record| {
+                        // Try to extract CAA data from the record
+                        // The format is: flags tag value
+                        let rdata_str = format!("{:?}", record);
+                        if rdata_str.contains("CAA") {
+                            Some(rdata_str)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                Ok(records)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Lookup MX records for a domain
+    pub async fn lookup_mx(&self, domain: &str) -> Result<Vec<(u16, String)>, ApiError> {
+        // Apply rate limiting
+        self.rate_limiter.until_ready().await;
+
+        let domain_owned = format!("{}.", domain.trim_end_matches('.'));
+        let domain_for_error = domain_owned.clone();
+        let resolver = self.resolver.clone();
+        let query_timeout = self.config.query_timeout;
+
+        let result = timeout(query_timeout, async move {
+            resolver.mx_lookup(&domain_owned).await.map_err(|e| {
+                ApiError::ExternalService(format!(
+                    "MX lookup failed for {}: {}",
+                    domain_owned, e
+                ))
+            })
+        })
+        .await
+        .map_err(|_| {
+            ApiError::ExternalService(format!("MX query timeout for {}", domain_for_error))
+        })?;
+
+        match result {
+            Ok(response) => {
+                let mut mx_records: Vec<(u16, String)> = response
+                    .iter()
+                    .map(|mx| {
+                        (
+                            mx.preference(),
+                            mx.exchange().to_string().trim_end_matches('.').to_string(),
+                        )
+                    })
+                    .collect();
+                mx_records.sort_by_key(|(pref, _)| *pref);
+                Ok(mx_records)
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[cfg(test)]

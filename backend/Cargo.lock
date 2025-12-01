@@ -3180,6 +3180,7 @@ dependencies = [
  "html-escape",
  "hyper 1.6.0",
  "ipnet",
+ "lazy_static",
  "memory-stats",
  "mime",
  "mime_guess",

@@ -284,7 +284,12 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
           </Card>
 
           {/* Actions */}
-          <div className="flex justify-end gap-3 pt-4 border-t border-border">
+          <div className="flex justify-between gap-3 pt-4 border-t border-border">
+            <Link href={`/asset/${asset.id}`}>
+              <Button variant="primary" onClick={onClose}>
+                View Full Asset Page →
+              </Button>
+            </Link>
             <Button variant="outline" onClick={onClose}>
               Close
             </Button>

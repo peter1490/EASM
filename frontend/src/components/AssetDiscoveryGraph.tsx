@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import {
     ReactFlow,
     MiniMap,
@@ -40,6 +41,8 @@ interface CustomNodeData extends Record<string, unknown> {
     type: string;
     confidence?: number;
     isTarget: boolean;
+    assetId: string;
+    onNodeClick: (assetId: string) => void;
 }
 
 const nodeWidth = 220;
@@ -47,7 +50,7 @@ const nodeHeight = 80;
 
 // Custom Node Component
 const CustomAssetNode = ({ data }: NodeProps<Node<CustomNodeData>>) => {
-    const { label, type, confidence, isTarget } = data;
+    const { label, type, confidence, isTarget, assetId, onNodeClick } = data;
 
     let icon = "📄";
     const bgColor = "bg-white";
@@ -75,8 +78,17 @@ const CustomAssetNode = ({ data }: NodeProps<Node<CustomNodeData>>) => {
             break;
     }
 
+    const handleClick = () => {
+        if (!isTarget && onNodeClick) {
+            onNodeClick(assetId);
+        }
+    };
+
     return (
-        <div className={`px-4 py-3 shadow-md rounded-lg border-2 ${borderColor} ${bgColor} min-w-[200px]`}>
+        <div 
+            className={`px-4 py-3 shadow-md rounded-lg border-2 ${borderColor} ${bgColor} min-w-[200px] ${!isTarget ? 'cursor-pointer hover:border-blue-300 hover:shadow-lg transition-all' : ''}`}
+            onClick={handleClick}
+        >
             <Handle type="target" position={Position.Top} className="!bg-gray-400" />
             
             <div className="flex items-start gap-3">
@@ -87,6 +99,9 @@ const CustomAssetNode = ({ data }: NodeProps<Node<CustomNodeData>>) => {
                         {label}
                     </div>
                 </div>
+                {!isTarget && (
+                    <div className="text-xs text-gray-400 hover:text-blue-500">↗</div>
+                )}
             </div>
             
             {confidence !== undefined && (
@@ -146,6 +161,7 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => 
 };
 
 export default function AssetDiscoveryGraph({ assetId }: AssetDiscoveryGraphProps) {
+    const router = useRouter();
     const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
     const [loading, setLoading] = useState(true);
@@ -155,6 +171,10 @@ export default function AssetDiscoveryGraph({ assetId }: AssetDiscoveryGraphProp
         (params: Connection) => setEdges((eds) => addEdge(params, eds)),
         [setEdges],
     );
+
+    const handleNodeClick = useCallback((targetAssetId: string) => {
+        router.push(`/asset/${targetAssetId}`);
+    }, [router]);
 
     useEffect(() => {
         if (!assetId) return;
@@ -186,7 +206,9 @@ export default function AssetDiscoveryGraph({ assetId }: AssetDiscoveryGraphProp
                         type: asset.asset_type,
                         confidence: asset.confidence,
                         isTarget: asset.id === assetId,
-                        metadata: asset.metadata
+                        metadata: asset.metadata,
+                        assetId: asset.id,
+                        onNodeClick: handleNodeClick,
                     },
                     position: { x: 0, y: 0 },
                 }));
@@ -249,7 +271,7 @@ export default function AssetDiscoveryGraph({ assetId }: AssetDiscoveryGraphProp
         };
 
         fetchPath();
-    }, [assetId, setNodes, setEdges]);
+    }, [assetId, setNodes, setEdges, handleNodeClick]);
 
     if (loading) {
         return (

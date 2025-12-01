@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { 
   getHealth, 
   getMetrics, 
@@ -300,6 +300,7 @@ export default function SettingsPage() {
   const [health, setHealth] = useState<{ status: string; version: string } | null>(null);
   const [users, setUsers] = useState<UserWithRoles[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [updating, setUpdating] = useState<string | null>(null);
   const [settingsData, setSettingsData] = useState<SettingsResponse | null>(null);
@@ -309,6 +310,9 @@ export default function SettingsPage() {
   const [secretsRevealed, setSecretsRevealed] = useState(false);
   const [secretTouched, setSecretTouched] = useState<Record<string, boolean>>({});
   const [secretVisibility, setSecretVisibility] = useState<Record<string, boolean>>({});
+  
+  // Track if initial load has happened (ref to avoid re-renders)
+  const hasInitialLoadRef = useRef(false);
   
   // Edit user modal
   const [selectedUser, setSelectedUser] = useState<UserWithRoles | null>(null);
@@ -333,9 +337,14 @@ export default function SettingsPage() {
 
   const isAdmin = user?.roles?.includes("admin");
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (isRefresh = false) => {
     try {
-      setLoading(true);
+      // Only show full loading spinner on initial load, not refreshes
+      if (!isRefresh) {
+        setLoading(true);
+      } else {
+        setRefreshing(true);
+      }
       const [metricsData, healthData] = await Promise.all([
         getMetrics(),
         getHealth(),
@@ -352,10 +361,12 @@ export default function SettingsPage() {
       }
       
       setError(null);
+      hasInitialLoadRef.current = true;
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, [isAdmin]);
 
@@ -378,11 +389,11 @@ export default function SettingsPage() {
   }, [isAdmin]);
 
   useEffect(() => {
-    loadData();
+    loadData(false); // Initial load with full spinner
     if (isAdmin) {
       loadSettings(false);
     }
-    const iv = setInterval(loadData, 10000);
+    const iv = setInterval(() => loadData(true), 10000); // Silent refreshes
     return () => clearInterval(iv);
   }, [isAdmin, loadData, loadSettings]);
 
@@ -1242,7 +1253,9 @@ export default function SettingsPage() {
                   <CardDescription>Manage user accounts and roles</CardDescription>
                 </div>
                 <div className="flex gap-2">
-                  <Button variant="outline" onClick={loadData}>Refresh</Button>
+                  <Button variant="outline" onClick={() => loadData(true)} disabled={refreshing}>
+                    {refreshing ? "Refreshing..." : "Refresh"}
+                  </Button>
                   <Button onClick={openCreateUserModal}>Add User</Button>
                 </div>
               </div>

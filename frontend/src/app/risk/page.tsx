@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
   getRiskOverview,
   listAssets,
@@ -17,6 +17,7 @@ import Badge from "@/components/ui/Badge";
 import Button from "@/components/ui/Button";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import EmptyState from "@/components/ui/EmptyState";
+import Link from "next/link";
 
 const RISK_COLORS: Record<string, "error" | "warning" | "info" | "secondary" | "success"> = {
   critical: "error",
@@ -31,14 +32,23 @@ export default function RiskPage() {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [highRiskAssets, setHighRiskAssets] = useState<Asset[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recalculating, setRecalculating] = useState<string | null>(null);
   const [recalculatingAll, setRecalculatingAll] = useState(false);
   const [recalcResult, setRecalcResult] = useState<RiskRecalculationResult | null>(null);
+  
+  // Track if initial load has happened (ref to avoid re-renders)
+  const hasInitialLoadRef = useRef(false);
 
-  async function loadData() {
+  async function loadData(isRefresh = false) {
     try {
-      setLoading(true);
+      // Only show full loading spinner on initial load, not refreshes
+      if (!isRefresh) {
+        setLoading(true);
+      } else {
+        setRefreshing(true);
+      }
       const [overviewData, assetsData, highRiskData] = await Promise.all([
         getRiskOverview(),
         listAssets(0, 100),
@@ -52,16 +62,18 @@ export default function RiskPage() {
       setAssets(sortedAssets);
       setHighRiskAssets(highRiskData);
       setError(null);
+      hasInitialLoadRef.current = true;
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }
 
   useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 30000);
+    loadData(false); // Initial load with full spinner
+    const interval = setInterval(() => loadData(true), 30000); // Silent refreshes
     return () => clearInterval(interval);
   }, []);
 
@@ -84,7 +96,7 @@ export default function RiskPage() {
     try {
       const result = await recalculateAllRisks();
       setRecalcResult(result);
-      loadData(); // Refresh data after recalculation
+      loadData(true); // Refresh data after recalculation (preserve scroll)
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -319,7 +331,9 @@ export default function RiskPage() {
                   <CardTitle>Highest Risk Assets</CardTitle>
                   <CardDescription>Assets with the highest risk scores</CardDescription>
                 </div>
-                <Button variant="outline" onClick={loadData}>Refresh</Button>
+                <Button variant="outline" onClick={() => loadData(true)} disabled={refreshing}>
+                  {refreshing ? "Refreshing..." : "Refresh"}
+                </Button>
               </div>
             </CardHeader>
             <CardContent>
@@ -344,8 +358,12 @@ export default function RiskPage() {
                   </TableHeader>
                   <TableBody>
                     {topRiskyAssets.map((asset) => (
-                      <TableRow key={asset.id}>
-                        <TableCell className="font-mono text-sm">{asset.value}</TableCell>
+                      <TableRow key={asset.id} className="hover:bg-muted/50 cursor-pointer">
+                        <TableCell className="font-mono text-sm">
+                          <Link href={`/asset/${asset.id}`} className="hover:text-primary transition-colors">
+                            {asset.value}
+                          </Link>
+                        </TableCell>
                         <TableCell>
                           <Badge variant="secondary">{asset.asset_type}</Badge>
                         </TableCell>
@@ -428,34 +446,35 @@ export default function RiskPage() {
             <CardContent>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {assets.slice(0, 12).map((asset) => (
-                  <div
-                    key={asset.id}
-                    className="p-4 border border-border rounded-xl hover:bg-muted/30 hover:border-primary/30 transition-all cursor-pointer group"
-                  >
-                    <div className="flex items-start justify-between mb-3">
-                      <div className="flex-1 min-w-0">
-                        <p className="font-mono text-sm truncate group-hover:text-primary transition-colors">{asset.value}</p>
-                        <p className="text-xs text-muted-foreground">{asset.asset_type}</p>
+                  <Link key={asset.id} href={`/asset/${asset.id}`}>
+                    <div
+                      className="p-4 border border-border rounded-xl hover:bg-muted/30 hover:border-primary/30 transition-all cursor-pointer group h-full"
+                    >
+                      <div className="flex items-start justify-between mb-3">
+                        <div className="flex-1 min-w-0">
+                          <p className="font-mono text-sm truncate group-hover:text-primary transition-colors">{asset.value}</p>
+                          <p className="text-xs text-muted-foreground">{asset.asset_type}</p>
+                        </div>
+                        {asset.risk_level && (
+                          <Badge variant={RISK_COLORS[asset.risk_level.toLowerCase()] || "secondary"} className="ml-2">
+                            {asset.risk_level}
+                          </Badge>
+                        )}
                       </div>
-                      {asset.risk_level && (
-                        <Badge variant={RISK_COLORS[asset.risk_level.toLowerCase()] || "secondary"} className="ml-2">
-                          {asset.risk_level}
-                        </Badge>
-                      )}
+                      <div className="flex items-center justify-between mt-3 pt-3 border-t border-border">
+                        <div className="text-sm">
+                          <span className="text-muted-foreground">Score: </span>
+                          <span className="font-mono font-semibold">
+                            {asset.risk_score?.toFixed(1) || "N/A"}
+                          </span>
+                        </div>
+                        <div className="text-sm">
+                          <span className="text-muted-foreground">Importance: </span>
+                          <span className="font-mono">{asset.importance}/5</span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex items-center justify-between mt-3 pt-3 border-t border-border">
-                      <div className="text-sm">
-                        <span className="text-muted-foreground">Score: </span>
-                        <span className="font-mono font-semibold">
-                          {asset.risk_score?.toFixed(1) || "N/A"}
-                        </span>
-                      </div>
-                      <div className="text-sm">
-                        <span className="text-muted-foreground">Importance: </span>
-                        <span className="font-mono">{asset.importance}/5</span>
-                      </div>
-                    </div>
-                  </div>
+                  </Link>
                 ))}
               </div>
               {assets.length > 12 && (

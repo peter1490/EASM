@@ -17,6 +17,7 @@ import Button from "@/components/ui/Button";
 import Input from "@/components/ui/Input";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import EmptyState from "@/components/ui/EmptyState";
+import Link from "next/link";
 
 type SearchMode = "assets" | "findings";
 
@@ -216,13 +217,17 @@ export default function SearchPage() {
                 </TableHeader>
                 <TableBody>
                   {assetResults.map((asset) => (
-                    <TableRow key={asset.id}>
+                    <TableRow key={asset.id} className="hover:bg-muted/50 cursor-pointer">
                       <TableCell>
                         <Badge variant={asset.asset_type === "domain" ? "info" : "secondary"}>
                           {asset.asset_type}
                         </Badge>
                       </TableCell>
-                      <TableCell className="font-mono">{asset.identifier}</TableCell>
+                      <TableCell className="font-mono">
+                        <Link href={`/asset/${asset.id}`} className="hover:text-primary transition-colors">
+                          {asset.identifier}
+                        </Link>
+                      </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-3">
                           <div className="w-16 h-2.5 bg-muted rounded-full overflow-hidden">

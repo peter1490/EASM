@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import {
   listSecurityScans,
   listSecurityFindings,
@@ -25,6 +25,7 @@ import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import EmptyState from "@/components/ui/EmptyState";
 import Modal from "@/components/ui/Modal";
 import FindingRenderer from "@/components/FindingRenderer";
+import Link from "next/link";
 
 type TabType = "findings" | "scans" | "legacy";
 
@@ -60,6 +61,7 @@ export default function SecurityPage() {
   const [legacyFindings, setLegacyFindings] = useState<Finding[]>([]);
   const [summary, setSummary] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
   // Filters
@@ -77,10 +79,18 @@ export default function SecurityPage() {
   const [selectedFinding, setSelectedFinding] = useState<SecurityFinding | null>(null);
   const [selectedLegacyFinding, setSelectedLegacyFinding] = useState<Finding | null>(null);
   const [updating, setUpdating] = useState(false);
+  
+  // Track if initial load has happened (ref to avoid re-renders)
+  const hasInitialLoadRef = useRef(false);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (isRefresh = false) => {
     try {
-      setLoading(true);
+      // Only show full loading spinner on initial load, not refreshes
+      if (!isRefresh) {
+        setLoading(true);
+      } else {
+        setRefreshing(true);
+      }
       const [scansData, summaryData] = await Promise.all([
         listSecurityScans(50),
         getSecurityFindingsSummary(),
@@ -102,16 +112,19 @@ export default function SecurityPage() {
       setLegacyTotalCount(legacyData.total_count);
       
       setError(null);
+      hasInitialLoadRef.current = true;
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, [limit, offset, severityFilter, statusFilter]);
 
   useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 10000);
+    // Initial load or filter/pagination change - only show full loading if no data yet
+    loadData(!hasInitialLoadRef.current);
+    const interval = setInterval(() => loadData(true), 10000); // Always refresh silently
     return () => clearInterval(interval);
   }, [loadData, severityFilter, statusFilter, offset]);
 
@@ -138,7 +151,7 @@ export default function SecurityPage() {
       if (selectedFinding?.id === findingId) {
         setSelectedFinding(updated);
       }
-      loadData();
+      loadData(true); // Refresh silently to preserve scroll
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -315,7 +328,9 @@ export default function SecurityPage() {
                 <CardTitle>Security Findings</CardTitle>
                 <CardDescription>{totalCount} findings found</CardDescription>
               </div>
-              <Button variant="outline" onClick={loadData}>Refresh</Button>
+              <Button variant="outline" onClick={() => loadData(true)} disabled={refreshing}>
+                {refreshing ? "Refreshing..." : "Refresh"}
+              </Button>
             </div>
           </CardHeader>
           <CardContent>
@@ -337,6 +352,7 @@ export default function SecurityPage() {
                       <TableHead>Severity</TableHead>
                       <TableHead>Title</TableHead>
                       <TableHead>Type</TableHead>
+                      <TableHead>Asset</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead>CVSS</TableHead>
                       <TableHead>First Seen</TableHead>
@@ -362,6 +378,13 @@ export default function SecurityPage() {
                           <code className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono">
                             {finding.finding_type}
                           </code>
+                        </TableCell>
+                        <TableCell onClick={(e) => e.stopPropagation()}>
+                          <Link href={`/asset/${finding.asset_id}`}>
+                            <code className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono hover:bg-primary/20 transition-colors cursor-pointer">
+                              {finding.asset_id.slice(0, 8)}... ↗
+                            </code>
+                          </Link>
                         </TableCell>
                         <TableCell>
                           <Badge variant={STATUS_COLORS[finding.status] || "secondary"}>
@@ -446,7 +469,9 @@ export default function SecurityPage() {
                 <CardTitle>Security Scans</CardTitle>
                 <CardDescription>{scans.length} scans</CardDescription>
               </div>
-              <Button variant="outline" onClick={loadData}>Refresh</Button>
+              <Button variant="outline" onClick={() => loadData(true)} disabled={refreshing}>
+                {refreshing ? "Refreshing..." : "Refresh"}
+              </Button>
             </div>
           </CardHeader>
           <CardContent>
@@ -471,16 +496,21 @@ export default function SecurityPage() {
                     <TableHead>Started</TableHead>
                     <TableHead>Completed</TableHead>
                     <TableHead>Note</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {scans.map((scan) => (
-                    <TableRow key={scan.id}>
+                    <TableRow key={scan.id} className="hover:bg-muted/50">
                       <TableCell>
                         <Badge variant="info">{scan.scan_type}</Badge>
                       </TableCell>
                       <TableCell className="font-mono text-xs">
-                        {scan.asset_id.slice(0, 8)}...
+                        <Link href={`/asset/${scan.asset_id}`}>
+                          <span className="hover:text-primary transition-colors cursor-pointer">
+                            {scan.asset_id.slice(0, 8)}... ↗
+                          </span>
+                        </Link>
                       </TableCell>
                       <TableCell>
                         <Badge variant={SCAN_STATUS_COLORS[scan.status] || "secondary"}>
@@ -500,6 +530,13 @@ export default function SecurityPage() {
                       </TableCell>
                       <TableCell className="text-muted-foreground max-w-xs truncate">
                         {scan.note || "—"}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Link href={`/security/scans/${scan.id}`}>
+                          <Button size="sm" variant="outline">
+                            View Details
+                          </Button>
+                        </Link>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -521,7 +558,9 @@ export default function SecurityPage() {
                   Legacy findings from direct scans ({legacyTotalCount} total)
                 </CardDescription>
               </div>
-              <Button variant="outline" onClick={loadData}>Refresh</Button>
+              <Button variant="outline" onClick={() => loadData(true)} disabled={refreshing}>
+                {refreshing ? "Refreshing..." : "Refresh"}
+              </Button>
             </div>
           </CardHeader>
           <CardContent>
@@ -583,9 +622,27 @@ export default function SecurityPage() {
                   Type: <code className="bg-muted px-1.5 rounded font-mono text-xs">{selectedFinding.finding_type}</code>
                 </p>
               </div>
-              <Badge variant={STATUS_COLORS[selectedFinding.status] || "secondary"}>
-                {selectedFinding.status.replace("_", " ")}
-              </Badge>
+              <div className="flex items-center gap-2">
+                {selectedFinding.data?.source_url ? (
+                  <a
+                    href={selectedFinding.data.source_url as string}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+                    title={`View on ${selectedFinding.data.source_name || 'external source'}`}
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                      <polyline points="15 3 21 3 21 9" />
+                      <line x1="10" y1="14" x2="21" y2="3" />
+                    </svg>
+                    {(selectedFinding.data.source_name as string) || 'View Source'}
+                  </a>
+                ) : null}
+                <Badge variant={STATUS_COLORS[selectedFinding.status] || "secondary"}>
+                  {selectedFinding.status.replace("_", " ")}
+                </Badge>
+              </div>
             </div>
 
             {selectedFinding.description && (
@@ -608,8 +665,12 @@ export default function SecurityPage() {
                 <span className="ml-2 font-mono font-medium">{selectedFinding.cvss_score || "N/A"}</span>
               </div>
               <div>
-                <span className="text-muted-foreground">Asset ID:</span>
-                <span className="ml-2 font-mono text-xs">{selectedFinding.asset_id.slice(0, 12)}...</span>
+                <span className="text-muted-foreground">Asset:</span>
+                <Link href={`/asset/${selectedFinding.asset_id}`} onClick={() => setSelectedFinding(null)}>
+                  <span className="ml-2 font-mono text-xs hover:text-primary transition-colors cursor-pointer">
+                    {selectedFinding.asset_id.slice(0, 12)}... ↗
+                  </span>
+                </Link>
               </div>
               <div>
                 <span className="text-muted-foreground">First Seen:</span>

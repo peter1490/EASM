@@ -78,6 +78,7 @@ url = "2.5"
 # Rate limiting and concurrency
 governor = "0.6"
 futures = "0.3"
+lazy_static = "1.4"
 
 # Validation
 validator = { version = "0.18", features = ["derive"] }

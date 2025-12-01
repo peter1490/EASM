@@ -146,9 +146,6 @@ export default function LoginPage() {
             </button>
           </div>
 
-          <div className="text-center text-xs text-muted-foreground">
-            <p>Default credentials: admin@example.com / admin</p>
-          </div>
         </CardContent>
       </Card>
     </div>

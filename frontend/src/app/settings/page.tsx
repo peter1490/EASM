@@ -4,7 +4,10 @@ import { useCallback, useEffect, useState } from "react";
 import { 
   getHealth, 
   getMetrics, 
-  listUsers, 
+  listUsers,
+  createUser,
+  updateUser,
+  deleteUser,
   updateUserRole, 
   getSettings,
   updateSettings,
@@ -12,6 +15,8 @@ import {
   type UserWithRoles,
   type SettingsResponse,
   type SettingsView,
+  type CreateUserRequest,
+  type UpdateUserRequest,
 } from "@/app/api";
 import { useAuth } from "@/context/AuthContext";
 import Header from "@/components/Header";
@@ -308,6 +313,23 @@ export default function SettingsPage() {
   // Edit user modal
   const [selectedUser, setSelectedUser] = useState<UserWithRoles | null>(null);
   const [selectedRole, setSelectedRole] = useState("");
+  
+  // Create/Edit user modal
+  const [showUserModal, setShowUserModal] = useState(false);
+  const [editingUser, setEditingUser] = useState<UserWithRoles | null>(null);
+  const [userFormData, setUserFormData] = useState({
+    email: "",
+    password: "",
+    display_name: "",
+    is_active: true,
+    roles: [] as string[],
+  });
+  const [userFormLoading, setUserFormLoading] = useState(false);
+  const [userFormError, setUserFormError] = useState<string | null>(null);
+  
+  // Delete confirmation
+  const [deleteConfirmUser, setDeleteConfirmUser] = useState<UserWithRoles | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
 
   const isAdmin = user?.roles?.includes("admin");
 
@@ -522,6 +544,106 @@ export default function SettingsPage() {
       setError((err as Error).message);
     } finally {
       setUpdating(null);
+    }
+  }
+
+  function openCreateUserModal() {
+    setEditingUser(null);
+    setUserFormData({
+      email: "",
+      password: "",
+      display_name: "",
+      is_active: true,
+      roles: ["viewer"],
+    });
+    setUserFormError(null);
+    setShowUserModal(true);
+  }
+
+  function openEditUserModal(userWithRoles: UserWithRoles) {
+    setEditingUser(userWithRoles);
+    setUserFormData({
+      email: userWithRoles.email,
+      password: "",
+      display_name: userWithRoles.display_name || "",
+      is_active: userWithRoles.is_active,
+      roles: userWithRoles.roles || [],
+    });
+    setUserFormError(null);
+    setShowUserModal(true);
+  }
+
+  async function handleSaveUser() {
+    setUserFormLoading(true);
+    setUserFormError(null);
+
+    try {
+      if (editingUser) {
+        // Update existing user
+        const updateData: UpdateUserRequest = {};
+        if (userFormData.email !== editingUser.email) {
+          updateData.email = userFormData.email;
+        }
+        if (userFormData.display_name !== (editingUser.display_name || "")) {
+          updateData.display_name = userFormData.display_name || undefined;
+        }
+        if (userFormData.is_active !== editingUser.is_active) {
+          updateData.is_active = userFormData.is_active;
+        }
+        if (userFormData.password) {
+          updateData.password = userFormData.password;
+        }
+        
+        await updateUser(editingUser.id, updateData);
+        
+        // Handle role changes
+        const oldRoles = editingUser.roles || [];
+        const newRoles = userFormData.roles;
+        
+        // Remove roles that are no longer selected
+        for (const role of oldRoles) {
+          if (!newRoles.includes(role)) {
+            await updateUserRole(editingUser.id, role, "remove");
+          }
+        }
+        
+        // Add new roles
+        for (const role of newRoles) {
+          if (!oldRoles.includes(role)) {
+            await updateUserRole(editingUser.id, role, "add");
+          }
+        }
+      } else {
+        // Create new user
+        const createData: CreateUserRequest = {
+          email: userFormData.email,
+          password: userFormData.password || undefined,
+          display_name: userFormData.display_name || undefined,
+          roles: userFormData.roles.length > 0 ? userFormData.roles : undefined,
+        };
+        
+        await createUser(createData);
+      }
+      
+      setShowUserModal(false);
+      loadData();
+    } catch (err) {
+      setUserFormError((err as Error).message);
+    } finally {
+      setUserFormLoading(false);
+    }
+  }
+
+  async function handleDeleteUser(userToDelete: UserWithRoles) {
+    setDeleteLoading(true);
+    try {
+      await deleteUser(userToDelete.id);
+      setDeleteConfirmUser(null);
+      loadData();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setDeleteLoading(false);
     }
   }
 
@@ -1061,7 +1183,7 @@ export default function SettingsPage() {
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription>Total Users</CardDescription>
-                <CardTitle className="text-3xl font-mono">{users.filter(u => u.user).length}</CardTitle>
+                <CardTitle className="text-3xl font-mono">{users.filter(u => u.id).length}</CardTitle>
               </CardHeader>
             </Card>
             <Card>
@@ -1084,7 +1206,7 @@ export default function SettingsPage() {
               <CardHeader className="pb-2">
                 <CardDescription>Active</CardDescription>
                 <CardTitle className="text-3xl font-mono text-success">
-                  {users.filter(u => u.user?.is_active).length}
+                  {users.filter(u => u.is_active).length}
                 </CardTitle>
               </CardHeader>
             </Card>
@@ -1119,7 +1241,10 @@ export default function SettingsPage() {
                   <CardTitle>Users</CardTitle>
                   <CardDescription>Manage user accounts and roles</CardDescription>
                 </div>
-                <Button variant="outline" onClick={loadData}>Refresh</Button>
+                <div className="flex gap-2">
+                  <Button variant="outline" onClick={loadData}>Refresh</Button>
+                  <Button onClick={openCreateUserModal}>Add User</Button>
+                </div>
               </div>
             </CardHeader>
             <CardContent>
@@ -1146,25 +1271,25 @@ export default function SettingsPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {users.filter(u => u.user).map((u) => (
-                      <TableRow key={u.user.id}>
+                    {users.filter(u => u.id).map((u) => (
+                      <TableRow key={u.id}>
                         <TableCell>
                           <div className="flex items-center gap-3">
                             <div className="h-9 w-9 rounded-full bg-gradient-to-br from-primary/20 to-info/20 flex items-center justify-center text-primary font-medium">
-                              {u.user.display_name?.[0] || u.user.email?.[0]?.toUpperCase() || "?"}
+                              {u.display_name?.[0] || u.email?.[0]?.toUpperCase() || "?"}
                             </div>
                             <div>
-                              <div className="font-medium">{u.user.display_name || "—"}</div>
+                              <div className="font-medium">{u.display_name || "—"}</div>
                               <div className="text-xs text-muted-foreground font-mono">
-                                {u.user.id?.slice(0, 8)}...
+                                {u.id?.slice(0, 8)}...
                               </div>
                             </div>
                           </div>
                         </TableCell>
-                        <TableCell className="font-mono text-sm">{u.user.email || "—"}</TableCell>
+                        <TableCell className="font-mono text-sm">{u.email || "—"}</TableCell>
                         <TableCell>
-                          <Badge variant={u.user.is_active ? "success" : "error"}>
-                            {u.user.is_active ? "Active" : "Inactive"}
+                          <Badge variant={u.is_active ? "success" : "error"}>
+                            {u.is_active ? "Active" : "Inactive"}
                           </Badge>
                         </TableCell>
                         <TableCell>
@@ -1175,8 +1300,8 @@ export default function SettingsPage() {
                                 variant={ROLE_COLORS[role] || "secondary"}
                                 className="cursor-pointer hover:opacity-80 transition-opacity"
                                 onClick={() => {
-                                  if (updating !== u.user.id) {
-                                    handleRemoveRole(u.user.id, role);
+                                  if (updating !== u.id) {
+                                    handleRemoveRole(u.id, role);
                                   }
                                 }}
                                 title="Click to remove"
@@ -1190,17 +1315,37 @@ export default function SettingsPage() {
                           </div>
                         </TableCell>
                         <TableCell className="text-muted-foreground text-sm">
-                          {u.user.created_at ? new Date(u.user.created_at).toLocaleDateString() : "—"}
+                          {u.created_at ? new Date(u.created_at).toLocaleDateString() : "—"}
                         </TableCell>
                         <TableCell className="text-right">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => setSelectedUser(u)}
-                            disabled={updating === u.user.id}
-                          >
-                            {updating === u.user.id ? "..." : "Manage"}
-                          </Button>
+                          <div className="flex gap-2 justify-end">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => openEditUserModal(u)}
+                              disabled={updating === u.id}
+                            >
+                              Edit
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => setSelectedUser(u)}
+                              disabled={updating === u.id}
+                            >
+                              Roles
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="text-destructive hover:text-destructive"
+                              onClick={() => setDeleteConfirmUser(u)}
+                              disabled={updating === u.id || u.id === user?.user_id}
+                              title={u.id === user?.user_id ? "Cannot delete yourself" : "Delete user"}
+                            >
+                              ×
+                            </Button>
+                          </div>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -1212,7 +1357,7 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* User Edit Modal */}
+      {/* User Role Management Modal */}
       <Modal
         isOpen={!!selectedUser}
         onClose={() => { setSelectedUser(null); setSelectedRole(""); }}
@@ -1222,13 +1367,13 @@ export default function SettingsPage() {
           <div className="space-y-6">
             <div className="flex items-center gap-4">
               <div className="h-14 w-14 rounded-full bg-gradient-to-br from-primary/20 to-info/20 flex items-center justify-center text-primary text-xl font-medium">
-                {selectedUser.user.display_name?.[0] || selectedUser.user.email[0].toUpperCase()}
+                {selectedUser.display_name?.[0] || selectedUser.email[0].toUpperCase()}
               </div>
               <div>
                 <div className="font-medium text-lg">
-                  {selectedUser.user.display_name || selectedUser.user.email}
+                  {selectedUser.display_name || selectedUser.email}
                 </div>
-                <div className="text-sm text-muted-foreground">{selectedUser.user.email}</div>
+                <div className="text-sm text-muted-foreground">{selectedUser.email}</div>
               </div>
             </div>
 
@@ -1243,8 +1388,8 @@ export default function SettingsPage() {
                         size="sm"
                         variant="ghost"
                         className="h-6 w-6 p-0 text-destructive hover:text-destructive"
-                        onClick={() => handleRemoveRole(selectedUser.user.id, role)}
-                        disabled={updating === selectedUser.user.id}
+                        onClick={() => handleRemoveRole(selectedUser.id, role)}
+                        disabled={updating === selectedUser.id}
                       >
                         ×
                       </Button>
@@ -1270,8 +1415,8 @@ export default function SettingsPage() {
                   ))}
                 </Select>
                 <Button
-                  onClick={() => handleAddRole(selectedUser.user.id, selectedRole)}
-                  disabled={!selectedRole || updating === selectedUser.user.id}
+                  onClick={() => handleAddRole(selectedUser.id, selectedRole)}
+                  disabled={!selectedRole || updating === selectedUser.id}
                 >
                   Add Role
                 </Button>
@@ -1284,6 +1429,127 @@ export default function SettingsPage() {
                 onClick={() => { setSelectedUser(null); setSelectedRole(""); }}
               >
                 Close
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Create/Edit User Modal */}
+      <Modal
+        isOpen={showUserModal}
+        onClose={() => setShowUserModal(false)}
+        title={editingUser ? "Edit User" : "Create User"}
+      >
+        <div className="space-y-4">
+          {userFormError && (
+            <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
+              {userFormError}
+            </div>
+          )}
+          
+          <Input
+            label="Email"
+            type="email"
+            value={userFormData.email}
+            onChange={(e) => setUserFormData(prev => ({ ...prev, email: e.target.value }))}
+            placeholder="user@example.com"
+            required
+          />
+          
+          <Input
+            label="Display Name"
+            type="text"
+            value={userFormData.display_name}
+            onChange={(e) => setUserFormData(prev => ({ ...prev, display_name: e.target.value }))}
+            placeholder="John Doe"
+          />
+          
+          <Input
+            label={editingUser ? "New Password (leave empty to keep current)" : "Password"}
+            type="password"
+            value={userFormData.password}
+            onChange={(e) => setUserFormData(prev => ({ ...prev, password: e.target.value }))}
+            placeholder={editingUser ? "••••••••" : "Min. 8 characters"}
+          />
+          
+          {editingUser && (
+            <Checkbox
+              checked={userFormData.is_active}
+              onChange={(checked) => setUserFormData(prev => ({ ...prev, is_active: checked }))}
+              label="Account is active"
+            />
+          )}
+          
+          <div>
+            <label className="block text-sm font-medium mb-2">Roles</label>
+            <div className="flex flex-wrap gap-2">
+              {ALL_ROLES.map((role) => (
+                <label key={role} className="flex items-center gap-2 p-2 bg-muted rounded-lg cursor-pointer hover:bg-muted/80">
+                  <input
+                    type="checkbox"
+                    checked={userFormData.roles.includes(role)}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setUserFormData(prev => ({ ...prev, roles: [...prev.roles, role] }));
+                      } else {
+                        setUserFormData(prev => ({ ...prev, roles: prev.roles.filter(r => r !== role) }));
+                      }
+                    }}
+                    className="rounded border-border"
+                  />
+                  <Badge variant={ROLE_COLORS[role] || "secondary"}>{role}</Badge>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-3 pt-4 border-t">
+            <Button
+              variant="outline"
+              onClick={() => setShowUserModal(false)}
+              disabled={userFormLoading}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSaveUser}
+              loading={userFormLoading}
+              disabled={!userFormData.email || (!editingUser && !userFormData.password)}
+            >
+              {editingUser ? "Save Changes" : "Create User"}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Delete Confirmation Modal */}
+      <Modal
+        isOpen={!!deleteConfirmUser}
+        onClose={() => setDeleteConfirmUser(null)}
+        title="Delete User"
+      >
+        {deleteConfirmUser && (
+          <div className="space-y-4">
+            <p className="text-muted-foreground">
+              Are you sure you want to delete the user <strong>{deleteConfirmUser.display_name || deleteConfirmUser.email}</strong>?
+              This action cannot be undone.
+            </p>
+            
+            <div className="flex justify-end gap-3 pt-4 border-t">
+              <Button
+                variant="outline"
+                onClick={() => setDeleteConfirmUser(null)}
+                disabled={deleteLoading}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={() => handleDeleteUser(deleteConfirmUser)}
+                loading={deleteLoading}
+              >
+                Delete User
               </Button>
             </div>
           </div>

@@ -291,11 +291,32 @@ export type User = {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  last_login_at?: string | null;
 };
 
 export type UserWithRoles = {
-  user: User;
+  id: string;
+  email: string;
+  display_name: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  last_login_at?: string | null;
   roles: string[];
+};
+
+export type CreateUserRequest = {
+  email: string;
+  password?: string;
+  display_name?: string;
+  roles?: string[];
+};
+
+export type UpdateUserRequest = {
+  email?: string;
+  display_name?: string;
+  is_active?: boolean;
+  password?: string;
 };
 
 // ============================================================================
@@ -789,6 +810,52 @@ export async function getHealth(): Promise<{ status: string; timestamp: string; 
 export async function listUsers(): Promise<UserWithRoles[]> {
   const res = await fetch(`${API_BASE}/api/admin/users`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list users: ${res.status}`);
+  return res.json();
+}
+
+export async function getUser(userId: string): Promise<UserWithRoles> {
+  const res = await fetch(`${API_BASE}/api/admin/users/${userId}`, { cache: "no-store", credentials: "include" });
+  if (!res.ok) throw new Error(`Failed to get user: ${res.status}`);
+  return res.json();
+}
+
+export async function createUser(userData: CreateUserRequest): Promise<UserWithRoles> {
+  const res = await fetch(`${API_BASE}/api/admin/users`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(userData),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to create user: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateUser(userId: string, userData: UpdateUserRequest): Promise<UserWithRoles> {
+  const res = await fetch(`${API_BASE}/api/admin/users/${userId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(userData),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to update user: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteUser(userId: string): Promise<string> {
+  const res = await fetch(`${API_BASE}/api/admin/users/${userId}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to delete user: ${res.status}`);
+  }
   return res.json();
 }
 

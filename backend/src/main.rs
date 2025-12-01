@@ -59,7 +59,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Admin endpoints
         .route(
             "/api/admin/users",
-            get(handlers::admin_handlers::list_users),
+            get(handlers::admin_handlers::list_users).post(handlers::admin_handlers::create_user),
+        )
+        .route(
+            "/api/admin/users/:id",
+            get(handlers::admin_handlers::get_user)
+                .patch(handlers::admin_handlers::update_user)
+                .delete(handlers::admin_handlers::delete_user),
         )
         .route(
             "/api/admin/users/:id/roles",

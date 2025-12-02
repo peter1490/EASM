@@ -538,6 +538,7 @@ impl DiscoveryService {
                         item.seed_id,
                         item.parent_asset_id,
                         item.depth,
+                        max_depth as i32,
                     )
                     .await;
 
@@ -609,33 +610,35 @@ impl DiscoveryService {
         seed_id: Option<Uuid>,
         parent_asset_id: Option<Uuid>,
         depth: i32,
+        max_depth: i32,
     ) -> Result<DiscoveryResult, ApiError> {
         tracing::debug!(
-            "Processing {} '{}' at depth {}",
+            "Processing {} '{}' at depth {} (max: {})",
             item_type,
             item_value,
-            depth
+            depth,
+            max_depth
         );
 
         match item_type {
             "domain" => {
-                self.discover_from_domain(run_id, item_value, seed_id, parent_asset_id, depth)
+                self.discover_from_domain(run_id, item_value, seed_id, parent_asset_id, depth, max_depth)
                     .await
             }
             "organization" => {
-                self.discover_from_organization(run_id, item_value, seed_id, parent_asset_id, depth)
+                self.discover_from_organization(run_id, item_value, seed_id, parent_asset_id, depth, max_depth)
                     .await
             }
             "asn" => {
-                self.discover_from_asn(run_id, item_value, seed_id, parent_asset_id, depth)
+                self.discover_from_asn(run_id, item_value, seed_id, parent_asset_id, depth, max_depth)
                     .await
             }
             "cidr" => {
-                self.discover_from_cidr(run_id, item_value, seed_id, parent_asset_id, depth)
+                self.discover_from_cidr(run_id, item_value, seed_id, parent_asset_id, depth, max_depth)
                     .await
             }
             "ip" => {
-                self.discover_from_ip(run_id, item_value, seed_id, parent_asset_id, depth)
+                self.discover_from_ip(run_id, item_value, seed_id, parent_asset_id, depth, max_depth)
                     .await
             }
             _ => {
@@ -657,9 +660,9 @@ impl DiscoveryService {
         seed_id: Option<Uuid>,
         parent_asset_id: Option<Uuid>,
         depth: i32,
+        max_depth: i32,
     ) -> Result<DiscoveryResult, ApiError> {
         let mut result = DiscoveryResult::default();
-        let settings = self.current_settings();
 
         // Create the domain asset first (if it's not from a seed)
         let domain_asset = self
@@ -725,6 +728,23 @@ impl DiscoveryService {
                         confidence,
                     )
                     .await?;
+
+                    // Queue subdomain for its own discovery (DNS, certs, etc.) if depth allows
+                    // This enables deeper exploration when max_depth is increased
+                    // NOTE: Pass domain_asset_id as parent (not the subdomain's own ID!)
+                    // to maintain correct lineage
+                    if depth < max_depth {
+                        self.queue_for_discovery(
+                            run_id,
+                            QueueItemType::Domain,
+                            subdomain,
+                            seed_id,
+                            Some(domain_asset_id),
+                            depth + 1,
+                            4, // Slightly lower priority than seeds
+                    )
+                    .await?;
+                    }
                 }
             }
             Err(e) => {
@@ -771,6 +791,21 @@ impl DiscoveryService {
                         confidence,
                     )
                     .await?;
+
+                    // Queue IP for further discovery (reverse DNS) if depth allows
+                    // NOTE: Pass domain_asset_id as parent (not the IP's own ID!)
+                    if depth < max_depth {
+                        self.queue_for_discovery(
+                            run_id,
+                            QueueItemType::Ip,
+                            &ip_str,
+                            seed_id,
+                            Some(domain_asset_id),
+                            depth + 1,
+                            2, // Lower priority for IP reverse lookups
+                    )
+                    .await?;
+                    }
                 }
             }
             Err(e) => {
@@ -827,9 +862,7 @@ impl DiscoveryService {
 
                     // Queue organization for discovery if found and depth allows
                     if let Some(ref org) = cert_info.organization {
-                        if !self.should_filter_organization(org)
-                            && depth < settings.max_discovery_depth as i32
-                        {
+                        if !self.should_filter_organization(org) && depth < max_depth {
                             self.queue_for_discovery(
                                 run_id,
                                 QueueItemType::Organization,
@@ -860,9 +893,9 @@ impl DiscoveryService {
         seed_id: Option<Uuid>,
         parent_asset_id: Option<Uuid>,
         depth: i32,
+        max_depth: i32,
     ) -> Result<DiscoveryResult, ApiError> {
         let mut result = DiscoveryResult::default();
-        let settings = self.current_settings();
 
         // Skip common infrastructure orgs
         if self.should_filter_organization(org) {
@@ -945,20 +978,23 @@ impl DiscoveryService {
 
                     if asset.1 {
                         result.assets_created.push(asset.0);
+                    }
 
                         // Queue for deeper discovery if within depth limit
-                        if depth < settings.max_discovery_depth as i32 {
+                    // Queue regardless of whether asset was just created - this allows
+                    // re-running discovery with increased depth to explore deeper
+                    // NOTE: Pass org_asset_id as parent (not the domain's own ID!)
+                    if depth < max_depth {
                             self.queue_for_discovery(
                                 run_id,
                                 QueueItemType::Domain,
                                 domain,
                                 seed_id,
-                                Some(asset.0),
+                            Some(org_asset_id),
                                 depth + 1,
                                 3,
                             )
                             .await?;
-                        }
                     }
 
                     self.create_relationship(
@@ -1030,6 +1066,7 @@ impl DiscoveryService {
         seed_id: Option<Uuid>,
         parent_asset_id: Option<Uuid>,
         depth: i32,
+        _max_depth: i32,
     ) -> Result<DiscoveryResult, ApiError> {
         let mut result = DiscoveryResult::default();
 
@@ -1125,6 +1162,7 @@ impl DiscoveryService {
         seed_id: Option<Uuid>,
         _parent_asset_id: Option<Uuid>,
         _depth: i32,
+        _max_depth: i32,
     ) -> Result<DiscoveryResult, ApiError> {
         let mut result = DiscoveryResult::default();
         let settings = self.current_settings();
@@ -1171,7 +1209,8 @@ impl DiscoveryService {
         ip: &str,
         seed_id: Option<Uuid>,
         parent_asset_id: Option<Uuid>,
-        _depth: i32,
+        depth: i32,
+        max_depth: i32,
     ) -> Result<DiscoveryResult, ApiError> {
         let mut result = DiscoveryResult::default();
 
@@ -1225,6 +1264,21 @@ impl DiscoveryService {
                             0.7,
                         )
                         .await?;
+
+                        // Queue discovered domain for further discovery if depth allows
+                        // NOTE: Pass ip_asset_id as parent (not the domain's own ID!)
+                        if depth < max_depth {
+                            self.queue_for_discovery(
+                                run_id,
+                                QueueItemType::Domain,
+                                &hostname,
+                                seed_id,
+                                Some(ip_asset_id),
+                                depth + 1,
+                                3, // Lower priority for reverse DNS discovered domains
+                        )
+                        .await?;
+                        }
                     }
                 }
                 Err(e) => {

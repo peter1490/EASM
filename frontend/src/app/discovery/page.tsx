@@ -237,9 +237,9 @@ export default function DiscoveryPage() {
                 { label: "Assets Updated", value: status.assets_updated || 0, color: "text-info" },
                 { label: "Queue Pending", value: status.queue_pending || 0, color: "text-muted-foreground" },
               ].map((stat, idx) => (
-                <div key={idx} className="text-center p-3 bg-card/50 rounded-lg">
+                <div key={idx} className="text-center px-4 py-3 bg-card/50 rounded-lg border border-border/50">
                   <div className={`text-2xl font-bold font-mono ${stat.color}`}>{stat.value}</div>
-                  <div className="text-xs text-muted-foreground">{stat.label}</div>
+                  <div className="text-xs text-muted-foreground mt-1">{stat.label}</div>
                 </div>
               ))}
             </div>
@@ -299,38 +299,38 @@ export default function DiscoveryPage() {
           {/* Stats Cards */}
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
             <Card className="group hover:border-primary/30 transition-colors">
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-3">
                 <CardDescription>Total Seeds</CardDescription>
                 <CardTitle className="text-3xl font-mono">{seeds.length}</CardTitle>
               </CardHeader>
-              <CardContent>
+              <CardContent className="pt-0 pb-5">
                 <div className="text-xs text-muted-foreground">Configured seeds for discovery</div>
               </CardContent>
             </Card>
             <Card className="group hover:border-success/30 transition-colors">
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-3">
                 <CardDescription>Completed Runs</CardDescription>
                 <CardTitle className="text-3xl font-mono text-success">{completedRuns}</CardTitle>
               </CardHeader>
-              <CardContent>
+              <CardContent className="pt-0 pb-5">
                 <div className="text-xs text-muted-foreground">Successful discovery runs</div>
               </CardContent>
             </Card>
             <Card className="group hover:border-destructive/30 transition-colors">
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-3">
                 <CardDescription>Failed Runs</CardDescription>
                 <CardTitle className="text-3xl font-mono text-destructive">{failedRuns}</CardTitle>
               </CardHeader>
-              <CardContent>
+              <CardContent className="pt-0 pb-5">
                 <div className="text-xs text-muted-foreground">Runs with errors</div>
               </CardContent>
             </Card>
             <Card className="group hover:border-primary/30 transition-colors">
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-3">
                 <CardDescription>Assets Discovered</CardDescription>
                 <CardTitle className="text-3xl font-mono text-primary">{totalAssetsDiscovered}</CardTitle>
               </CardHeader>
-              <CardContent>
+              <CardContent className="pt-0 pb-5">
                 <div className="text-xs text-muted-foreground">Total across all runs</div>
               </CardContent>
             </Card>
@@ -410,7 +410,7 @@ export default function DiscoveryPage() {
 
           {/* Quick Add Seed */}
           <Card>
-            <CardHeader>
+            <CardHeader className="pb-4">
               <div className="flex items-center gap-4">
                 <div className="h-10 w-10 rounded-lg bg-success/20 flex items-center justify-center text-xl">
                   🌱
@@ -421,7 +421,7 @@ export default function DiscoveryPage() {
                 </div>
               </div>
             </CardHeader>
-            <CardContent>
+            <CardContent className="pb-6">
               <div className="flex gap-3 flex-wrap md:flex-nowrap">
                 <Select
                   value={seedType}
@@ -460,14 +460,14 @@ export default function DiscoveryPage() {
           {/* Seed Stats */}
           <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-6">
             <Card className="col-span-1">
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-4">
                 <CardDescription>Total Seeds</CardDescription>
                 <CardTitle className="text-2xl font-mono">{seedStats.total}</CardTitle>
               </CardHeader>
             </Card>
             {seedStats.byType.filter(t => t.count > 0).slice(0, 5).map((type) => (
               <Card key={type.value}>
-                <CardHeader className="pb-2">
+                <CardHeader className="pb-4">
                   <CardDescription className="flex items-center gap-1">
                     <span>{type.icon}</span>
                     <span>{type.label}</span>

@@ -246,34 +246,26 @@ export default function AssetsPage() {
 
       {/* Discovery Status Banner */}
       {discoveryStatus?.running && (
-        <Card className="border-warning bg-warning/5">
+        <Card className="border-primary/50 bg-gradient-to-r from-primary/5 via-info/5 to-primary/5 glow-primary">
           <CardContent className="py-4">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <LoadingSpinner size="sm" />
+              <div className="flex items-center gap-4">
+                <div className="relative">
+                  <div className="h-12 w-12 rounded-xl bg-primary/20 flex items-center justify-center">
+                    <LoadingSpinner size="md" />
+                  </div>
+                  <div className="absolute -top-1 -right-1 h-3 w-3 bg-primary rounded-full animate-pulse" />
+                </div>
                 <div>
-                  <div className="font-medium text-warning">Discovery in Progress</div>
+                  <div className="font-semibold text-primary">Discovery in Progress</div>
                   <div className="text-sm text-muted-foreground">
-                    New assets will appear automatically as they are discovered
+                    {discoveryStatus.assets_discovered} assets discovered • {discoveryStatus.seeds_processed} seeds processed
                   </div>
                 </div>
               </div>
-              <div className="flex gap-4 text-sm">
-                <div className="text-right">
-                  <div className="text-muted-foreground">Seeds Processed</div>
-                  <div className="font-semibold">{discoveryStatus.seeds_processed}</div>
-                </div>
-                <div className="text-right">
-                  <div className="text-muted-foreground">Assets Discovered</div>
-                  <div className="font-semibold">{discoveryStatus.assets_discovered}</div>
-                </div>
-                {discoveryStatus.error_count > 0 && (
-                  <div className="text-right">
-                    <div className="text-muted-foreground">Errors</div>
-                    <div className="font-semibold text-destructive">{discoveryStatus.error_count}</div>
-                  </div>
-                )}
-              </div>
+              <Link href="/discovery">
+                <Button variant="outline" size="sm">View Details →</Button>
+              </Link>
             </div>
           </CardContent>
         </Card>

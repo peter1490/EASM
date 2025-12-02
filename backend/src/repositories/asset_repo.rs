@@ -130,12 +130,16 @@ impl AssetRepository for SqlxAssetRepository {
                     UPDATE assets
                     SET confidence = $1, sources = $2, metadata = $3, updated_at = $4, 
                         seed_id = COALESCE($5, assets.seed_id), 
-                        -- IMPORTANT: Never assign a parent to a seed root asset!
-                        -- A seed root is identified by: seed_id IS NOT NULL AND parent_id IS NULL
-                        -- This prevents the seed from appearing as a child in the discovery path
+                        -- Parent ID rules (in order of priority):
+                        -- 1. Keep seed roots as roots (seed_id set, no parent)
+                        -- 2. Prevent self-reference (parent_id = own id)
+                        -- 3. NEVER overwrite existing parent (prevents circular refs and broken lineage)
+                        -- 4. Only set parent if currently NULL
                         parent_id = CASE 
                             WHEN assets.seed_id IS NOT NULL AND assets.parent_id IS NULL THEN NULL
-                            ELSE COALESCE($6, assets.parent_id)
+                            WHEN $6 = $7 THEN assets.parent_id  -- Prevent self-reference
+                            WHEN assets.parent_id IS NOT NULL THEN assets.parent_id  -- Keep existing parent
+                            ELSE $6  -- Only set if currently NULL
                         END
                     WHERE id = $7
                     RETURNING id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id,
@@ -156,6 +160,9 @@ impl AssetRepository for SqlxAssetRepository {
             }
             None => {
                 let id = Uuid::new_v4();
+                // Prevent self-referencing parent (should never happen for new assets, but safety check)
+                let safe_parent_id = asset.parent_id.filter(|pid| *pid != id);
+                
                 let row = sqlx::query_as::<_, AssetRow>(
                     r#"
                     INSERT INTO assets (id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id)
@@ -173,7 +180,7 @@ impl AssetRepository for SqlxAssetRepository {
                 .bind(now)
                 .bind(now)
                 .bind(asset.seed_id)
-                .bind(asset.parent_id)
+                .bind(safe_parent_id)
                 .fetch_one(&self.pool)
                 .await?;
 

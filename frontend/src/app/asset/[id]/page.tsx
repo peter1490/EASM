@@ -62,6 +62,33 @@ const RISK_COLORS: Record<string, "error" | "warning" | "info" | "secondary" | "
   minimal: "success",
 };
 
+// Helper functions for consistent risk-level-based colors
+const getRiskTextColor = (riskLevel: string | null | undefined): string => {
+  if (!riskLevel) return "text-muted-foreground";
+  const level = riskLevel.toLowerCase();
+  switch (level) {
+    case "critical": return "text-destructive";
+    case "high": return "text-orange-500";
+    case "medium": return "text-warning";
+    case "low": return "text-info";
+    case "minimal": return "text-success";
+    default: return "text-muted-foreground";
+  }
+};
+
+const getRiskBgColor = (riskLevel: string | null | undefined): string => {
+  if (!riskLevel) return "bg-muted";
+  const level = riskLevel.toLowerCase();
+  switch (level) {
+    case "critical": return "bg-destructive";
+    case "high": return "bg-orange-500";
+    case "medium": return "bg-warning";
+    case "low": return "bg-info";
+    case "minimal": return "bg-success";
+    default: return "bg-muted";
+  }
+};
+
 const SCAN_STATUS_COLORS: Record<string, "error" | "warning" | "info" | "secondary" | "success"> = {
   pending: "secondary",
   running: "warning",
@@ -401,12 +428,7 @@ export default function AssetDetailPage() {
           <CardHeader className="pb-2">
             <CardDescription>Risk Score</CardDescription>
             <div className="flex items-center gap-2">
-              <CardTitle className={`text-3xl font-mono ${
-                (asset.risk_score || 0) >= 8 ? "text-destructive" :
-                (asset.risk_score || 0) >= 6 ? "text-orange-500" :
-                (asset.risk_score || 0) >= 4 ? "text-warning" :
-                "text-muted-foreground"
-              }`}>
+              <CardTitle className={`text-3xl font-mono ${getRiskTextColor(asset.risk_level)}`}>
                 {asset.risk_score?.toFixed(1) || "N/A"}
               </CardTitle>
               {asset.risk_level && (
@@ -566,16 +588,11 @@ export default function AssetDetailPage() {
                     <div className="flex items-center gap-3">
                       <div className="flex-1 h-3 bg-muted rounded-full overflow-hidden">
                         <div
-                          className={`h-full transition-all ${
-                            (asset.risk_score || 0) >= 8 ? "bg-destructive" :
-                            (asset.risk_score || 0) >= 6 ? "bg-orange-500" :
-                            (asset.risk_score || 0) >= 4 ? "bg-warning" :
-                            (asset.risk_score || 0) >= 2 ? "bg-info" : "bg-success"
-                          }`}
-                          style={{ width: `${((asset.risk_score || 0) / 10) * 100}%` }}
+                          className={`h-full transition-all ${getRiskBgColor(asset.risk_level)}`}
+                          style={{ width: `${Math.min(asset.risk_score || 0, 100)}%` }}
                         />
                       </div>
-                      <span className="text-2xl font-bold font-mono">
+                      <span className={`text-2xl font-bold font-mono ${getRiskTextColor(asset.risk_level)}`}>
                         {asset.risk_score?.toFixed(1) || "N/A"}
                       </span>
                     </div>
@@ -1282,7 +1299,7 @@ export default function AssetDetailPage() {
             <div className="py-6 text-center">
               <div className="text-4xl mb-3">🏷️</div>
               <p className="text-muted-foreground mb-3">No tags defined yet</p>
-              <Link href="/tags">
+              <Link href="/settings?tab=tags">
                 <Button variant="outline">Create Tags</Button>
               </Link>
             </div>
@@ -1337,7 +1354,7 @@ export default function AssetDetailPage() {
           )}
 
           <div className="flex justify-between pt-4 border-t border-border">
-            <Link href="/tags">
+            <Link href="/settings?tab=tags">
               <Button variant="ghost" size="sm">
                 Manage Tags →
               </Button>

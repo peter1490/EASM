@@ -276,7 +276,15 @@ impl DiscoveryQueueRepository for SqlxDiscoveryQueueRepository {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)
             ON CONFLICT (discovery_run_id, item_type, item_value) DO UPDATE SET
                 priority = GREATEST(discovery_queue.priority, EXCLUDED.priority),
-                parent_asset_id = COALESCE(discovery_queue.parent_asset_id, EXCLUDED.parent_asset_id)
+                parent_asset_id = COALESCE(discovery_queue.parent_asset_id, EXCLUDED.parent_asset_id),
+                -- Keep the minimum depth to allow maximum exploration depth
+                depth = LEAST(discovery_queue.depth, EXCLUDED.depth),
+                -- Reset to pending if it was skipped/completed but now requeued at shallower depth
+                status = CASE 
+                    WHEN EXCLUDED.depth < discovery_queue.depth AND discovery_queue.status IN ('skipped', 'completed') 
+                    THEN 'pending' 
+                    ELSE discovery_queue.status 
+                END
             RETURNING *
             "#
         )

@@ -39,6 +39,22 @@ pub trait AssetRepository {
         risk_level: &str,
         factors: &serde_json::Value,
     ) -> Result<Asset, ApiError>;
+
+    /// Advanced search with filtering, sorting, and text search
+    #[allow(clippy::too_many_arguments)]
+    async fn search(
+        &self,
+        query: Option<&str>,
+        asset_type: Option<AssetType>,
+        min_confidence: Option<f64>,
+        scan_status: Option<&str>,
+        source: Option<&str>,
+        risk_level: Option<&str>,
+        sort_by: &str,
+        sort_dir: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<Asset>, i64, Vec<String>), ApiError>;
 }
 
 #[async_trait]
@@ -536,6 +552,137 @@ impl AssetRepository for SqlxAssetRepository {
         tx.commit().await?;
 
         Ok(Asset::from(row))
+    }
+
+    async fn search(
+        &self,
+        query: Option<&str>,
+        asset_type: Option<AssetType>,
+        min_confidence: Option<f64>,
+        scan_status: Option<&str>,
+        source: Option<&str>,
+        risk_level: Option<&str>,
+        sort_by: &str,
+        sort_dir: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<Asset>, i64, Vec<String>), ApiError> {
+        // Prepare search pattern
+        let search_pattern = query.map(|q| format!("%{}%", q.to_lowercase()));
+        let source_pattern = source.map(|s| format!("%{}%", s));
+
+        // Validate sort options
+        let sort_field = match sort_by {
+            "value" | "identifier" => "a.identifier",
+            "confidence" => "a.confidence",
+            "importance" => "a.importance",
+            "risk_score" => "a.risk_score",
+            _ => "a.created_at",
+        };
+
+        let sort_direction = if sort_dir.to_lowercase() == "asc" {
+            "ASC"
+        } else {
+            "DESC"
+        };
+
+        // Determine scan status filter
+        let filter_scanned = scan_status == Some("scanned");
+        let filter_never_scanned = scan_status == Some("never_scanned");
+
+        // Single unified query with optional filters using COALESCE pattern
+        let query_sql = format!(
+            r#"
+            WITH latest_scans AS (
+                SELECT DISTINCT ON (LOWER(TRIM(target))) 
+                    id, status, created_at, LOWER(TRIM(target)) as normalized_target
+                FROM scans
+                ORDER BY LOWER(TRIM(target)), created_at DESC
+            )
+            SELECT 
+                a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, 
+                a.created_at, a.updated_at, a.seed_id, a.parent_id,
+                a.importance, a.risk_score, a.risk_level, a.last_risk_run,
+                ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
+            FROM assets a
+            LEFT JOIN latest_scans ls ON ls.normalized_target = LOWER(TRIM(a.identifier))
+            WHERE 
+                ($1::text IS NULL OR LOWER(a.identifier) LIKE $1 OR a.sources::text ILIKE $1)
+                AND ($2::text IS NULL OR a.asset_type::text = $2)
+                AND ($3::float8 IS NULL OR a.confidence >= $3)
+                AND ($4::text IS NULL OR a.sources::text ILIKE $4)
+                AND ($5::text IS NULL OR a.risk_level = $5)
+                AND (NOT $6::bool OR ls.id IS NOT NULL)
+                AND (NOT $7::bool OR ls.id IS NULL)
+            ORDER BY {sort_field} {sort_direction} NULLS LAST, a.created_at DESC
+            LIMIT $8 OFFSET $9
+            "#,
+            sort_field = sort_field,
+            sort_direction = sort_direction,
+        );
+
+        let count_sql = r#"
+            WITH latest_scans AS (
+                SELECT DISTINCT ON (LOWER(TRIM(target))) 
+                    id, LOWER(TRIM(target)) as normalized_target
+                FROM scans
+                ORDER BY LOWER(TRIM(target)), created_at DESC
+            )
+            SELECT COUNT(*)
+            FROM assets a
+            LEFT JOIN latest_scans ls ON ls.normalized_target = LOWER(TRIM(a.identifier))
+            WHERE 
+                ($1::text IS NULL OR LOWER(a.identifier) LIKE $1 OR a.sources::text ILIKE $1)
+                AND ($2::text IS NULL OR a.asset_type::text = $2)
+                AND ($3::float8 IS NULL OR a.confidence >= $3)
+                AND ($4::text IS NULL OR a.sources::text ILIKE $4)
+                AND ($5::text IS NULL OR a.risk_level = $5)
+                AND (NOT $6::bool OR ls.id IS NOT NULL)
+                AND (NOT $7::bool OR ls.id IS NULL)
+            "#;
+
+        // Execute queries
+        let rows = sqlx::query_as::<_, AssetRow>(&query_sql)
+            .bind(&search_pattern)
+            .bind(asset_type.as_ref().map(|t| t.to_string()))
+            .bind(min_confidence)
+            .bind(&source_pattern)
+            .bind(risk_level)
+            .bind(filter_scanned)
+            .bind(filter_never_scanned)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let total_count = sqlx::query_scalar::<_, i64>(count_sql)
+            .bind(&search_pattern)
+            .bind(asset_type.as_ref().map(|t| t.to_string()))
+            .bind(min_confidence)
+            .bind(&source_pattern)
+            .bind(risk_level)
+            .bind(filter_scanned)
+            .bind(filter_never_scanned)
+            .fetch_one(&self.pool)
+            .await?;
+
+        // Get unique sources for filter dropdown (cached or simple query)
+        let sources: Vec<String> = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT DISTINCT jsonb_array_elements_text(sources) as source
+            FROM assets
+            ORDER BY source
+            LIMIT 100
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok((
+            rows.into_iter().map(Asset::from).collect(),
+            total_count,
+            sources,
+        ))
     }
 }
 

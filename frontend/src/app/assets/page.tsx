@@ -1,11 +1,18 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
-import { getDiscoveryStatus, listAssets, type Asset, type DiscoveryStatus, createScan } from "@/app/api";
+import { useEffect, useState, useCallback, useRef } from "react";
+import {
+  searchAssetsAdvanced,
+  getDiscoveryStatus,
+  createScan,
+  type Asset,
+  type AssetSearchParams,
+  type AssetSearchResponse,
+  type DiscoveryStatus,
+} from "@/app/api";
 import Button from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import Badge from "@/components/ui/Badge";
-import Input from "@/components/ui/Input";
 import Select from "@/components/ui/Select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/Table";
 import EmptyState from "@/components/ui/EmptyState";
@@ -13,121 +20,143 @@ import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import Header from "@/components/Header";
 import AssetDetailModal from "@/components/AssetDetailModal";
 import Checkbox from "@/components/ui/Checkbox";
-
 import Link from "next/link";
 
+// Debounce hook
+function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState<T>(value);
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [value, delay]);
+
+  return debouncedValue;
+}
+
 export default function AssetsPage() {
-  const [assets, setAssets] = useState<Asset[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [minConf, setMinConf] = useState(0);
-  const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus | null>(null);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [typeFilter, setTypeFilter] = useState<"all" | "domain" | "ip">("all");
-  const [scanStatusFilter, setScanStatusFilter] = useState<"all" | "scanned" | "never_scanned">("all");
+  // Search state
+  const [searchQuery, setSearchQuery] = useState("");
+  const [assetType, setAssetType] = useState<"all" | "domain" | "ip">("all");
+  const [scanStatus, setScanStatus] = useState<"all" | "scanned" | "never_scanned">("all");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
+  const [minConfidence, setMinConfidence] = useState(0);
+  const [sortBy, setSortBy] = useState<"created_at" | "confidence" | "value" | "importance">("created_at");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  // Pagination state
+  const [limit, setLimit] = useState(25);
+  const [currentPage, setCurrentPage] = useState(1);
+
+  // Data state
+  const [searchResponse, setSearchResponse] = useState<AssetSearchResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [searching, setSearching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus | null>(null);
+
+  // Selection state
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [selectedAssets, setSelectedAssets] = useState<Set<string>>(new Set());
   const [bulkScanning, setBulkScanning] = useState(false);
   const [bulkScanMessage, setBulkScanMessage] = useState<string | null>(null);
-  const [limit, setLimit] = useState(25);
-  const [showLimitSelector, setShowLimitSelector] = useState(false);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [hasMorePages, setHasMorePages] = useState(false);
-  const [totalAssets, setTotalAssets] = useState(0);
 
-  async function refresh(conf = minConf, isInitial = false, page = currentPage) {
+  // Debounced search query
+  const debouncedQuery = useDebounce(searchQuery, 300);
+  const debouncedConfidence = useDebounce(minConfidence, 300);
+
+  // Ref for tracking search requests
+  const searchAbortController = useRef<AbortController | null>(null);
+
+  // Search function
+  const performSearch = useCallback(async (isInitial = false) => {
+    // Cancel previous request
+    if (searchAbortController.current) {
+      searchAbortController.current.abort();
+    }
+    searchAbortController.current = new AbortController();
+
+    if (!isInitial) {
+      setSearching(true);
+    }
+    setError(null);
+
     try {
-      const offset = (page - 1) * limit;
-      const response = await listAssets(conf, limit, offset);
-      const sorted = [...response.assets].sort((a, b) =>
-        new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-      );
-      setAssets(sorted);
-      setTotalAssets(response.total_count);
+      const params: AssetSearchParams = {
+        q: debouncedQuery || undefined,
+        asset_type: assetType,
+        min_confidence: debouncedConfidence > 0 ? debouncedConfidence : undefined,
+        scan_status: scanStatus,
+        source: sourceFilter !== "all" ? sourceFilter : undefined,
+        sort_by: sortBy,
+        sort_dir: sortDir,
+        limit,
+        offset: (currentPage - 1) * limit,
+      };
 
-      // Check if there are more pages
-      setHasMorePages(offset + response.assets.length < response.total_count);
+      const response = await searchAssetsAdvanced(params);
+      setSearchResponse(response);
 
       if (isInitial) {
         setLoading(false);
       }
     } catch (e) {
-      setError((e as Error).message);
-      setLoading(false);
+      if ((e as Error).name !== "AbortError") {
+        setError((e as Error).message);
+      }
+    } finally {
+      setSearching(false);
     }
-  }
+  }, [debouncedQuery, assetType, debouncedConfidence, scanStatus, sourceFilter, sortBy, sortDir, limit, currentPage]);
 
+  // Fetch discovery status
+  const fetchDiscoveryStatus = useCallback(async () => {
+    try {
+      const status = await getDiscoveryStatus();
+      setDiscoveryStatus(status);
+    } catch {
+      // Ignore errors
+    }
+  }, []);
+
+  // Initial load and search effect
   useEffect(() => {
-    let mounted = true;
-    let iv: NodeJS.Timeout | null = null;
-    let isFirstLoad = true;
-
-    async function tick() {
-      try {
-        const s = await getDiscoveryStatus();
-        if (!mounted) return;
-        setDiscoveryStatus(s);
-      } catch {
-        // ignore
-      }
-      try {
-        await refresh(minConf, isFirstLoad, currentPage);
-        isFirstLoad = false;
-      } catch {
-        // ignore
-      }
-      iv = setTimeout(tick, 2000);
-    }
-    tick();
-    return () => {
-      mounted = false;
-      if (iv) clearTimeout(iv);
-    };
+    performSearch(loading);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [minConf, limit, currentPage]);
+  }, [debouncedQuery, assetType, debouncedConfidence, scanStatus, sourceFilter, sortBy, sortDir, limit, currentPage]);
 
-  // Get unique sources for filter dropdown (memoized)
-  const allSources = useMemo(
-    () => Array.from(new Set(assets.flatMap(a => a.sources))),
-    [assets]
-  );
+  // Discovery status polling
+  useEffect(() => {
+    fetchDiscoveryStatus();
+    const interval = setInterval(fetchDiscoveryStatus, 5000);
+    return () => clearInterval(interval);
+  }, [fetchDiscoveryStatus]);
 
-  // Filter assets based on search and type (memoized)
-  const filteredAssets = useMemo(() => {
-    let filtered = assets;
+  // Reset page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [debouncedQuery, assetType, debouncedConfidence, scanStatus, sourceFilter, sortBy, sortDir, limit]);
 
-    // Filter by type
-    if (typeFilter !== "all") {
-      filtered = filtered.filter(a => a.asset_type === typeFilter);
-    }
+  // Derived data
+  const assets = searchResponse?.assets || [];
+  const totalCount = searchResponse?.total_count || 0;
+  const availableSources = searchResponse?.sources || [];
+  const totalPages = Math.ceil(totalCount / limit);
 
-    // Filter by scan status
-    if (scanStatusFilter === "scanned") {
-      filtered = filtered.filter(a => a.last_scanned_at);
-    } else if (scanStatusFilter === "never_scanned") {
-      filtered = filtered.filter(a => !a.last_scanned_at);
-    }
+  // Stats (from current page)
+  const stats = {
+    total: totalCount,
+    domains: assets.filter(a => a.asset_type === "domain").length,
+    ips: assets.filter(a => a.asset_type === "ip").length,
+    highConfidence: assets.filter(a => a.ownership_confidence >= 0.7).length,
+  };
 
-    // Filter by source
-    if (sourceFilter !== "all") {
-      filtered = filtered.filter(a => a.sources.includes(sourceFilter));
-    }
-
-    // Filter by search term
-    if (searchTerm) {
-      const term = searchTerm.toLowerCase();
-      filtered = filtered.filter(a =>
-        a.value.toLowerCase().includes(term) ||
-        a.sources.some(s => s.toLowerCase().includes(term)) ||
-        a.id.toLowerCase().includes(term)
-      );
-    }
-
-    return filtered;
-  }, [assets, searchTerm, typeFilter, scanStatusFilter, sourceFilter]);
-
-  // Bulk scan selected assets
+  // Bulk scan handler
   const handleBulkScan = async () => {
     if (selectedAssets.size === 0) return;
 
@@ -152,10 +181,10 @@ export default function AssetsPage() {
     }
   };
 
-  // Export assets to CSV
+  // Export functions
   const exportToCSV = () => {
     const headers = ["ID", "Type", "Value", "Confidence", "Sources", "Last Scanned", "Created"];
-    const rows = filteredAssets.map(a => [
+    const rows = assets.map(a => [
       a.id,
       a.asset_type,
       a.value,
@@ -175,9 +204,8 @@ export default function AssetsPage() {
     URL.revokeObjectURL(url);
   };
 
-  // Export assets to JSON
   const exportToJSON = () => {
-    const json = JSON.stringify(filteredAssets, null, 2);
+    const json = JSON.stringify(assets, null, 2);
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -187,7 +215,7 @@ export default function AssetsPage() {
     URL.revokeObjectURL(url);
   };
 
-  // Toggle asset selection
+  // Selection handlers
   const toggleAssetSelection = (assetId: string) => {
     const newSelected = new Set(selectedAssets);
     if (newSelected.has(assetId)) {
@@ -198,50 +226,35 @@ export default function AssetsPage() {
     setSelectedAssets(newSelected);
   };
 
-  // Toggle all assets selection
   const toggleAllAssets = () => {
-    if (selectedAssets.size === filteredAssets.length) {
+    if (selectedAssets.size === assets.length) {
       setSelectedAssets(new Set());
     } else {
-      setSelectedAssets(new Set(filteredAssets.map(a => a.id)));
+      setSelectedAssets(new Set(assets.map(a => a.id)));
     }
   };
 
-  // Pagination handlers
-  const goToNextPage = () => {
-    if (hasMorePages) {
-      setCurrentPage(prev => prev + 1);
-    }
-  };
-
-  const goToPreviousPage = () => {
-    if (currentPage > 1) {
-      setCurrentPage(prev => prev - 1);
-    }
-  };
-
-  const goToFirstPage = () => {
+  // Clear all filters
+  const clearFilters = () => {
+    setSearchQuery("");
+    setAssetType("all");
+    setScanStatus("all");
+    setSourceFilter("all");
+    setMinConfidence(0);
+    setSortBy("created_at");
+    setSortDir("desc");
+    setLimit(25);
     setCurrentPage(1);
   };
 
-  // Reset to page 1 when filters change
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [minConf, typeFilter, scanStatusFilter, sourceFilter, searchTerm, limit]);
-
-  const stats = {
-    total: totalAssets,
-    totalOnPage: assets.length,
-    domains: assets.filter(a => a.asset_type === "domain").length,
-    ips: assets.filter(a => a.asset_type === "ip").length,
-    highConfidence: assets.filter(a => a.ownership_confidence >= 0.7).length,
-  };
+  const hasActiveFilters = searchQuery || assetType !== "all" || scanStatus !== "all" || 
+    sourceFilter !== "all" || minConfidence > 0;
 
   return (
-    <div className="space-y-8 animate-fade-in">
+    <div className="space-y-6 animate-fade-in">
       <Header
         title="Asset Inventory"
-        description="Discovered assets from your attack surface"
+        description="Search and explore your discovered attack surface"
       />
 
       {/* Discovery Status Banner */}
@@ -271,155 +284,165 @@ export default function AssetsPage() {
         </Card>
       )}
 
-      {/* Stats Cards */}
-      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
-        <Card>
-          <CardHeader className="pb-3">
-            <CardDescription>Total Assets</CardDescription>
-            <CardTitle className="text-3xl">{stats.total.toLocaleString()}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-xs text-muted-foreground">
-              All discovered assets in database
+      {/* Main Search Card */}
+      <Card className="border-primary/20 bg-gradient-to-br from-card via-card to-primary/5">
+        <CardContent className="pt-6">
+          {/* Search Input */}
+          <div className="relative mb-6">
+            <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
+              <svg className="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
             </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-3">
-            <CardDescription>Domains</CardDescription>
-            <CardTitle className="text-3xl text-primary">{stats.domains}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-xs text-muted-foreground">
-              Domain assets
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-3">
-            <CardDescription>IP Addresses</CardDescription>
-            <CardTitle className="text-3xl text-info">{stats.ips}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-xs text-muted-foreground">
-              IP assets
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-3">
-            <CardDescription>High Confidence</CardDescription>
-            <CardTitle className="text-3xl text-success">{stats.highConfidence}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-xs text-muted-foreground">
-              Confidence ≥ 0.7
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Filters and Search */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle>Filter Assets</CardTitle>
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-muted-foreground">Showing up to:</span>
-              {showLimitSelector ? (
-                <div className="flex items-center gap-2">
-                  <Select
-                    value={limit.toString()}
-                    onChange={(e) => {
-                      setLimit(Number(e.target.value));
-                      setShowLimitSelector(false);
-                    }}
-                    className="w-24"
-                  >
-                    <option value="10">10</option>
-                    <option value="25">25</option>
-                    <option value="50">50</option>
-                    <option value="100">100</option>
-                    <option value="250">250</option>
-                    <option value="500">500</option>
-                    <option value="1000">All</option>
-                  </Select>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setShowLimitSelector(false)}
-                  >
-                    Cancel
-                  </Button>
-                </div>
-              ) : (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowLimitSelector(true)}
-                >
-                  {limit === 1000 ? "All" : limit} assets
-                </Button>
-              )}
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            <Input
-              label="Search"
-              placeholder="Search by value, source, or ID..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+            <input
+              type="text"
+              placeholder="Search assets by domain, IP, or source..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full h-14 pl-12 pr-4 rounded-xl border-2 border-border bg-input text-foreground text-lg
+                placeholder:text-muted-foreground
+                focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary
+                transition-all duration-200"
             />
+            {searching && (
+              <div className="absolute inset-y-0 right-4 flex items-center">
+                <LoadingSpinner size="sm" />
+              </div>
+            )}
+          </div>
+
+          {/* Filters Row */}
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
             <Select
               label="Asset Type"
-              value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value as "all" | "domain" | "ip")}
+              value={assetType}
+              onChange={(e) => setAssetType(e.target.value as "all" | "domain" | "ip")}
             >
               <option value="all">All Types</option>
-              <option value="domain">Domains Only</option>
-              <option value="ip">IPs Only</option>
+              <option value="domain">Domains</option>
+              <option value="ip">IP Addresses</option>
             </Select>
+
             <Select
               label="Scan Status"
-              value={scanStatusFilter}
-              onChange={(e) => setScanStatusFilter(e.target.value as "all" | "scanned" | "never_scanned")}
+              value={scanStatus}
+              onChange={(e) => setScanStatus(e.target.value as "all" | "scanned" | "never_scanned")}
             >
-              <option value="all">All Assets</option>
+              <option value="all">All Status</option>
               <option value="scanned">Scanned</option>
               <option value="never_scanned">Never Scanned</option>
             </Select>
+
             <Select
               label="Discovery Source"
               value={sourceFilter}
               onChange={(e) => setSourceFilter(e.target.value)}
             >
               <option value="all">All Sources</option>
-              {allSources.map(source => (
+              {availableSources.map(source => (
                 <option key={source} value={source}>{source}</option>
               ))}
             </Select>
+
+            <Select
+              label="Sort By"
+              value={`${sortBy}-${sortDir}`}
+              onChange={(e) => {
+                const [field, dir] = e.target.value.split("-");
+                setSortBy(field as "created_at" | "confidence" | "value" | "importance");
+                setSortDir(dir as "asc" | "desc");
+              }}
+            >
+              <option value="created_at-desc">Newest First</option>
+              <option value="created_at-asc">Oldest First</option>
+              <option value="confidence-desc">Highest Confidence</option>
+              <option value="confidence-asc">Lowest Confidence</option>
+              <option value="value-asc">Value (A-Z)</option>
+              <option value="value-desc">Value (Z-A)</option>
+              <option value="importance-desc">Most Important</option>
+            </Select>
+
             <div>
               <label className="block text-sm font-medium text-foreground mb-1.5">
-                Min Confidence: {minConf.toFixed(2)}
+                Min Confidence: {minConfidence.toFixed(2)}
               </label>
               <input
                 type="range"
                 min={0}
                 max={1}
                 step={0.05}
-                value={minConf}
-                onChange={(e) => setMinConf(Number(e.target.value))}
+                value={minConfidence}
+                onChange={(e) => setMinConfidence(Number(e.target.value))}
                 className="w-full h-10 accent-primary"
               />
             </div>
           </div>
+
+          {/* Active Filters & Results Count */}
+          <div className="flex items-center justify-between mt-4 pt-4 border-t border-border">
+            <div className="flex items-center gap-3">
+              <div className="text-sm text-muted-foreground">
+                {searching ? (
+                  <span className="flex items-center gap-2">
+                    <LoadingSpinner size="sm" /> Searching...
+                  </span>
+                ) : (
+                  <span>
+                    Found <span className="font-semibold text-foreground">{totalCount.toLocaleString()}</span> assets
+                    {hasActiveFilters && <span className="text-primary ml-1">(filtered)</span>}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {hasActiveFilters && (
+                <Button variant="outline" size="sm" onClick={clearFilters}>
+                  Clear Filters
+                </Button>
+              )}
+              <Select
+                value={limit.toString()}
+                onChange={(e) => setLimit(Number(e.target.value))}
+                className="w-20"
+              >
+                <option value="10">10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </Select>
+            </div>
+          </div>
         </CardContent>
       </Card>
+
+      {/* Quick Stats */}
+      <div className="grid gap-4 md:grid-cols-4">
+        <Card className="bg-gradient-to-br from-card to-primary/5">
+          <CardContent className="py-4">
+            <div className="text-2xl font-bold">{totalCount.toLocaleString()}</div>
+            <div className="text-sm text-muted-foreground">Total Assets</div>
+          </CardContent>
+        </Card>
+        <Card className="bg-gradient-to-br from-card to-info/5">
+          <CardContent className="py-4">
+            <div className="text-2xl font-bold text-info">{stats.domains}</div>
+            <div className="text-sm text-muted-foreground">Domains (this page)</div>
+          </CardContent>
+        </Card>
+        <Card className="bg-gradient-to-br from-card to-secondary/5">
+          <CardContent className="py-4">
+            <div className="text-2xl font-bold text-secondary">{stats.ips}</div>
+            <div className="text-sm text-muted-foreground">IPs (this page)</div>
+          </CardContent>
+        </Card>
+        <Card className="bg-gradient-to-br from-card to-success/5">
+          <CardContent className="py-4">
+            <div className="text-2xl font-bold text-success">{stats.highConfidence}</div>
+            <div className="text-sm text-muted-foreground">High Confidence</div>
+          </CardContent>
+        </Card>
+      </div>
 
       {/* Bulk Actions */}
       {selectedAssets.size > 0 && (
@@ -456,7 +479,7 @@ export default function AssetsPage() {
               <div className={`mt-3 p-2 rounded text-sm ${bulkScanMessage.startsWith("Error")
                 ? "bg-destructive/10 text-destructive"
                 : "bg-success/10 text-success"
-                }`}>
+              }`}>
                 {bulkScanMessage}
               </div>
             )}
@@ -469,33 +492,16 @@ export default function AssetsPage() {
         <CardHeader>
           <div className="flex items-center justify-between">
             <div>
-              <CardTitle>Assets ({filteredAssets.length})</CardTitle>
+              <CardTitle>Assets</CardTitle>
               <CardDescription>
-                Page {currentPage} of {Math.ceil(totalAssets / limit)} • {filteredAssets.length === assets.length
-                  ? `Showing ${assets.length} of ${totalAssets.toLocaleString()} total assets`
-                  : `Filtered to ${filteredAssets.length} from ${assets.length} assets on this page`}
+                Page {currentPage} of {totalPages || 1} • Showing {((currentPage - 1) * limit) + 1}-{Math.min(currentPage * limit, totalCount)} of {totalCount.toLocaleString()}
               </CardDescription>
             </div>
             <div className="flex gap-2">
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setSearchTerm("");
-                  setTypeFilter("all");
-                  setScanStatusFilter("all");
-                  setSourceFilter("all");
-                  setMinConf(0);
-                  setLimit(25);
-                  setCurrentPage(1);
-                }}
-                disabled={!searchTerm && typeFilter === "all" && scanStatusFilter === "all" && sourceFilter === "all" && minConf === 0 && limit === 25}
-              >
-                Clear Filters
-              </Button>
-              <Button variant="outline" onClick={exportToCSV}>
+              <Button variant="outline" size="sm" onClick={exportToCSV}>
                 Export CSV
               </Button>
-              <Button variant="outline" onClick={exportToJSON}>
+              <Button variant="outline" size="sm" onClick={exportToJSON}>
                 Export JSON
               </Button>
             </div>
@@ -503,178 +509,190 @@ export default function AssetsPage() {
         </CardHeader>
         <CardContent>
           {loading ? (
-            <div className="py-12">
+            <div className="py-12 flex flex-col items-center gap-4">
               <LoadingSpinner size="lg" />
+              <div className="text-muted-foreground">Loading assets...</div>
             </div>
           ) : error ? (
             <div className="p-4 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive">
               {error}
             </div>
-          ) : filteredAssets.length === 0 ? (
+          ) : assets.length === 0 ? (
             <EmptyState
               icon="🎯"
               title="No assets found"
-              description={assets.length === 0
-                ? "Start a discovery process from the Seeds page to find assets"
-                : "Try adjusting your filters to see more assets"}
+              description={hasActiveFilters
+                ? "Try adjusting your search or filters"
+                : "Start a discovery process from the Seeds page to find assets"}
             />
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-12">
-                    <Checkbox
-                      checked={selectedAssets.size === filteredAssets.length && filteredAssets.length > 0}
-                      onChange={toggleAllAssets}
-                      indeterminate={selectedAssets.size > 0 && selectedAssets.size < filteredAssets.length}
-                    />
-                  </TableHead>
-                  <TableHead>Type</TableHead>
-                  <TableHead>Value</TableHead>
-                  <TableHead>Confidence</TableHead>
-                  <TableHead>Sources</TableHead>
-                  <TableHead>Tracking</TableHead>
-                  <TableHead>Last Scan</TableHead>
-                  <TableHead className="w-24">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filteredAssets.map((asset) => (
-                  <TableRow
-                    key={asset.id}
-                    className="cursor-pointer hover:bg-muted/50 transition-colors"
-                  >
-                    <TableCell onClick={(e) => e.stopPropagation()}>
+            <>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-12">
                       <Checkbox
-                        checked={selectedAssets.has(asset.id)}
-                        onChange={() => toggleAssetSelection(asset.id)}
+                        checked={selectedAssets.size === assets.length && assets.length > 0}
+                        onChange={toggleAllAssets}
+                        indeterminate={selectedAssets.size > 0 && selectedAssets.size < assets.length}
                       />
-                    </TableCell>
-                    <TableCell onClick={() => setSelectedAssetId(asset.id)}>
-                      <Badge variant={asset.asset_type === "domain" ? "info" : "secondary"}>
-                        {asset.asset_type}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="font-medium font-mono" onClick={() => setSelectedAssetId(asset.id)}>
-                      {asset.value}
-                    </TableCell>
-                    <TableCell onClick={() => setSelectedAssetId(asset.id)}>
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1 max-w-24">
-                          <div className="h-2 bg-muted rounded-full overflow-hidden">
-                            <div
-                              className={`h-full transition-all ${asset.ownership_confidence >= 0.7
-                                ? "bg-success"
-                                : asset.ownership_confidence >= 0.4
-                                  ? "bg-warning"
-                                  : "bg-destructive"
+                    </TableHead>
+                    <TableHead>Type</TableHead>
+                    <TableHead>Value</TableHead>
+                    <TableHead>Confidence</TableHead>
+                    <TableHead>Sources</TableHead>
+                    <TableHead>Tracking</TableHead>
+                    <TableHead>Last Scan</TableHead>
+                    <TableHead className="w-24">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {assets.map((asset) => (
+                    <TableRow
+                      key={asset.id}
+                      className="cursor-pointer hover:bg-muted/50 transition-colors"
+                    >
+                      <TableCell onClick={(e) => e.stopPropagation()}>
+                        <Checkbox
+                          checked={selectedAssets.has(asset.id)}
+                          onChange={() => toggleAssetSelection(asset.id)}
+                        />
+                      </TableCell>
+                      <TableCell onClick={() => setSelectedAssetId(asset.id)}>
+                        <Badge variant={asset.asset_type === "domain" ? "info" : "secondary"}>
+                          {asset.asset_type}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="font-medium font-mono" onClick={() => setSelectedAssetId(asset.id)}>
+                        {asset.value}
+                      </TableCell>
+                      <TableCell onClick={() => setSelectedAssetId(asset.id)}>
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 max-w-24">
+                            <div className="h-2 bg-muted rounded-full overflow-hidden">
+                              <div
+                                className={`h-full transition-all ${asset.ownership_confidence >= 0.7
+                                  ? "bg-success"
+                                  : asset.ownership_confidence >= 0.4
+                                    ? "bg-warning"
+                                    : "bg-destructive"
                                 }`}
-                              style={{ width: `${asset.ownership_confidence * 100}%` }}
-                            />
-                          </div>
-                        </div>
-                        <span className="text-sm font-medium">
-                          {asset.ownership_confidence.toFixed(2)}
-                        </span>
-                      </div>
-                    </TableCell>
-                    <TableCell onClick={() => setSelectedAssetId(asset.id)}>
-                      <div className="flex flex-wrap gap-1">
-                        {asset.sources.slice(0, 2).map((source, idx) => (
-                          <Badge key={idx} variant="secondary">
-                            {source}
-                          </Badge>
-                        ))}
-                        {asset.sources.length > 2 && (
-                          <Badge variant="secondary">+{asset.sources.length - 2}</Badge>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell onClick={() => setSelectedAssetId(asset.id)}>
-                      <AssetTracking metadata={asset.metadata} />
-                    </TableCell>
-                    <TableCell className="text-muted-foreground text-sm" onClick={() => setSelectedAssetId(asset.id)}>
-                      {asset.last_scanned_at ? (
-                        <div className="space-y-1">
-                          <div className="text-xs">{new Date(asset.last_scanned_at).toLocaleString()}</div>
-                          {asset.last_scan_status && (
-                            <div onClick={(e) => e.stopPropagation()}>
-                              {asset.last_scan_id ? (
-                                <Link href={`/scan/${asset.last_scan_id}`}>
-                                  <Badge
-                                    variant={asset.last_scan_status === "completed" ? "success" : asset.last_scan_status === "failed" ? "error" : "warning"}
-                                    className="cursor-pointer hover:opacity-80 transition-opacity"
-                                  >
-                                    {asset.last_scan_status} ↗
-                                  </Badge>
-                                </Link>
-                              ) : (
-                                <Badge variant={asset.last_scan_status === "completed" ? "success" : asset.last_scan_status === "failed" ? "error" : "warning"}>
-                                  {asset.last_scan_status}
-                                </Badge>
-                              )}
+                                style={{ width: `${asset.ownership_confidence * 100}%` }}
+                              />
                             </div>
+                          </div>
+                          <span className="text-sm font-medium">
+                            {asset.ownership_confidence.toFixed(2)}
+                          </span>
+                        </div>
+                      </TableCell>
+                      <TableCell onClick={() => setSelectedAssetId(asset.id)}>
+                        <div className="flex flex-wrap gap-1">
+                          {asset.sources.slice(0, 2).map((source, idx) => (
+                            <Badge key={idx} variant="secondary">
+                              {source}
+                            </Badge>
+                          ))}
+                          {asset.sources.length > 2 && (
+                            <Badge variant="secondary">+{asset.sources.length - 2}</Badge>
                           )}
                         </div>
-                      ) : (
-                        <span className="text-muted-foreground">Never scanned</span>
-                      )}
-                    </TableCell>
-                    <TableCell onClick={(e) => e.stopPropagation()}>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={async () => {
-                          try {
-                            await createScan(asset.value, `Quick scan of ${asset.value}`);
-                            alert(`Scan initiated for ${asset.value}`);
-                          } catch (e) {
-                            alert(`Error: ${(e as Error).message}`);
-                          }
-                        }}
-                      >
-                        Scan
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
+                      </TableCell>
+                      <TableCell onClick={() => setSelectedAssetId(asset.id)}>
+                        <AssetTracking metadata={asset.metadata} />
+                      </TableCell>
+                      <TableCell className="text-muted-foreground text-sm" onClick={() => setSelectedAssetId(asset.id)}>
+                        {asset.last_scanned_at ? (
+                          <div className="space-y-1">
+                            <div className="text-xs">{new Date(asset.last_scanned_at).toLocaleString()}</div>
+                            {asset.last_scan_status && (
+                              <div onClick={(e) => e.stopPropagation()}>
+                                {asset.last_scan_id ? (
+                                  <Link href={`/scan/${asset.last_scan_id}`}>
+                                    <Badge
+                                      variant={asset.last_scan_status === "completed" ? "success" : asset.last_scan_status === "failed" ? "error" : "warning"}
+                                      className="cursor-pointer hover:opacity-80 transition-opacity"
+                                    >
+                                      {asset.last_scan_status} ↗
+                                    </Badge>
+                                  </Link>
+                                ) : (
+                                  <Badge variant={asset.last_scan_status === "completed" ? "success" : asset.last_scan_status === "failed" ? "error" : "warning"}>
+                                    {asset.last_scan_status}
+                                  </Badge>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-muted-foreground">Never scanned</span>
+                        )}
+                      </TableCell>
+                      <TableCell onClick={(e) => e.stopPropagation()}>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={async () => {
+                            try {
+                              await createScan(asset.value, `Quick scan of ${asset.value}`);
+                              alert(`Scan initiated for ${asset.value}`);
+                            } catch (e) {
+                              alert(`Error: ${(e as Error).message}`);
+                            }
+                          }}
+                        >
+                          Scan
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
 
-          {/* Pagination Controls */}
-          {!loading && !error && filteredAssets.length > 0 && (
-            <div className="mt-6 flex items-center justify-between border-t border-border pt-4">
-              <div className="text-sm text-muted-foreground">
-                Page {currentPage} of {Math.ceil(totalAssets / limit)} • Showing {((currentPage - 1) * limit) + 1}-{Math.min(currentPage * limit, totalAssets)} of {totalAssets.toLocaleString()} total assets
+              {/* Pagination */}
+              <div className="mt-6 flex items-center justify-between border-t border-border pt-4">
+                <div className="text-sm text-muted-foreground">
+                  Page {currentPage} of {totalPages || 1} • {totalCount.toLocaleString()} total assets
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCurrentPage(1)}
+                    disabled={currentPage === 1}
+                  >
+                    First
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                    disabled={currentPage === 1}
+                  >
+                    Previous
+                  </Button>
+                  <span className="px-3 py-1 bg-muted rounded-lg text-sm font-medium">
+                    {currentPage}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCurrentPage(p => p + 1)}
+                    disabled={currentPage >= totalPages}
+                  >
+                    Next
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCurrentPage(totalPages)}
+                    disabled={currentPage >= totalPages}
+                  >
+                    Last
+                  </Button>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={goToFirstPage}
-                  disabled={currentPage === 1}
-                >
-                  First
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={goToPreviousPage}
-                  disabled={currentPage === 1}
-                >
-                  Previous
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={goToNextPage}
-                  disabled={!hasMorePages}
-                >
-                  Next
-                </Button>
-              </div>
-            </div>
+            </>
           )}
         </CardContent>
       </Card>

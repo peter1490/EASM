@@ -85,6 +85,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/scans/:id", get(handlers::scan_handlers::get_scan))
         // Asset endpoints
         .route("/api/assets", get(handlers::asset_handlers::list_assets))
+        .route(
+            "/api/assets/search",
+            get(handlers::asset_handlers::search_assets),
+        )
         .route("/api/assets/:id", get(handlers::asset_handlers::get_asset))
         .route(
             "/api/assets/:id/path",

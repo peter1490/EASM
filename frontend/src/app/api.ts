@@ -432,6 +432,53 @@ export async function listAssets(min_confidence = 0, limit?: number, offset?: nu
   return res.json();
 }
 
+// ============================================================================
+// ADVANCED ASSET SEARCH
+// ============================================================================
+
+export type AssetSearchParams = {
+  q?: string;
+  asset_type?: "domain" | "ip" | "all";
+  min_confidence?: number;
+  scan_status?: "all" | "scanned" | "never_scanned";
+  source?: string;
+  risk_level?: string;
+  sort_by?: "created_at" | "confidence" | "value" | "importance" | "risk_score";
+  sort_dir?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
+};
+
+export type AssetSearchResponse = {
+  assets: Asset[];
+  total_count: number;
+  sources: string[];
+  limit: number;
+  offset: number;
+};
+
+export async function searchAssetsAdvanced(params: AssetSearchParams): Promise<AssetSearchResponse> {
+  const queryParams = new URLSearchParams();
+  
+  if (params.q) queryParams.append("q", params.q);
+  if (params.asset_type && params.asset_type !== "all") queryParams.append("asset_type", params.asset_type);
+  if (params.min_confidence !== undefined) queryParams.append("min_confidence", params.min_confidence.toString());
+  if (params.scan_status && params.scan_status !== "all") queryParams.append("scan_status", params.scan_status);
+  if (params.source) queryParams.append("source", params.source);
+  if (params.risk_level) queryParams.append("risk_level", params.risk_level);
+  if (params.sort_by) queryParams.append("sort_by", params.sort_by);
+  if (params.sort_dir) queryParams.append("sort_dir", params.sort_dir);
+  if (params.limit !== undefined) queryParams.append("limit", params.limit.toString());
+  if (params.offset !== undefined) queryParams.append("offset", params.offset.toString());
+
+  const res = await fetch(`${API_BASE}/api/assets/search?${queryParams.toString()}`, { 
+    cache: "no-store", 
+    credentials: "include" 
+  });
+  if (!res.ok) throw new Error(`Failed to search assets: ${res.status}`);
+  return res.json();
+}
+
 export async function getAsset(id: string): Promise<Asset> {
   const res = await fetch(`${API_BASE}/api/assets/${id}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get asset: ${res.status}`);

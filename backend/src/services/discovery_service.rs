@@ -23,13 +23,13 @@ use crate::{
     config::{Settings, SharedSettings},
     error::ApiError,
     models::{
-        Asset, AssetCreate, AssetRelationshipCreate, AssetSourceCreate, AssetType, DiscoveryConfig,
-        DiscoveryQueueItemCreate, DiscoveryResult, DiscoveryRun, DiscoveryRunCreate, QueueItemType,
-        RelationshipType, ScanTriggerType, SecurityScanCreate, SecurityScanType, Seed, SeedCreate,
-        SeedType, SourceType, TriggerType,
+        Asset, AssetCreate, AssetRelationshipCreate, AssetSourceCreate, AssetType, BlacklistObjectType,
+        DiscoveryConfig, DiscoveryQueueItemCreate, DiscoveryResult, DiscoveryRun, DiscoveryRunCreate,
+        QueueItemType, RelationshipType, ScanTriggerType, SecurityScanCreate, SecurityScanType,
+        Seed, SeedCreate, SeedType, SourceType, TriggerType,
     },
     repositories::{
-        AssetRelationshipRepository, AssetRepository, AssetSourceRepository,
+        AssetRelationshipRepository, AssetRepository, AssetSourceRepository, BlacklistRepository,
         DiscoveryQueueRepository, DiscoveryRunRepository, SeedRepository,
     },
     services::{
@@ -101,6 +101,9 @@ static COMMON_INFRASTRUCTURE_ORGS: &[&str] = &[
 pub struct DiscoveryStatus {
     pub is_running: bool,
     pub run_id: Option<Uuid>,
+    /// Task ID in the TaskManager for the current discovery run
+    #[serde(skip)]
+    pub task_id: Option<Uuid>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
     pub current_phase: String,
@@ -124,6 +127,7 @@ pub struct DiscoveryService {
     discovery_queue_repo: Arc<dyn DiscoveryQueueRepository + Send + Sync>,
     asset_source_repo: Arc<dyn AssetSourceRepository + Send + Sync>,
     asset_relationship_repo: Arc<dyn AssetRelationshipRepository + Send + Sync>,
+    blacklist_repo: Arc<dyn BlacklistRepository + Send + Sync>,
 
     // Services
     security_scan_service: Option<Arc<SecurityScanService>>,
@@ -150,6 +154,7 @@ impl DiscoveryService {
         discovery_queue_repo: Arc<dyn DiscoveryQueueRepository + Send + Sync>,
         asset_source_repo: Arc<dyn AssetSourceRepository + Send + Sync>,
         asset_relationship_repo: Arc<dyn AssetRelationshipRepository + Send + Sync>,
+        blacklist_repo: Arc<dyn BlacklistRepository + Send + Sync>,
         external_services: Arc<ExternalServicesManager>,
         dns_resolver: Arc<DnsResolver>,
         http_analyzer: Arc<HttpAnalyzer>,
@@ -163,6 +168,7 @@ impl DiscoveryService {
             discovery_queue_repo,
             asset_source_repo,
             asset_relationship_repo,
+            blacklist_repo,
             security_scan_service: None,
             external_services,
             dns_resolver,
@@ -327,7 +333,7 @@ impl DiscoveryService {
             "started_at": Utc::now()
         });
 
-        self.task_manager
+        let task_id = self.task_manager
             .submit_task(TaskType::Discovery, task_metadata, move |ctx| {
                 let discovery_service = discovery_service.clone();
                 let config_clone = (*config_arc).clone();
@@ -339,30 +345,49 @@ impl DiscoveryService {
             })
             .await?;
 
+        // Store the task ID for cancellation support
+        {
+            let mut status = self.status.lock().await;
+            status.task_id = Some(task_id);
+        }
+
         Ok(run)
     }
 
     /// Stop the running discovery
     pub async fn stop_discovery(&self) -> Result<(), ApiError> {
-        let run_id = {
+        let (run_id, task_id) = {
             let status = self.status.lock().await;
             if !status.is_running {
                 return Err(ApiError::Validation("Discovery is not running".to_string()));
             }
-            status.run_id
+            (status.run_id, status.task_id)
         };
 
+        // Cancel the task in TaskManager first - this will signal the task to stop
+        if let Some(tid) = task_id {
+            if let Err(e) = self.task_manager.cancel_task(tid).await {
+                tracing::warn!("Failed to cancel discovery task {}: {}", tid, e);
+                // Continue anyway - the task might have already completed
+            } else {
+                tracing::info!("Cancelled discovery task {}", tid);
+            }
+        }
+
         if let Some(id) = run_id {
-            // Mark run as cancelled
+            // Mark run as cancelled in the database
             self.discovery_run_repo
                 .update_status(&id, "cancelled", Some("Stopped by user"))
                 .await?;
+        }
 
-            // Update status
+        // Update status
+        {
             let mut status = self.status.lock().await;
             status.is_running = false;
             status.completed_at = Some(Utc::now());
             status.current_phase = "Cancelled".to_string();
+            status.task_id = None;
         }
 
         Ok(())
@@ -391,6 +416,7 @@ impl DiscoveryService {
             let mut status = self.status.lock().await;
             status.is_running = false;
             status.completed_at = Some(Utc::now());
+            status.task_id = None; // Clear task ID on completion
 
             match &result {
                 Ok(_) => {
@@ -398,11 +424,20 @@ impl DiscoveryService {
                     self.discovery_run_repo.complete(&run_id).await?;
                 }
                 Err(e) => {
-                    status.current_phase = "Failed".to_string();
-                    status.errors.push(e.to_string());
-                    self.discovery_run_repo
-                        .fail(&run_id, &e.to_string())
-                        .await?;
+                    // Check if error is due to cancellation
+                    let error_msg = e.to_string();
+                    if error_msg.contains("cancelled") || error_msg.contains("Task was cancelled") {
+                        status.current_phase = "Cancelled".to_string();
+                        self.discovery_run_repo
+                            .update_status(&run_id, "cancelled", Some("Task was cancelled"))
+                            .await?;
+                    } else {
+                        status.current_phase = "Failed".to_string();
+                        status.errors.push(error_msg.clone());
+                        self.discovery_run_repo
+                            .fail(&run_id, &error_msg)
+                            .await?;
+                    }
                 }
             }
         }
@@ -620,6 +655,16 @@ impl DiscoveryService {
             max_depth
         );
 
+        // Check if the item is blacklisted before processing
+        if self.is_item_blacklisted(item_type, item_value).await? {
+            tracing::info!(
+                "Skipping blacklisted {} '{}' during discovery",
+                item_type,
+                item_value
+            );
+            return Ok(DiscoveryResult::default());
+        }
+
         match item_type {
             "domain" => {
                 self.discover_from_domain(run_id, item_value, seed_id, parent_asset_id, depth, max_depth)
@@ -645,6 +690,47 @@ impl DiscoveryService {
                 tracing::warn!("Unknown item type: {}", item_type);
                 Ok(DiscoveryResult::default())
             }
+        }
+    }
+
+    /// Check if an item is blacklisted based on its type
+    async fn is_item_blacklisted(&self, item_type: &str, item_value: &str) -> Result<bool, ApiError> {
+        match item_type {
+            "domain" => {
+                // Check if domain or any parent domain is blacklisted
+                Ok(self
+                    .blacklist_repo
+                    .is_domain_or_parent_blacklisted(item_value)
+                    .await?
+                    .is_some())
+            }
+            "ip" => {
+                // Check if IP is blacklisted directly or within a blacklisted CIDR
+                Ok(self
+                    .blacklist_repo
+                    .is_ip_blacklisted(item_value)
+                    .await?
+                    .is_some())
+            }
+            "organization" => {
+                Ok(self
+                    .blacklist_repo
+                    .is_blacklisted(&BlacklistObjectType::Organization, item_value)
+                    .await?)
+            }
+            "asn" => {
+                Ok(self
+                    .blacklist_repo
+                    .is_blacklisted(&BlacklistObjectType::Asn, item_value)
+                    .await?)
+            }
+            "cidr" => {
+                Ok(self
+                    .blacklist_repo
+                    .is_blacklisted(&BlacklistObjectType::Cidr, item_value)
+                    .await?)
+            }
+            _ => Ok(false),
         }
     }
 
@@ -1531,6 +1617,7 @@ impl Clone for DiscoveryService {
             discovery_queue_repo: Arc::clone(&self.discovery_queue_repo),
             asset_source_repo: Arc::clone(&self.asset_source_repo),
             asset_relationship_repo: Arc::clone(&self.asset_relationship_repo),
+            blacklist_repo: Arc::clone(&self.blacklist_repo),
             security_scan_service: self.security_scan_service.clone(),
             external_services: Arc::clone(&self.external_services),
             dns_resolver: Arc::clone(&self.dns_resolver),

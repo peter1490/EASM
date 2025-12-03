@@ -1,10 +1,12 @@
 pub mod admin_handlers;
 pub mod asset_handlers;
 pub mod auth_handlers;
+pub mod blacklist_handlers;
 pub mod discovery_handlers;
 pub mod drift_handlers;
 pub mod evidence_handlers;
 pub mod finding_handlers;
+pub mod finding_type_config_handlers;
 pub mod health_handlers;
 pub mod metrics_handlers;
 pub mod risk_handlers;

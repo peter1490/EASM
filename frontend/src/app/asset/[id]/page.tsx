@@ -17,6 +17,7 @@ import {
   tagAsset,
   untagAsset,
   listTags,
+  blacklistFromAsset,
   type Asset,
   type SecurityFinding,
   type SecurityScan,
@@ -33,6 +34,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import EmptyState from "@/components/ui/EmptyState";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import Modal from "@/components/ui/Modal";
+import Checkbox from "@/components/ui/Checkbox";
 import AssetDiscoveryGraph from "@/components/AssetDiscoveryGraph";
 
 type TabType = "overview" | "security" | "scans" | "metadata";
@@ -125,6 +127,13 @@ export default function AssetDetailPage() {
   // Tag modal state
   const [showTagModal, setShowTagModal] = useState(false);
   const [taggingInProgress, setTaggingInProgress] = useState(false);
+  
+  // Blacklist modal state
+  const [showBlacklistModal, setShowBlacklistModal] = useState(false);
+  const [blacklistReason, setBlacklistReason] = useState("");
+  const [blacklistDeleteDescendants, setBlacklistDeleteDescendants] = useState(true);
+  const [blacklisting, setBlacklisting] = useState(false);
+  const [blacklistResult, setBlacklistResult] = useState<{ descendants_deleted: number } | null>(null);
   
   const hasInitialLoadRef = useRef(false);
 
@@ -287,6 +296,32 @@ export default function AssetDetailPage() {
     }
   }
 
+  async function handleBlacklist() {
+    if (!asset) return;
+    setBlacklisting(true);
+    setError(null);
+    try {
+      const result = await blacklistFromAsset(
+        asset.id,
+        blacklistReason || undefined,
+        blacklistDeleteDescendants
+      );
+      setBlacklistResult({ descendants_deleted: result.descendants_deleted });
+    } catch (err) {
+      setError((err as Error).message);
+      setShowBlacklistModal(false);
+    } finally {
+      setBlacklisting(false);
+    }
+  }
+
+  function closeBlacklistModal() {
+    setShowBlacklistModal(false);
+    setBlacklistReason("");
+    setBlacklistDeleteDescendants(true);
+    setBlacklistResult(null);
+  }
+
   // Findings stats
   const findingsStats = {
     total: findings.length,
@@ -366,6 +401,13 @@ export default function AssetDetailPage() {
             loading={scanning}
           >
             {scanning ? "Scanning..." : "Run Security Scan"}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => setShowBlacklistModal(true)}
+            className="text-destructive hover:bg-destructive/10"
+          >
+            🚫 Blacklist
           </Button>
           <Button
             variant="outline"
@@ -1315,8 +1357,11 @@ export default function AssetDetailPage() {
                     className="w-full flex items-center gap-3 p-3 rounded-lg border border-border hover:bg-muted transition-colors text-left disabled:opacity-50"
                   >
                     <div
-                      className="w-4 h-4 rounded-full ring-2 ring-offset-2 ring-offset-background flex-shrink-0"
-                      style={{ backgroundColor: tag.color || "#6366f1", ringColor: tag.color || "#6366f1" }}
+                      className="w-4 h-4 rounded-full flex-shrink-0"
+                      style={{ 
+                        backgroundColor: tag.color || "#6366f1", 
+                        boxShadow: `0 0 0 2px var(--background), 0 0 0 4px ${tag.color || "#6366f1"}`
+                      }}
                     />
                     <div className="flex-1 min-w-0">
                       <div className="font-medium">{tag.name}</div>
@@ -1364,6 +1409,112 @@ export default function AssetDetailPage() {
             </Button>
           </div>
         </div>
+      </Modal>
+
+      {/* Blacklist Modal */}
+      <Modal
+        isOpen={showBlacklistModal}
+        onClose={closeBlacklistModal}
+        title={blacklistResult ? "Asset Blacklisted" : "Blacklist Asset"}
+      >
+        {blacklistResult ? (
+          <div className="space-y-6">
+            <div className="flex items-center gap-4 p-4 bg-success/10 rounded-lg border border-success/20">
+              <span className="text-3xl">✅</span>
+              <div>
+                <div className="font-medium text-success">Successfully blacklisted</div>
+                <div className="text-sm text-muted-foreground">
+                  {asset?.value} has been added to the blacklist.
+                </div>
+              </div>
+            </div>
+
+            {blacklistResult.descendants_deleted > 0 && (
+              <div className="p-4 bg-warning/10 rounded-lg border border-warning/20">
+                <div className="flex items-center gap-2 text-warning font-medium">
+                  <span>⚠️</span>
+                  <span>Cascade Deletion</span>
+                </div>
+                <div className="text-sm text-muted-foreground mt-1">
+                  {blacklistResult.descendants_deleted} descendant asset(s) were deleted from the database.
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-3">
+              <Link href="/blacklist">
+                <Button variant="outline">View Blacklist</Button>
+              </Link>
+              <Link href="/assets">
+                <Button>Back to Assets</Button>
+              </Link>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-6">
+            <div className="p-4 bg-destructive/10 rounded-lg border border-destructive/20">
+              <div className="flex items-center gap-2 text-destructive font-medium mb-2">
+                <span>⚠️</span>
+                <span>Warning: This action has significant effects</span>
+              </div>
+              <ul className="text-sm text-muted-foreground space-y-1 ml-6 list-disc">
+                <li>This asset will be excluded from all future discovery runs</li>
+                <li>Subdomains and related assets may also be excluded</li>
+                <li>If enabled, all descendant assets will be deleted</li>
+              </ul>
+            </div>
+
+            <div>
+              <div className="flex items-center gap-3 mb-3">
+                <Badge variant={asset?.asset_type === "domain" ? "info" : "secondary"}>
+                  {asset?.asset_type}
+                </Badge>
+                <span className="font-mono font-medium">{asset?.value}</span>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-foreground mb-1.5">
+                Reason (optional)
+              </label>
+              <textarea
+                className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring min-h-[80px]"
+                placeholder="Why is this asset being blacklisted? (e.g., CDN provider, not owned by us, false positive...)"
+                value={blacklistReason}
+                onChange={(e) => setBlacklistReason(e.target.value)}
+              />
+            </div>
+
+            <div className="p-4 bg-muted rounded-lg">
+              <Checkbox
+                checked={blacklistDeleteDescendants}
+                onChange={(checked) => setBlacklistDeleteDescendants(checked)}
+                label={
+                  <div>
+                    <span className="font-medium">Delete descendant assets</span>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      If checked, all assets that were discovered from this asset will be deleted from the database.
+                      This includes subdomains, resolved IPs, and any assets discovered via pivoting.
+                    </p>
+                  </div>
+                }
+              />
+            </div>
+
+            <div className="flex justify-end gap-3 pt-4 border-t">
+              <Button variant="outline" onClick={closeBlacklistModal} disabled={blacklisting}>
+                Cancel
+              </Button>
+              <Button
+                onClick={handleBlacklist}
+                loading={blacklisting}
+                className="bg-destructive hover:bg-destructive/90 text-destructive-foreground"
+              >
+                Blacklist Asset
+              </Button>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );

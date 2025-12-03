@@ -302,6 +302,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/assets/:asset_id/tags/:tag_id",
             delete(handlers::tag_handlers::untag_asset),
         )
+        // Blacklist endpoints
+        .route(
+            "/api/blacklist",
+            get(handlers::blacklist_handlers::list_blacklist)
+                .post(handlers::blacklist_handlers::create_blacklist_entry),
+        )
+        .route(
+            "/api/blacklist/stats",
+            get(handlers::blacklist_handlers::get_blacklist_stats),
+        )
+        .route(
+            "/api/blacklist/check",
+            post(handlers::blacklist_handlers::check_blacklist),
+        )
+        .route(
+            "/api/blacklist/from-asset/:id",
+            post(handlers::blacklist_handlers::blacklist_from_asset),
+        )
+        .route(
+            "/api/blacklist/:id",
+            get(handlers::blacklist_handlers::get_blacklist_entry)
+                .patch(handlers::blacklist_handlers::update_blacklist_entry)
+                .delete(handlers::blacklist_handlers::delete_blacklist_entry),
+        )
+        // Finding type config endpoints (risk scoring configuration)
+        .route(
+            "/api/admin/finding-type-config",
+            get(handlers::finding_type_config_handlers::list_finding_type_configs),
+        )
+        .route(
+            "/api/admin/finding-type-config/bulk",
+            patch(handlers::finding_type_config_handlers::bulk_update_finding_type_configs),
+        )
+        .route(
+            "/api/admin/finding-type-config/scoring-map",
+            get(handlers::finding_type_config_handlers::get_scoring_map),
+        )
+        .route(
+            "/api/admin/finding-type-config/:finding_type",
+            get(handlers::finding_type_config_handlers::get_finding_type_config)
+                .patch(handlers::finding_type_config_handlers::update_finding_type_config),
+        )
         // Add auth middleware
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),

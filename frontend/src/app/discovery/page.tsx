@@ -9,11 +9,20 @@ import {
   listSeeds,
   createSeed,
   deleteSeed,
+  listBlacklist,
+  createBlacklistEntry,
+  deleteBlacklistEntry,
+  getBlacklistStats,
   type DiscoveryStatus,
   type DiscoveryRun,
   type Seed,
   type SeedType,
+  type BlacklistEntry,
+  type BlacklistCreate,
+  type BlacklistStats,
+  type BlacklistObjectType,
 } from "@/app/api";
+import { useAuth } from "@/context/AuthContext";
 import Header from "@/components/Header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/Table";
@@ -24,8 +33,9 @@ import Select from "@/components/ui/Select";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import EmptyState from "@/components/ui/EmptyState";
 import Modal from "@/components/ui/Modal";
+import Checkbox from "@/components/ui/Checkbox";
 
-type TabType = "overview" | "seeds" | "history";
+type TabType = "overview" | "seeds" | "history" | "blacklist";
 
 const STATUS_COLORS: Record<string, "error" | "warning" | "info" | "secondary" | "success"> = {
   pending: "secondary",
@@ -54,7 +64,26 @@ const getSeedTypeInfo = (seedType: string) => {
   return SEED_TYPES.find(t => t.value === seedType || t.backendValue === seedType);
 };
 
+const BLACKLIST_TYPE_OPTIONS: { value: BlacklistObjectType; label: string; icon: string }[] = [
+  { value: "domain", label: "Domain", icon: "🌐" },
+  { value: "ip", label: "IP Address", icon: "🖥️" },
+  { value: "organization", label: "Organization", icon: "🏢" },
+  { value: "asn", label: "ASN", icon: "🔗" },
+  { value: "cidr", label: "CIDR Range", icon: "📡" },
+  { value: "certificate", label: "Certificate", icon: "🔒" },
+];
+
+const BLACKLIST_BADGE_COLORS: Record<string, "info" | "warning" | "error" | "success" | "secondary"> = {
+  domain: "info",
+  ip: "warning",
+  organization: "secondary",
+  asn: "success",
+  cidr: "error",
+  certificate: "info",
+};
+
 export default function DiscoveryPage() {
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<TabType>("overview");
   const [status, setStatus] = useState<DiscoveryStatus | null>(null);
   const [runs, setRuns] = useState<DiscoveryRun[]>([]);
@@ -77,6 +106,33 @@ export default function DiscoveryPage() {
   
   // Run detail modal
   const [selectedRun, setSelectedRun] = useState<DiscoveryRun | null>(null);
+
+  // Blacklist state
+  const [blacklistEntries, setBlacklistEntries] = useState<BlacklistEntry[]>([]);
+  const [blacklistStats, setBlacklistStats] = useState<BlacklistStats | null>(null);
+  const [blacklistLoading, setBlacklistLoading] = useState(false);
+  const [blacklistTotalCount, setBlacklistTotalCount] = useState(0);
+  const [blacklistPage, setBlacklistPage] = useState(0);
+  const [blacklistPageSize] = useState(25);
+  const [blacklistFilterType, setBlacklistFilterType] = useState<string>("");
+  const [blacklistSearchQuery, setBlacklistSearchQuery] = useState("");
+  
+  // Blacklist modals
+  const [showBlacklistCreateModal, setShowBlacklistCreateModal] = useState(false);
+  const [blacklistCreateFormData, setBlacklistCreateFormData] = useState<BlacklistCreate>({
+    object_type: "domain",
+    object_value: "",
+    reason: "",
+    delete_descendants: true,
+  });
+  const [blacklistCreating, setBlacklistCreating] = useState(false);
+  const [blacklistCreateError, setBlacklistCreateError] = useState<string | null>(null);
+  const [blacklistCreateResult, setBlacklistCreateResult] = useState<{ entry: BlacklistEntry; descendants_deleted: number } | null>(null);
+  const [blacklistDeleteConfirm, setBlacklistDeleteConfirm] = useState<BlacklistEntry | null>(null);
+  const [blacklistDeleting, setBlacklistDeleting] = useState(false);
+
+  const isAdmin = user?.roles?.includes("admin");
+  const isAnalyst = user?.roles?.includes("analyst") || user?.roles?.includes("operator") || isAdmin;
 
   const loadData = useCallback(async (isRefresh = false) => {
     try {
@@ -160,6 +216,83 @@ export default function DiscoveryPage() {
     }
   }
 
+  // Blacklist functions
+  const loadBlacklistData = useCallback(async () => {
+    try {
+      setBlacklistLoading(true);
+      const [entriesData, statsData] = await Promise.all([
+        listBlacklist(blacklistPageSize, blacklistPage * blacklistPageSize, blacklistFilterType || undefined, blacklistSearchQuery || undefined),
+        getBlacklistStats(),
+      ]);
+      setBlacklistEntries(entriesData.entries);
+      setBlacklistTotalCount(entriesData.total_count);
+      setBlacklistStats(statsData);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBlacklistLoading(false);
+    }
+  }, [blacklistPage, blacklistPageSize, blacklistFilterType, blacklistSearchQuery]);
+
+  useEffect(() => {
+    if (activeTab === "blacklist") {
+      loadBlacklistData();
+    }
+  }, [activeTab, loadBlacklistData]);
+
+  async function handleBlacklistCreate() {
+    if (!blacklistCreateFormData.object_value.trim()) {
+      setBlacklistCreateError("Value is required");
+      return;
+    }
+
+    setBlacklistCreating(true);
+    setBlacklistCreateError(null);
+
+    try {
+      const result = await createBlacklistEntry({
+        ...blacklistCreateFormData,
+        object_value: blacklistCreateFormData.object_value.trim(),
+        reason: blacklistCreateFormData.reason?.trim() || undefined,
+      });
+      setBlacklistCreateResult(result);
+      loadBlacklistData();
+    } catch (err) {
+      setBlacklistCreateError((err as Error).message);
+    } finally {
+      setBlacklistCreating(false);
+    }
+  }
+
+  async function handleBlacklistDelete() {
+    if (!blacklistDeleteConfirm) return;
+
+    setBlacklistDeleting(true);
+    try {
+      await deleteBlacklistEntry(blacklistDeleteConfirm.id);
+      setBlacklistDeleteConfirm(null);
+      loadBlacklistData();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBlacklistDeleting(false);
+    }
+  }
+
+  function closeBlacklistCreateModal() {
+    setShowBlacklistCreateModal(false);
+    setBlacklistCreateFormData({
+      object_type: "domain",
+      object_value: "",
+      reason: "",
+      delete_descendants: true,
+    });
+    setBlacklistCreateError(null);
+    setBlacklistCreateResult(null);
+  }
+
+  const blacklistTotalPages = Math.ceil(blacklistTotalCount / blacklistPageSize);
+
   function formatDuration(startedAt: string | null, completedAt: string | null): string {
     if (!startedAt) return "—";
     const start = new Date(startedAt).getTime();
@@ -189,6 +322,7 @@ export default function DiscoveryPage() {
     { id: "overview" as TabType, label: "Overview", icon: "📊" },
     { id: "seeds" as TabType, label: "Seeds", icon: "🌱", badge: seeds.length },
     { id: "history" as TabType, label: "History", icon: "📜", badge: runs.length },
+    { id: "blacklist" as TabType, label: "Blacklist", icon: "🚫", badge: blacklistStats?.total_entries },
   ];
 
   return (
@@ -681,6 +815,201 @@ export default function DiscoveryPage() {
         </div>
       )}
 
+      {/* Blacklist Tab */}
+      {activeTab === "blacklist" && (
+        <div className="space-y-6 stagger-children">
+          {/* Blacklist Stats Cards */}
+          {blacklistStats && (
+            <div className="grid gap-4 md:grid-cols-4 lg:grid-cols-7">
+              <Card className="md:col-span-1">
+                <CardHeader className="pb-3">
+                  <CardDescription>Total Blocked</CardDescription>
+                  <CardTitle className="text-3xl font-mono">{blacklistStats.total_entries}</CardTitle>
+                </CardHeader>
+              </Card>
+              {BLACKLIST_TYPE_OPTIONS.map((opt) => (
+                <Card key={opt.value}>
+                  <CardHeader className="pb-3">
+                    <CardDescription className="flex items-center gap-2">
+                      <span>{opt.icon}</span>
+                      <span>{opt.label}s</span>
+                    </CardDescription>
+                    <CardTitle className="text-2xl font-mono">
+                      {blacklistStats.by_type[opt.value] || 0}
+                    </CardTitle>
+                  </CardHeader>
+                </Card>
+              ))}
+            </div>
+          )}
+
+          {/* Filters and Actions */}
+          <Card>
+            <CardContent className="!pt-6 pb-6">
+              <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 flex-1 w-full md:w-auto">
+                  <Input
+                    placeholder="Search values or reasons..."
+                    value={blacklistSearchQuery}
+                    onChange={(e) => {
+                      setBlacklistSearchQuery(e.target.value);
+                      setBlacklistPage(0);
+                    }}
+                    className="w-full sm:w-64"
+                  />
+                  <Select
+                    value={blacklistFilterType}
+                    onChange={(e) => {
+                      setBlacklistFilterType(e.target.value);
+                      setBlacklistPage(0);
+                    }}
+                    className="w-full sm:w-48"
+                  >
+                    <option value="">All Types</option>
+                    {BLACKLIST_TYPE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.icon} {opt.label}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Button variant="outline" onClick={loadBlacklistData} disabled={blacklistLoading}>
+                    {blacklistLoading ? "Refreshing..." : "Refresh"}
+                  </Button>
+                  {isAnalyst && (
+                    <Button onClick={() => setShowBlacklistCreateModal(true)}>
+                      + Add to Blacklist
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Blacklist Table */}
+          <Card>
+            <CardHeader>
+              <CardTitle>
+                Blacklisted Objects
+                {blacklistTotalCount > 0 && (
+                  <span className="ml-2 text-muted-foreground font-normal text-base">
+                    ({blacklistTotalCount} total)
+                  </span>
+                )}
+              </CardTitle>
+              <CardDescription>
+                Objects in this list are excluded from discovery. Subdomains of blacklisted domains and IPs within blacklisted CIDRs are also excluded.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {blacklistLoading && blacklistEntries.length === 0 ? (
+                <div className="flex justify-center py-12">
+                  <LoadingSpinner size="lg" />
+                </div>
+              ) : blacklistEntries.length === 0 ? (
+                <EmptyState
+                  icon="🚫"
+                  title="No blacklist entries"
+                  description={blacklistSearchQuery || blacklistFilterType ? "No entries match your filters" : "Add objects to the blacklist to exclude them from discovery"}
+                  action={
+                    isAnalyst ? (
+                      <Button onClick={() => setShowBlacklistCreateModal(true)}>
+                        Add First Entry
+                      </Button>
+                    ) : undefined
+                  }
+                />
+              ) : (
+                <>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Type</TableHead>
+                        <TableHead>Value</TableHead>
+                        <TableHead>Reason</TableHead>
+                        <TableHead>Created By</TableHead>
+                        <TableHead>Created At</TableHead>
+                        {isAnalyst && <TableHead className="text-right">Actions</TableHead>}
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {blacklistEntries.map((entry) => {
+                        const typeOpt = BLACKLIST_TYPE_OPTIONS.find((o) => o.value === entry.object_type);
+                        return (
+                          <TableRow key={entry.id}>
+                            <TableCell>
+                              <Badge variant={BLACKLIST_BADGE_COLORS[entry.object_type] || "secondary"}>
+                                {typeOpt?.icon} {entry.object_type}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="font-mono text-sm max-w-xs truncate">
+                              {entry.object_value}
+                            </TableCell>
+                            <TableCell className="max-w-xs truncate text-muted-foreground">
+                              {entry.reason || "—"}
+                            </TableCell>
+                            <TableCell className="text-muted-foreground text-sm">
+                              {entry.created_by ? `${entry.created_by.slice(0, 20)}...` : "—"}
+                            </TableCell>
+                            <TableCell className="text-muted-foreground text-sm whitespace-nowrap">
+                              {new Date(entry.created_at).toLocaleDateString()}
+                            </TableCell>
+                            {isAnalyst && (
+                              <TableCell className="text-right">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => setBlacklistDeleteConfirm(entry)}
+                                  className="text-destructive hover:bg-destructive/10"
+                                >
+                                  Remove
+                                </Button>
+                              </TableCell>
+                            )}
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+
+                  {/* Pagination */}
+                  {blacklistTotalPages > 1 && (
+                    <div className="flex items-center justify-between mt-6 pt-4 border-t">
+                      <div className="text-sm text-muted-foreground">
+                        Showing {blacklistPage * blacklistPageSize + 1} - {Math.min((blacklistPage + 1) * blacklistPageSize, blacklistTotalCount)} of{" "}
+                        {blacklistTotalCount}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setBlacklistPage((p) => Math.max(0, p - 1))}
+                          disabled={blacklistPage === 0}
+                        >
+                          Previous
+                        </Button>
+                        <span className="text-sm text-muted-foreground px-2">
+                          Page {blacklistPage + 1} of {blacklistTotalPages}
+                        </span>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setBlacklistPage((p) => Math.min(blacklistTotalPages - 1, p + 1))}
+                          disabled={blacklistPage >= blacklistTotalPages - 1}
+                        >
+                          Next
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
       {/* Run Detail Modal */}
       <Modal
         isOpen={!!selectedRun}
@@ -761,6 +1090,189 @@ export default function DiscoveryPage() {
             <div className="flex gap-3 pt-4 border-t">
               <Button variant="outline" onClick={() => setSelectedRun(null)}>
                 Close
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Create Blacklist Entry Modal */}
+      <Modal
+        isOpen={showBlacklistCreateModal}
+        onClose={closeBlacklistCreateModal}
+        title={blacklistCreateResult ? "Entry Created" : "Add to Blacklist"}
+        size="lg"
+      >
+        {blacklistCreateResult ? (
+          <div className="space-y-6">
+            <div className="flex items-center gap-4 p-4 bg-success/10 rounded-lg border border-success/20">
+              <span className="text-3xl">✅</span>
+              <div>
+                <div className="font-medium text-success">Successfully blacklisted</div>
+                <div className="text-sm text-muted-foreground">
+                  {blacklistCreateResult.entry.object_type}: {blacklistCreateResult.entry.object_value}
+                </div>
+              </div>
+            </div>
+
+            {blacklistCreateResult.descendants_deleted > 0 && (
+              <div className="p-4 bg-warning/10 rounded-lg border border-warning/20">
+                <div className="flex items-center gap-2 text-warning font-medium">
+                  <span>⚠️</span>
+                  <span>Cascade Deletion</span>
+                </div>
+                <div className="text-sm text-muted-foreground mt-1">
+                  {blacklistCreateResult.descendants_deleted} descendant asset(s) were deleted from the database.
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-end">
+              <Button onClick={closeBlacklistCreateModal}>Done</Button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {blacklistCreateError && (
+              <div className="p-3 bg-destructive/10 rounded-lg border border-destructive/20 text-destructive text-sm">
+                {blacklistCreateError}
+              </div>
+            )}
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <Select
+                label="Object Type"
+                value={blacklistCreateFormData.object_type}
+                onChange={(e) =>
+                  setBlacklistCreateFormData((prev) => ({
+                    ...prev,
+                    object_type: e.target.value as BlacklistObjectType,
+                  }))
+                }
+              >
+                {BLACKLIST_TYPE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.icon} {opt.label}
+                  </option>
+                ))}
+              </Select>
+
+              <Input
+                label="Value *"
+                placeholder={
+                  blacklistCreateFormData.object_type === "domain"
+                    ? "e.g., cloudflare.com"
+                    : blacklistCreateFormData.object_type === "ip"
+                    ? "e.g., 192.168.1.1"
+                    : blacklistCreateFormData.object_type === "cidr"
+                    ? "e.g., 10.0.0.0/8"
+                    : blacklistCreateFormData.object_type === "asn"
+                    ? "e.g., AS13335"
+                    : blacklistCreateFormData.object_type === "organization"
+                    ? "e.g., Cloudflare Inc"
+                    : "Enter value..."
+                }
+                value={blacklistCreateFormData.object_value}
+                onChange={(e) =>
+                  setBlacklistCreateFormData((prev) => ({
+                    ...prev,
+                    object_value: e.target.value,
+                  }))
+                }
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-foreground mb-1.5">
+                Reason (optional)
+              </label>
+              <textarea
+                className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring min-h-[80px]"
+                placeholder="Why is this being blacklisted? (e.g., CDN provider, not owned by us, false positive...)"
+                value={blacklistCreateFormData.reason || ""}
+                onChange={(e) =>
+                  setBlacklistCreateFormData((prev) => ({
+                    ...prev,
+                    reason: e.target.value,
+                  }))
+                }
+              />
+            </div>
+
+            <div className="p-4 bg-muted rounded-lg">
+              <Checkbox
+                checked={blacklistCreateFormData.delete_descendants ?? true}
+                onChange={(checked) =>
+                  setBlacklistCreateFormData((prev) => ({
+                    ...prev,
+                    delete_descendants: checked,
+                  }))
+                }
+                label={
+                  <div>
+                    <span className="font-medium">Delete descendant assets</span>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      If checked, all assets that were discovered from this object will be deleted from the database.
+                      This includes subdomains, resolved IPs, and any assets discovered via pivoting from this object.
+                    </p>
+                  </div>
+                }
+              />
+            </div>
+
+            <div className="flex justify-end gap-3 pt-4 border-t">
+              <Button variant="outline" onClick={closeBlacklistCreateModal} disabled={blacklistCreating}>
+                Cancel
+              </Button>
+              <Button
+                onClick={handleBlacklistCreate}
+                loading={blacklistCreating}
+                disabled={!blacklistCreateFormData.object_value.trim()}
+              >
+                Add to Blacklist
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Blacklist Delete Confirmation Modal */}
+      <Modal
+        isOpen={!!blacklistDeleteConfirm}
+        onClose={() => setBlacklistDeleteConfirm(null)}
+        title="Remove from Blacklist"
+      >
+        {blacklistDeleteConfirm && (
+          <div className="space-y-4">
+            <p className="text-muted-foreground">
+              Are you sure you want to remove this entry from the blacklist?
+            </p>
+            <div className="p-4 bg-muted rounded-lg">
+              <div className="flex items-center gap-3">
+                <Badge variant={BLACKLIST_BADGE_COLORS[blacklistDeleteConfirm.object_type] || "secondary"}>
+                  {blacklistDeleteConfirm.object_type}
+                </Badge>
+                <span className="font-mono text-sm">{blacklistDeleteConfirm.object_value}</span>
+              </div>
+              {blacklistDeleteConfirm.reason && (
+                <div className="text-sm text-muted-foreground mt-2">
+                  Reason: {blacklistDeleteConfirm.reason}
+                </div>
+              )}
+            </div>
+            <div className="p-3 bg-warning/10 rounded-lg text-warning text-sm">
+              ⚠️ After removal, this object and its descendants will be discovered again in future discovery runs.
+            </div>
+            <div className="flex justify-end gap-3 pt-4 border-t">
+              <Button variant="outline" onClick={() => setBlacklistDeleteConfirm(null)} disabled={blacklistDeleting}>
+                Cancel
+              </Button>
+              <Button
+                onClick={handleBlacklistDelete}
+                loading={blacklistDeleting}
+                className="bg-destructive hover:bg-destructive/90 text-destructive-foreground"
+              >
+                Remove from Blacklist
               </Button>
             </div>
           </div>

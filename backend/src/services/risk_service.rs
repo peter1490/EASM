@@ -28,6 +28,47 @@ impl RiskService {
         }
     }
 
+    /// Load configurable scoring parameters from the database
+    async fn load_scoring_config(&self) -> Result<HashMap<String, (f64, f64)>, ApiError> {
+        let rows = sqlx::query_as::<_, (String, f64, f64)>(
+            r#"
+            SELECT finding_type, severity_score, type_multiplier
+            FROM finding_type_config
+            WHERE is_enabled = true
+            "#,
+        )
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        let map: HashMap<String, (f64, f64)> = rows
+            .into_iter()
+            .map(|(ft, score, mult)| (ft, (score, mult)))
+            .collect();
+
+        Ok(map)
+    }
+
+    /// Get fallback severity score if type not in config
+    fn get_fallback_severity_score(severity: &str) -> f64 {
+        match severity {
+            "critical" => 40.0,
+            "high" => 20.0,
+            "medium" => 10.0,
+            "low" => 3.0,
+            "info" => 0.5,
+            _ => 1.0,
+        }
+    }
+
+    /// Get fallback type multiplier for special port handling
+    fn get_port_multiplier(port: i64) -> f64 {
+        match port {
+            22 | 3389 | 23 => 1.5,     // Remote access (SSH, Telnet, RDP)
+            3306 | 5432 | 6379 => 1.8, // Databases (MySQL, PostgreSQL, Redis)
+            _ => 1.0,
+        }
+    }
+
     /// Calculate risk score for a single asset based on its security findings
     pub async fn calculate_asset_risk(&self, asset_id: Uuid) -> Result<Asset, ApiError> {
         // 1. Get Asset
@@ -37,15 +78,19 @@ impl RiskService {
             .await?
             .ok_or_else(|| ApiError::NotFound(format!("Asset {} not found", asset_id)))?;
 
-        // 2. Get Security Findings for Asset (proper security findings with severity)
+        // 2. Load scoring configuration from database
+        let scoring_config = self.load_scoring_config().await?;
+
+        // 3. Get Security Findings for Asset (proper security findings with severity)
         let findings = self
             .security_finding_repo
             .list_by_asset(&asset_id, 1000)
             .await?;
 
-        // 3. Calculate Score based on findings severity and type
+        // 4. Calculate Score based on findings severity and type
         let mut finding_score = 0.0;
         let mut severity_counts: HashMap<String, i32> = HashMap::new();
+        let mut config_used: HashMap<String, bool> = HashMap::new();
 
         for finding in &findings {
             // Skip resolved or false positive findings
@@ -56,44 +101,37 @@ impl RiskService {
             // Count by severity
             *severity_counts.entry(finding.severity.clone()).or_insert(0) += 1;
 
-            // Score based on severity
-            let severity_score = match finding.severity.as_str() {
-                "critical" => 40.0,
-                "high" => 20.0,
-                "medium" => 10.0,
-                "low" => 3.0,
-                "info" => 0.5,
-                _ => 1.0,
+            // Get scoring from config or use fallbacks
+            let (severity_score, type_multiplier) = if let Some((score, mult)) =
+                scoring_config.get(&finding.finding_type)
+            {
+                config_used.insert(finding.finding_type.clone(), true);
+                (*score, *mult)
+            } else {
+                // Fallback to hardcoded values for unknown types
+                let severity_score = Self::get_fallback_severity_score(&finding.severity);
+
+                // Special handling for open_port with port-specific multipliers
+                let type_multiplier = if finding.finding_type == "open_port" {
+                    if let Some(port) = finding.data.get("port").and_then(|p| p.as_i64()) {
+                        Self::get_port_multiplier(port)
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
+                };
+
+                (severity_score, type_multiplier)
             };
 
             // Add CVSS score if available (weighted)
             let cvss_bonus = finding.cvss_score.map(|s| s * 2.0).unwrap_or(0.0);
 
-            // Additional scoring based on finding type
-            let type_multiplier = match finding.finding_type.as_str() {
-                "expired_certificate" | "weak_tls_version" => 1.5,
-                "self_signed_certificate" | "certificate_expiring_soon" => 1.2,
-                "https_not_enforced" | "missing_security_header" => 1.1,
-                "reputation_issue" | "malware_detected" => 2.0,
-                "open_port" => {
-                    // Check for critical ports
-                    if let Some(port) = finding.data.get("port").and_then(|p| p.as_i64()) {
-                        match port {
-                            22 | 3389 | 23 => 1.5,     // Remote access
-                            3306 | 5432 | 6379 => 1.8, // Databases
-                            _ => 1.0,
-                        }
-                    } else {
-                        1.0
-                    }
-                }
-                _ => 1.0,
-            };
-
             finding_score += (severity_score + cvss_bonus) * type_multiplier;
         }
 
-        // 4. Base risk from asset type and exposure
+        // 5. Base risk from asset type and exposure
         let exposure_score = match asset.asset_type {
             crate::models::asset::AssetType::Ip => 10.0, // Public IP most exposed
             crate::models::asset::AssetType::Domain => 8.0, // Domains are exposed
@@ -101,7 +139,7 @@ impl RiskService {
             _ => 1.0,
         };
 
-        // 5. Apply importance multiplier (0-5 mapped to 1.0 - 2.0)
+        // 6. Apply importance multiplier (0-5 mapped to 1.0 - 2.0)
         let importance_multiplier = 1.0 + (asset.importance as f64 * 0.2);
 
         let mut risk_score = (exposure_score + finding_score) * importance_multiplier;
@@ -109,7 +147,7 @@ impl RiskService {
         // Cap at 100 for display purposes
         risk_score = risk_score.min(100.0);
 
-        // 6. Determine Risk Level
+        // 7. Determine Risk Level
         let risk_level = if risk_score >= 80.0 {
             "critical"
         } else if risk_score >= 60.0 {
@@ -122,7 +160,7 @@ impl RiskService {
             "info"
         };
 
-        // 7. Store factors for history and debugging
+        // 8. Store factors for history and debugging
         let factors = json!({
             "exposure_score": exposure_score,
             "finding_score": finding_score,
@@ -130,20 +168,22 @@ impl RiskService {
             "finding_count": findings.len(),
             "active_findings": findings.iter().filter(|f| f.status != "resolved" && f.status != "false_positive").count(),
             "severity_counts": severity_counts,
+            "config_types_used": config_used.len(),
         });
 
-        // 8. Update Asset with new risk data
+        // 9. Update Asset with new risk data
         let updated_asset = self
             .asset_repo
             .update_risk(&asset.id, risk_score, risk_level, &factors)
             .await?;
 
         tracing::info!(
-            "Calculated risk for asset {}: score={:.1}, level={}, findings={}",
+            "Calculated risk for asset {}: score={:.1}, level={}, findings={}, config_types={}",
             asset.identifier,
             risk_score,
             risk_level,
-            findings.len()
+            findings.len(),
+            config_used.len()
         );
 
         Ok(updated_asset)

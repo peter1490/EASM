@@ -18,6 +18,10 @@ import {
   deleteTag,
   runAutoTagForTag,
   runAutoTagAll,
+  listFindingTypeConfigs,
+  updateFindingTypeConfig,
+  bulkUpdateFindingTypeConfigs,
+  recalculateAllRisks,
   type SystemMetrics, 
   type UserWithRoles,
   type SettingsResponse,
@@ -28,6 +32,9 @@ import {
   type TagCreate,
   type TagUpdate,
   type AutoTagResult,
+  type FindingTypeConfig,
+  type FindingTypeConfigUpdate,
+  type RiskRecalculationResult,
 } from "@/app/api";
 import { useAuth } from "@/context/AuthContext";
 import Header from "@/components/Header";
@@ -42,7 +49,7 @@ import Modal from "@/components/ui/Modal";
 import Input from "@/components/ui/Input";
 import Checkbox from "@/components/ui/Checkbox";
 
-type TabType = "status" | "users" | "config" | "tags";
+type TabType = "status" | "users" | "config" | "tags" | "risk_scoring";
 
 const ROLE_COLORS: Record<string, "error" | "warning" | "info" | "secondary" | "success"> = {
   admin: "error",
@@ -322,7 +329,7 @@ export default function SettingsPage() {
   const searchParams = useSearchParams();
   const tabFromUrl = searchParams.get("tab") as TabType | null;
   const [activeTab, setActiveTab] = useState<TabType>(
-    tabFromUrl && ["status", "users", "config", "tags"].includes(tabFromUrl) ? tabFromUrl : "status"
+    tabFromUrl && ["status", "users", "config", "tags", "risk_scoring"].includes(tabFromUrl) ? tabFromUrl : "status"
   );
   const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
   const [health, setHealth] = useState<{ status: string; version: string } | null>(null);
@@ -382,6 +389,19 @@ export default function SettingsPage() {
   const [tagSubmitting, setTagSubmitting] = useState(false);
   const [runningAutoTag, setRunningAutoTag] = useState<string | null>(null);
   const [autoTagResult, setAutoTagResult] = useState<AutoTagResult | null>(null);
+
+  // Finding Type Config state
+  const [findingTypeConfigs, setFindingTypeConfigs] = useState<FindingTypeConfig[]>([]);
+  const [findingTypeCategories, setFindingTypeCategories] = useState<string[]>([]);
+  const [findingTypeConfigsLoading, setFindingTypeConfigsLoading] = useState(true);
+  const [selectedCategory, setSelectedCategory] = useState<string>("all");
+  const [editingFindingType, setEditingFindingType] = useState<FindingTypeConfig | null>(null);
+  const [findingTypeFormData, setFindingTypeFormData] = useState<FindingTypeConfigUpdate>({});
+  const [findingTypeFormError, setFindingTypeFormError] = useState<string | null>(null);
+  const [findingTypeSubmitting, setFindingTypeSubmitting] = useState(false);
+  const [recalculatingRisks, setRecalculatingRisks] = useState(false);
+  const [riskRecalculationResult, setRiskRecalculationResult] = useState<RiskRecalculationResult | null>(null);
+  const [pendingChanges, setPendingChanges] = useState<Map<string, FindingTypeConfigUpdate>>(new Map());
 
   const isAdmin = user?.roles?.includes("admin");
 
@@ -447,6 +467,20 @@ export default function SettingsPage() {
       setError((e as Error).message);
     } finally {
       setTagsLoading(false);
+    }
+  }, []);
+
+  const loadFindingTypeConfigs = useCallback(async () => {
+    try {
+      setFindingTypeConfigsLoading(true);
+      const response = await listFindingTypeConfigs();
+      setFindingTypeConfigs(response.configs);
+      setFindingTypeCategories(response.categories);
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setFindingTypeConfigsLoading(false);
     }
   }, []);
 
@@ -588,15 +622,95 @@ export default function SettingsPage() {
     }
   };
 
+  const openEditFindingTypeModal = (config: FindingTypeConfig) => {
+    setFindingTypeFormData({
+      display_name: config.display_name,
+      default_severity: config.default_severity,
+      severity_score: config.severity_score,
+      type_multiplier: config.type_multiplier,
+      description: config.description || undefined,
+      is_enabled: config.is_enabled,
+    });
+    setEditingFindingType(config);
+    setFindingTypeFormError(null);
+  };
+
+  const handleUpdateFindingTypeConfig = async () => {
+    if (!editingFindingType) return;
+
+    setFindingTypeSubmitting(true);
+    setFindingTypeFormError(null);
+
+    try {
+      await updateFindingTypeConfig(editingFindingType.finding_type, findingTypeFormData);
+      setEditingFindingType(null);
+      setFindingTypeFormData({});
+      loadFindingTypeConfigs();
+    } catch (e) {
+      setFindingTypeFormError((e as Error).message);
+    } finally {
+      setFindingTypeSubmitting(false);
+    }
+  };
+
+  const handleInlineUpdate = (config: FindingTypeConfig, field: keyof FindingTypeConfigUpdate, value: unknown) => {
+    const newPending = new Map(pendingChanges);
+    const existing = newPending.get(config.finding_type) || {};
+    newPending.set(config.finding_type, { ...existing, [field]: value });
+    setPendingChanges(newPending);
+  };
+
+  const handleSavePendingChanges = async () => {
+    if (pendingChanges.size === 0) return;
+
+    setFindingTypeSubmitting(true);
+    setFindingTypeFormError(null);
+
+    try {
+      const updates = Array.from(pendingChanges.entries()).map(([finding_type, update]) => ({
+        finding_type,
+        ...update,
+      }));
+
+      const result = await bulkUpdateFindingTypeConfigs(updates);
+      
+      if (result.error_count > 0) {
+        setFindingTypeFormError(`${result.error_count} errors: ${result.errors.slice(0, 3).join(", ")}`);
+      }
+      
+      setPendingChanges(new Map());
+      loadFindingTypeConfigs();
+    } catch (e) {
+      setFindingTypeFormError((e as Error).message);
+    } finally {
+      setFindingTypeSubmitting(false);
+    }
+  };
+
+  const handleRecalculateAllRisks = async () => {
+    setRecalculatingRisks(true);
+    setRiskRecalculationResult(null);
+
+    try {
+      const result = await recalculateAllRisks();
+      setRiskRecalculationResult(result);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setRecalculatingRisks(false);
+    }
+  };
+
   useEffect(() => {
     loadData(false); // Initial load with full spinner
     if (isAdmin) {
       loadSettings(false);
       loadTags();
+      loadFindingTypeConfigs();
     }
     const iv = setInterval(() => loadData(true), 10000); // Silent refreshes
     return () => clearInterval(iv);
-  }, [isAdmin, loadData, loadSettings, loadTags]);
+  }, [isAdmin, loadData, loadSettings, loadTags, loadFindingTypeConfigs]);
 
   async function handleAddRole(userId: string, role: string) {
     if (!role) return;
@@ -880,6 +994,7 @@ export default function SettingsPage() {
       { id: "config" as TabType, label: "Configuration", icon: "🛡️" },
       { id: "users" as TabType, label: "User Management", icon: "👥", badge: users.length },
       { id: "tags" as TabType, label: "Tags", icon: "🏷️", badge: tagsTotalCount },
+      { id: "risk_scoring" as TabType, label: "Risk Scoring", icon: "📊", badge: findingTypeConfigs.length },
     ] : []),
   ];
 
@@ -1720,8 +1835,11 @@ export default function SettingsPage() {
                         <TableCell>
                           <div className="flex items-center gap-3">
                             <div
-                              className="w-4 h-4 rounded-full ring-2 ring-offset-2 ring-offset-background"
-                              style={{ backgroundColor: tag.color || "#6366f1", ringColor: tag.color || "#6366f1" }}
+                              className="w-4 h-4 rounded-full"
+                              style={{ 
+                                backgroundColor: tag.color || "#6366f1", 
+                                boxShadow: `0 0 0 2px var(--background), 0 0 0 4px ${tag.color || "#6366f1"}`
+                              }}
                             />
                             <div>
                               <div className="font-medium">{tag.name}</div>
@@ -1795,6 +1913,316 @@ export default function SettingsPage() {
                   </TableBody>
                 </Table>
               )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Risk Scoring Tab */}
+      {activeTab === "risk_scoring" && isAdmin && (
+        <div className="space-y-6 stagger-children">
+          {/* Risk Recalculation Result Banner */}
+          {riskRecalculationResult && (
+            <Card className={riskRecalculationResult.error_count > 0 ? "border-warning bg-warning/5" : "border-success bg-success/5"}>
+              <CardContent className="py-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl">{riskRecalculationResult.error_count > 0 ? "⚠️" : "✅"}</span>
+                    <div>
+                      <div className="font-medium">
+                        Risk recalculation {riskRecalculationResult.error_count > 0 ? "completed with warnings" : "completed"}
+                      </div>
+                      <div className="text-sm text-muted-foreground">
+                        Successfully updated {riskRecalculationResult.success_count} assets
+                        {riskRecalculationResult.error_count > 0 && `, ${riskRecalculationResult.error_count} errors`}
+                      </div>
+                    </div>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={() => setRiskRecalculationResult(null)}>
+                    Dismiss
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Pending Changes Banner */}
+          {pendingChanges.size > 0 && (
+            <Card className="border-primary bg-primary/5">
+              <CardContent className="py-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl">📝</span>
+                    <div>
+                      <div className="font-medium">
+                        {pendingChanges.size} unsaved change{pendingChanges.size > 1 ? "s" : ""}
+                      </div>
+                      <div className="text-sm text-muted-foreground">
+                        Click &quot;Save All Changes&quot; to apply your modifications
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" onClick={() => setPendingChanges(new Map())}>
+                      Discard
+                    </Button>
+                    <Button 
+                      size="sm" 
+                      onClick={handleSavePendingChanges}
+                      loading={findingTypeSubmitting}
+                    >
+                      Save All Changes
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {findingTypeFormError && (
+            <Card className="border-destructive/50 bg-destructive/5">
+              <CardContent className="py-4">
+                <div className="text-destructive flex items-center gap-2">
+                  <span>⚠️</span>
+                  <span>{findingTypeFormError}</span>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Stats Cards */}
+          <div className="grid gap-6 md:grid-cols-4">
+            <Card>
+              <CardHeader className="pb-3">
+                <CardDescription>Total Finding Types</CardDescription>
+                <CardTitle className="text-3xl">{findingTypeConfigs.length}</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-xs text-muted-foreground">
+                  Configurable risk scoring types
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="pb-3">
+                <CardDescription>Categories</CardDescription>
+                <CardTitle className="text-3xl text-primary">
+                  {findingTypeCategories.length}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-xs text-muted-foreground">
+                  Organized by finding category
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="pb-3">
+                <CardDescription>Enabled</CardDescription>
+                <CardTitle className="text-3xl text-success">
+                  {findingTypeConfigs.filter(c => c.is_enabled).length}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-xs text-muted-foreground">
+                  Active in risk calculations
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="pb-3">
+                <CardDescription>Disabled</CardDescription>
+                <CardTitle className="text-3xl text-muted-foreground">
+                  {findingTypeConfigs.filter(c => !c.is_enabled).length}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-xs text-muted-foreground">
+                  Excluded from calculations
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Actions Bar */}
+          <Card>
+            <CardContent className="!pt-6 pb-6">
+              <div className="flex items-center justify-between flex-wrap gap-4">
+                <div className="flex items-center gap-3">
+                  <Select
+                    value={selectedCategory}
+                    onChange={(e) => setSelectedCategory(e.target.value)}
+                    className="w-48"
+                  >
+                    <option value="all">All Categories</option>
+                    {findingTypeCategories.map((cat) => (
+                      <option key={cat} value={cat}>{cat.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase())}</option>
+                    ))}
+                  </Select>
+                  <Button
+                    variant="outline"
+                    onClick={handleRecalculateAllRisks}
+                    disabled={recalculatingRisks || pendingChanges.size > 0}
+                    loading={recalculatingRisks}
+                  >
+                    {recalculatingRisks ? "Recalculating..." : "Recalculate All Risks"}
+                  </Button>
+                </div>
+                <Button variant="outline" onClick={loadFindingTypeConfigs} disabled={findingTypeConfigsLoading}>
+                  {findingTypeConfigsLoading ? "Refreshing..." : "Refresh"}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Finding Type Configs Table */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Finding Type Configuration</CardTitle>
+              <CardDescription>
+                Customize severity scores and type multipliers used in risk calculations. Changes affect future risk score calculations.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {findingTypeConfigsLoading ? (
+                <div className="py-12">
+                  <LoadingSpinner size="lg" />
+                </div>
+              ) : findingTypeConfigs.length === 0 ? (
+                <EmptyState
+                  icon="📊"
+                  title="No finding types configured"
+                  description="Run the migration to populate default finding type configurations"
+                />
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Finding Type</TableHead>
+                      <TableHead>Category</TableHead>
+                      <TableHead>Severity</TableHead>
+                      <TableHead className="text-center">Score</TableHead>
+                      <TableHead className="text-center">Multiplier</TableHead>
+                      <TableHead className="text-center">Enabled</TableHead>
+                      <TableHead className="text-right">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {findingTypeConfigs
+                      .filter(config => selectedCategory === "all" || config.category === selectedCategory)
+                      .map((config) => {
+                        const pending = pendingChanges.get(config.finding_type);
+                        const currentScore = pending?.severity_score ?? config.severity_score;
+                        const currentMultiplier = pending?.type_multiplier ?? config.type_multiplier;
+                        const currentEnabled = pending?.is_enabled ?? config.is_enabled;
+                        const hasPending = !!pending;
+
+                        return (
+                          <TableRow key={config.id} className={hasPending ? "bg-primary/5" : ""}>
+                            <TableCell>
+                              <div>
+                                <div className="font-medium">{config.display_name}</div>
+                                <code className="text-xs text-muted-foreground bg-muted px-1 py-0.5 rounded">
+                                  {config.finding_type}
+                                </code>
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <Badge variant="secondary">
+                                {config.category.replace(/_/g, " ")}
+                              </Badge>
+                            </TableCell>
+                            <TableCell>
+                              <Badge 
+                                variant={
+                                  config.default_severity === "critical" ? "error" :
+                                  config.default_severity === "high" ? "warning" :
+                                  config.default_severity === "medium" ? "info" :
+                                  config.default_severity === "low" ? "secondary" :
+                                  "secondary"
+                                }
+                              >
+                                {config.default_severity}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-center">
+                              <input
+                                type="number"
+                                min="0"
+                                max="100"
+                                step="0.5"
+                                value={currentScore}
+                                onChange={(e) => handleInlineUpdate(config, "severity_score", parseFloat(e.target.value) || 0)}
+                                className="w-20 text-center px-2 py-1 text-sm border border-input rounded bg-background"
+                              />
+                            </TableCell>
+                            <TableCell className="text-center">
+                              <input
+                                type="number"
+                                min="0.1"
+                                max="10"
+                                step="0.1"
+                                value={currentMultiplier}
+                                onChange={(e) => handleInlineUpdate(config, "type_multiplier", parseFloat(e.target.value) || 1)}
+                                className="w-20 text-center px-2 py-1 text-sm border border-input rounded bg-background"
+                              />
+                            </TableCell>
+                            <TableCell className="text-center">
+                              <Checkbox
+                                checked={currentEnabled}
+                                onChange={(checked) => handleInlineUpdate(config, "is_enabled", checked)}
+                              />
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => openEditFindingTypeModal(config)}
+                              >
+                                Edit
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Severity Score Reference */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Severity Score Reference</CardTitle>
+              <CardDescription>Default severity scores used when calculating risk</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-3 md:grid-cols-5">
+                {[
+                  { severity: "critical", score: 40.0, color: "bg-destructive" },
+                  { severity: "high", score: 20.0, color: "bg-warning" },
+                  { severity: "medium", score: 10.0, color: "bg-info" },
+                  { severity: "low", score: 3.0, color: "bg-secondary" },
+                  { severity: "info", score: 0.5, color: "bg-muted" },
+                ].map((item) => (
+                  <div key={item.severity} className="flex items-center gap-3 p-3 border border-border rounded-lg">
+                    <div className={`w-3 h-3 rounded-full ${item.color}`} />
+                    <div>
+                      <div className="font-medium capitalize">{item.severity}</div>
+                      <div className="text-sm text-muted-foreground">Default: {item.score}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-4 p-4 bg-muted/50 rounded-lg text-sm text-muted-foreground">
+                <strong>Formula:</strong> <code>risk_score = (exposure_score + Σ((severity_score + cvss_bonus) × type_multiplier)) × importance_multiplier</code>
+                <br />
+                <span className="mt-2 block">The final score is capped at 100 and mapped to risk levels: Critical (≥80), High (≥60), Medium (≥40), Low (≥20), Info (&lt;20)</span>
+              </div>
             </CardContent>
           </Card>
         </div>
@@ -2064,6 +2492,117 @@ export default function SettingsPage() {
             </Button>
           </div>
         </div>
+      </Modal>
+
+      {/* Edit Finding Type Config Modal */}
+      <Modal
+        isOpen={!!editingFindingType}
+        onClose={() => { setEditingFindingType(null); setFindingTypeFormData({}); setFindingTypeFormError(null); }}
+        title="Edit Finding Type Configuration"
+        size="lg"
+      >
+        {editingFindingType && (
+          <div className="space-y-6">
+            {findingTypeFormError && (
+              <div className="p-3 bg-destructive/10 rounded-lg text-destructive text-sm">
+                {findingTypeFormError}
+              </div>
+            )}
+
+            <div className="p-4 bg-muted/50 rounded-lg">
+              <div className="flex items-center gap-3">
+                <code className="px-2 py-1 bg-muted rounded text-sm font-mono">
+                  {editingFindingType.finding_type}
+                </code>
+                <Badge variant="secondary">{editingFindingType.category}</Badge>
+              </div>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <Input
+                label="Display Name"
+                value={findingTypeFormData.display_name || ""}
+                onChange={(e) => setFindingTypeFormData(prev => ({ ...prev, display_name: e.target.value }))}
+                placeholder="Human-readable name"
+              />
+              <Select
+                label="Default Severity"
+                value={findingTypeFormData.default_severity || ""}
+                onChange={(e) => setFindingTypeFormData(prev => ({ ...prev, default_severity: e.target.value }))}
+              >
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+                <option value="info">Info</option>
+              </Select>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-1.5">
+                  Severity Score: {findingTypeFormData.severity_score?.toFixed(1) || editingFindingType.severity_score.toFixed(1)}
+                </label>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={0.5}
+                  value={findingTypeFormData.severity_score ?? editingFindingType.severity_score}
+                  onChange={(e) => setFindingTypeFormData(prev => ({ ...prev, severity_score: parseFloat(e.target.value) }))}
+                  className="w-full h-2 accent-primary"
+                />
+                <div className="flex justify-between text-xs text-muted-foreground mt-1">
+                  <span>0 (No impact)</span>
+                  <span>100 (Maximum)</span>
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-1.5">
+                  Type Multiplier: {findingTypeFormData.type_multiplier?.toFixed(1) || editingFindingType.type_multiplier.toFixed(1)}×
+                </label>
+                <input
+                  type="range"
+                  min={0.1}
+                  max={5}
+                  step={0.1}
+                  value={findingTypeFormData.type_multiplier ?? editingFindingType.type_multiplier}
+                  onChange={(e) => setFindingTypeFormData(prev => ({ ...prev, type_multiplier: parseFloat(e.target.value) }))}
+                  className="w-full h-2 accent-primary"
+                />
+                <div className="flex justify-between text-xs text-muted-foreground mt-1">
+                  <span>0.1× (Reduced)</span>
+                  <span>5.0× (Amplified)</span>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-foreground mb-1.5">Description</label>
+              <textarea
+                className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring min-h-[80px]"
+                placeholder="Describe what this finding type means..."
+                value={findingTypeFormData.description || ""}
+                onChange={(e) => setFindingTypeFormData(prev => ({ ...prev, description: e.target.value }))}
+              />
+            </div>
+
+            <Checkbox
+              checked={findingTypeFormData.is_enabled ?? editingFindingType.is_enabled}
+              onChange={(checked) => setFindingTypeFormData(prev => ({ ...prev, is_enabled: checked }))}
+              label="Include in risk calculations"
+            />
+
+            <div className="flex justify-end gap-3 pt-4 border-t border-border">
+              <Button variant="outline" onClick={() => { setEditingFindingType(null); setFindingTypeFormData({}); }}>
+                Cancel
+              </Button>
+              <Button onClick={handleUpdateFindingTypeConfig} disabled={findingTypeSubmitting} loading={findingTypeSubmitting}>
+                Save Changes
+              </Button>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );

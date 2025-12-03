@@ -3,21 +3,23 @@ use crate::{
     database::DatabasePool,
     repositories::{
         asset_repo::SqlxAssetRepository,
+        blacklist_repo::SqlxBlacklistRepository,
         discovery_repo::{
             SqlxAssetRelationshipRepository, SqlxAssetSourceRepository,
             SqlxDiscoveryQueueRepository, SqlxDiscoveryRunRepository,
         },
         evidence_repo::SqlxEvidenceRepository,
         finding_repo::SqlxFindingRepository,
+        finding_type_config_repo::SqlxFindingTypeConfigRepository,
         scan_repo::SqlxScanRepository,
         security_repo::{SqlxSecurityFindingRepository, SqlxSecurityScanRepository},
         seed_repo::SqlxSeedRepository,
         tag_repo::SqlxTagRepository,
         user_repo::SqlxUserRepository,
-        AssetRelationshipRepository, AssetRepository, AssetSourceRepository,
+        AssetRelationshipRepository, AssetRepository, AssetSourceRepository, BlacklistRepository,
         DiscoveryQueueRepository, DiscoveryRunRepository, EvidenceRepository, FindingRepository,
-        ScanRepository, SecurityFindingRepository, SecurityScanRepository, SeedRepository,
-        TagRepository, UserRepository,
+        FindingTypeConfigRepository, ScanRepository, SecurityFindingRepository,
+        SecurityScanRepository, SeedRepository, TagRepository, UserRepository,
     },
     services::external::{DnsResolver, ExternalServicesManager, HttpAnalyzer},
     services::{
@@ -70,6 +72,8 @@ pub struct AppState {
     pub security_scan_repository: Arc<dyn SecurityScanRepository + Send + Sync>,
     pub security_finding_repository: Arc<dyn SecurityFindingRepository + Send + Sync>,
     pub tag_repository: Arc<dyn TagRepository + Send + Sync>,
+    pub blacklist_repository: Arc<dyn BlacklistRepository + Send + Sync>,
+    pub finding_type_config_repo: Arc<dyn FindingTypeConfigRepository + Send + Sync>,
     // Convenience accessors for handlers
     pub scan_repo: Arc<dyn ScanRepository + Send + Sync>,
     pub finding_repo: Arc<dyn FindingRepository + Send + Sync>,
@@ -137,6 +141,14 @@ impl AppState {
         let tag_repository: Arc<dyn TagRepository + Send + Sync> =
             Arc::new(SqlxTagRepository::new(db_pool.clone()));
 
+        // Create blacklist repository
+        let blacklist_repository: Arc<dyn BlacklistRepository + Send + Sync> =
+            Arc::new(SqlxBlacklistRepository::new(db_pool.clone()));
+
+        // Create finding type config repository
+        let finding_type_config_repo: Arc<dyn FindingTypeConfigRepository + Send + Sync> =
+            Arc::new(SqlxFindingTypeConfigRepository::new(db_pool.clone()));
+
         // Create external services and utilities
         let external_services = Arc::new(ExternalServicesManager::new(shared_settings.clone())?);
 
@@ -199,6 +211,7 @@ impl AppState {
                 discovery_queue_repository.clone(),
                 asset_source_repository.clone(),
                 asset_relationship_repository.clone(),
+                blacklist_repository.clone(),
                 external_services.clone(),
                 dns_resolver.clone(),
                 http_analyzer.clone(),
@@ -284,6 +297,8 @@ impl AppState {
             security_scan_repository,
             security_finding_repository,
             tag_repository,
+            blacklist_repository,
+            finding_type_config_repo,
             // Convenience accessors for handlers
             scan_repo: scan_repository,
             finding_repo: finding_repository,

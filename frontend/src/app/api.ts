@@ -1240,3 +1240,260 @@ export async function runAutoTagAll(): Promise<AutoTagResult> {
   if (!res.ok) throw new Error(`Failed to run auto-tagging: ${res.status}`);
   return res.json();
 }
+
+// ============================================================================
+// BLACKLIST TYPES
+// ============================================================================
+
+export type BlacklistObjectType = "domain" | "ip" | "organization" | "asn" | "cidr" | "certificate";
+
+export type BlacklistEntry = {
+  id: string;
+  object_type: string;
+  object_value: string;
+  reason: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type BlacklistCreate = {
+  object_type: BlacklistObjectType;
+  object_value: string;
+  reason?: string;
+  delete_descendants?: boolean;
+};
+
+export type BlacklistResult = {
+  entry: BlacklistEntry;
+  descendants_deleted: number;
+};
+
+export type BlacklistListResponse = {
+  entries: BlacklistEntry[];
+  total_count: number;
+  limit: number;
+  offset: number;
+};
+
+export type BlacklistCheckResult = {
+  is_blacklisted: boolean;
+  entry: BlacklistEntry | null;
+  parent_blacklisted: boolean;
+  parent_entry: BlacklistEntry | null;
+};
+
+export type BlacklistStats = {
+  total_entries: number;
+  by_type: Record<string, number>;
+};
+
+// ============================================================================
+// BLACKLIST API
+// ============================================================================
+
+export async function listBlacklist(
+  limit = 50,
+  offset = 0,
+  objectType?: string,
+  q?: string
+): Promise<BlacklistListResponse> {
+  const params = new URLSearchParams();
+  params.append("limit", limit.toString());
+  params.append("offset", offset.toString());
+  if (objectType) params.append("object_type", objectType);
+  if (q) params.append("q", q);
+
+  const res = await fetch(`${API_BASE}/api/blacklist?${params.toString()}`, {
+    cache: "no-store",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to list blacklist: ${res.status}`);
+  return res.json();
+}
+
+export async function createBlacklistEntry(entry: BlacklistCreate): Promise<BlacklistResult> {
+  const res = await fetch(`${API_BASE}/api/blacklist`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(entry),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to create blacklist entry: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getBlacklistEntry(id: string): Promise<BlacklistEntry> {
+  const res = await fetch(`${API_BASE}/api/blacklist/${id}`, {
+    cache: "no-store",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to get blacklist entry: ${res.status}`);
+  return res.json();
+}
+
+export async function updateBlacklistEntry(id: string, reason: string): Promise<BlacklistEntry> {
+  const res = await fetch(`${API_BASE}/api/blacklist/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to update blacklist entry: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteBlacklistEntry(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/blacklist/${id}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to delete blacklist entry: ${res.status}`);
+}
+
+export async function checkBlacklist(
+  objectType: BlacklistObjectType,
+  objectValue: string
+): Promise<BlacklistCheckResult> {
+  const res = await fetch(`${API_BASE}/api/blacklist/check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ object_type: objectType, object_value: objectValue }),
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to check blacklist: ${res.status}`);
+  return res.json();
+}
+
+export async function blacklistFromAsset(
+  assetId: string,
+  reason?: string,
+  deleteDescendants = true
+): Promise<BlacklistResult> {
+  const res = await fetch(`${API_BASE}/api/blacklist/from-asset/${assetId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason, delete_descendants: deleteDescendants }),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to blacklist asset: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getBlacklistStats(): Promise<BlacklistStats> {
+  const res = await fetch(`${API_BASE}/api/blacklist/stats`, {
+    cache: "no-store",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to get blacklist stats: ${res.status}`);
+  return res.json();
+}
+
+// ============================================================================
+// FINDING TYPE CONFIG TYPES
+// ============================================================================
+
+export type FindingTypeConfig = {
+  id: string;
+  finding_type: string;
+  display_name: string;
+  category: string;
+  default_severity: string;
+  severity_score: number;
+  type_multiplier: number;
+  description: string | null;
+  is_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type FindingTypeConfigListResponse = {
+  configs: FindingTypeConfig[];
+  categories: string[];
+  total_count: number;
+};
+
+export type FindingTypeConfigUpdate = {
+  display_name?: string;
+  default_severity?: string;
+  severity_score?: number;
+  type_multiplier?: number;
+  description?: string;
+  is_enabled?: boolean;
+};
+
+export type FindingTypeConfigBulkUpdateItem = {
+  finding_type: string;
+  severity_score?: number;
+  type_multiplier?: number;
+  default_severity?: string;
+  is_enabled?: boolean;
+};
+
+export type FindingTypeConfigBulkUpdateResult = {
+  updated: FindingTypeConfig[];
+  updated_count: number;
+  errors: string[];
+  error_count: number;
+};
+
+// ============================================================================
+// FINDING TYPE CONFIG API
+// ============================================================================
+
+export async function listFindingTypeConfigs(): Promise<FindingTypeConfigListResponse> {
+  const res = await fetch(`${API_BASE}/api/admin/finding-type-config`, {
+    cache: "no-store",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to list finding type configs: ${res.status}`);
+  return res.json();
+}
+
+export async function getFindingTypeConfig(findingType: string): Promise<FindingTypeConfig> {
+  const res = await fetch(`${API_BASE}/api/admin/finding-type-config/${encodeURIComponent(findingType)}`, {
+    cache: "no-store",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to get finding type config: ${res.status}`);
+  return res.json();
+}
+
+export async function updateFindingTypeConfig(
+  findingType: string,
+  update: FindingTypeConfigUpdate
+): Promise<FindingTypeConfig> {
+  const res = await fetch(`${API_BASE}/api/admin/finding-type-config/${encodeURIComponent(findingType)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to update finding type config: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function bulkUpdateFindingTypeConfigs(
+  configs: FindingTypeConfigBulkUpdateItem[]
+): Promise<FindingTypeConfigBulkUpdateResult> {
+  const res = await fetch(`${API_BASE}/api/admin/finding-type-config/bulk`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ configs }),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to bulk update finding type configs: ${res.status}`);
+  }
+  return res.json();
+}

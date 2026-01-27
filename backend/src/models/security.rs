@@ -548,6 +548,8 @@ pub struct CookieSecurityIssue {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DnsSecurityResult {
     pub domain: String,
+    pub has_mx: bool,
+    pub mx_records: Vec<String>,
     pub has_spf: bool,
     pub spf_record: Option<String>,
     pub spf_valid: bool,

@@ -1,6 +1,7 @@
 pub mod certspotter;
 pub mod crtsh;
 pub mod dns;
+pub mod euvd;
 pub mod http;
 pub mod manager;
 pub mod rate_limited_client;
@@ -13,6 +14,7 @@ pub mod integration_tests;
 pub use certspotter::{CertSpotterCertificate, CertSpotterClient, CertSpotterIssuance};
 pub use crtsh::CrtShClient;
 pub use dns::{DnsConfig, DnsResolver, DnsResult, ReverseDnsResult};
+pub use euvd::{EuvdClient, EuvdVulnerability, EuvdSearchParams, EuvdReference};
 pub use http::{HttpAnalyzer, HttpConfig, HttpProbeResult, TlsCertificateResult, TlsInfo};
 pub use manager::{ExternalServicesManager, SubdomainEnumerationResult, ThreatIntelligenceResult};
 pub use rate_limited_client::RateLimitedClient;

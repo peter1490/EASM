@@ -321,29 +321,36 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         &self,
         finding: &SecurityFindingCreate,
     ) -> Result<SecurityFinding, ApiError> {
-        let id = Uuid::new_v4();
         let now = Utc::now();
         let severity = finding.severity.to_string();
 
-        // Try to find existing finding of same type for same asset
+        // Try to find existing finding of same type AND title for same asset
+        // Including title in the match ensures different CVEs create separate findings
         let existing = sqlx::query_as::<_, SecurityFinding>(
             r#"
             SELECT * FROM security_findings 
-            WHERE asset_id = $1 AND finding_type = $2 AND status NOT IN ('resolved', 'false_positive')
+            WHERE asset_id = $1 AND finding_type = $2 AND title = $3 AND status NOT IN ('resolved', 'false_positive')
             ORDER BY first_seen_at DESC LIMIT 1
             "#
         )
         .bind(finding.asset_id)
         .bind(&finding.finding_type)
+        .bind(&finding.title)
         .fetch_optional(&self.pool)
         .await?;
 
         if let Some(existing) = existing {
-            // Update existing finding
+            // Update existing finding - also update cvss_score, cve_ids, severity, and data
             let row = sqlx::query_as::<_, SecurityFinding>(
                 r#"
                 UPDATE security_findings 
-                SET last_seen_at = $2, security_scan_id = COALESCE($3, security_scan_id), data = $4, updated_at = $2
+                SET last_seen_at = $2, 
+                    security_scan_id = COALESCE($3, security_scan_id), 
+                    data = $4, 
+                    severity = $5,
+                    cvss_score = COALESCE($6, cvss_score),
+                    cve_ids = COALESCE($7, cve_ids),
+                    updated_at = $2
                 WHERE id = $1
                 RETURNING *
                 "#
@@ -352,6 +359,9 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
             .bind(now)
             .bind(finding.security_scan_id)
             .bind(&finding.data)
+            .bind(&severity)
+            .bind(finding.cvss_score)
+            .bind(&finding.cve_ids)
             .fetch_one(&self.pool)
             .await?;
 

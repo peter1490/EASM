@@ -152,118 +152,186 @@ lazy_static::lazy_static! {
     static ref SERVICE_SIGNATURES: HashMap<&'static str, Vec<ServiceSignature>> = {
         let mut m = HashMap::new();
         
-        // SSH signatures
+        // SSH signatures - specific products first, then generic
         m.insert("ssh", vec![
+            ServiceSignature {
+                pattern: "OpenSSH",
+                name: "ssh",
+                product: Some("OpenSSH"),
+                version_regex: Some(r"OpenSSH[_\s]*([\d.]+\w*)"),
+            },
+            ServiceSignature {
+                pattern: "Dropbear",
+                name: "ssh",
+                product: Some("Dropbear SSH"),
+                version_regex: Some(r"dropbear[_\s]*([\d.]+)"),
+            },
             ServiceSignature {
                 pattern: "SSH-",
                 name: "ssh",
+                product: None, // Generic SSH, no specific product
                 version_regex: Some(r"SSH-[\d.]+-([\w\d._-]+)"),
-            },
-            ServiceSignature {
-                pattern: "OpenSSH",
-                name: "openssh",
-                version_regex: Some(r"OpenSSH[_\s]*([\d.]+\w*)"),
             },
         ]);
         
-        // HTTP signatures
+        // HTTP signatures - specific products FIRST, generic HTTP last
         m.insert("http", vec![
             ServiceSignature {
-                pattern: "HTTP/",
-                name: "http",
-                version_regex: Some(r"HTTP/([\d.]+)"),
-            },
-            ServiceSignature {
                 pattern: "Apache",
-                name: "apache",
+                name: "http",
+                product: Some("Apache HTTP Server"),
                 version_regex: Some(r"Apache(?:/| )([\d.]+)"),
             },
             ServiceSignature {
                 pattern: "nginx",
-                name: "nginx",
+                name: "http",
+                product: Some("nginx"),
                 version_regex: Some(r"nginx(?:/| )([\d.]+)"),
             },
             ServiceSignature {
                 pattern: "Microsoft-IIS",
-                name: "iis",
+                name: "http",
+                product: Some("Microsoft IIS"),
                 version_regex: Some(r"Microsoft-IIS/([\d.]+)"),
             },
             ServiceSignature {
                 pattern: "LiteSpeed",
-                name: "litespeed",
+                name: "http",
+                product: Some("LiteSpeed"),
                 version_regex: Some(r"LiteSpeed(?:/| )([\d.]+)"),
+            },
+            ServiceSignature {
+                pattern: "Caddy",
+                name: "http",
+                product: Some("Caddy"),
+                version_regex: Some(r"Caddy(?:/| )([\d.]+)"),
+            },
+            ServiceSignature {
+                pattern: "lighttpd",
+                name: "http",
+                product: Some("lighttpd"),
+                version_regex: Some(r"lighttpd(?:/| )([\d.]+)"),
+            },
+            ServiceSignature {
+                pattern: "Tomcat",
+                name: "http",
+                product: Some("Apache Tomcat"),
+                version_regex: Some(r"Tomcat(?:/| )([\d.]+)"),
+            },
+            ServiceSignature {
+                pattern: "Jetty",
+                name: "http",
+                product: Some("Eclipse Jetty"),
+                version_regex: Some(r"Jetty(?:\(| )([\d.]+)"),
+            },
+            ServiceSignature {
+                pattern: "gunicorn",
+                name: "http",
+                product: Some("Gunicorn"),
+                version_regex: Some(r"gunicorn(?:/| )([\d.]+)"),
+            },
+            ServiceSignature {
+                pattern: "uvicorn",
+                name: "http",
+                product: Some("Uvicorn"),
+                version_regex: Some(r"uvicorn(?:/| )([\d.]+)"),
+            },
+            // Generic HTTP - last resort, no CVE lookup
+            ServiceSignature {
+                pattern: "HTTP/",
+                name: "http",
+                product: None, // No specific product identified
+                version_regex: Some(r"HTTP/([\d.]+)"),
             },
         ]);
         
-        // FTP signatures
+        // FTP signatures - specific products first
         m.insert("ftp", vec![
             ServiceSignature {
-                pattern: "220",
-                name: "ftp",
-                version_regex: None,
-            },
-            ServiceSignature {
                 pattern: "vsftpd",
-                name: "vsftpd",
+                name: "ftp",
+                product: Some("vsftpd"),
                 version_regex: Some(r"vsftpd ([\d.]+)"),
             },
             ServiceSignature {
                 pattern: "ProFTPD",
-                name: "proftpd",
+                name: "ftp",
+                product: Some("ProFTPD"),
                 version_regex: Some(r"ProFTPD ([\d.]+)"),
             },
             ServiceSignature {
                 pattern: "Pure-FTPd",
-                name: "pure-ftpd",
-                version_regex: Some(r"Pure-FTPd"),
+                name: "ftp",
+                product: Some("Pure-FTPd"),
+                version_regex: Some(r"Pure-FTPd[^\d]*([\d.]+)?"),
             },
             ServiceSignature {
                 pattern: "FileZilla",
-                name: "filezilla",
+                name: "ftp",
+                product: Some("FileZilla Server"),
                 version_regex: Some(r"FileZilla Server ([\d.]+)"),
+            },
+            ServiceSignature {
+                pattern: "220",
+                name: "ftp",
+                product: None, // Generic FTP
+                version_regex: None,
             },
         ]);
         
-        // SMTP signatures
+        // SMTP signatures - specific products first
         m.insert("smtp", vec![
             ServiceSignature {
-                pattern: "220",
-                name: "smtp",
-                version_regex: None,
-            },
-            ServiceSignature {
                 pattern: "Postfix",
-                name: "postfix",
+                name: "smtp",
+                product: Some("Postfix"),
                 version_regex: None,
             },
             ServiceSignature {
                 pattern: "Exim",
-                name: "exim",
+                name: "smtp",
+                product: Some("Exim"),
                 version_regex: Some(r"Exim ([\d.]+)"),
             },
             ServiceSignature {
                 pattern: "Sendmail",
-                name: "sendmail",
-                version_regex: Some(r"Sendmail ([\d.]+)"),
+                name: "smtp",
+                product: Some("Sendmail"),
+                version_regex: Some(r"Sendmail[/ ]([\d.]+)"),
             },
             ServiceSignature {
                 pattern: "Microsoft ESMTP",
-                name: "exchange",
+                name: "smtp",
+                product: Some("Microsoft Exchange"),
+                version_regex: None,
+            },
+            ServiceSignature {
+                pattern: "Haraka",
+                name: "smtp",
+                product: Some("Haraka"),
+                version_regex: Some(r"Haraka[/ ]([\d.]+)"),
+            },
+            ServiceSignature {
+                pattern: "220",
+                name: "smtp",
+                product: None, // Generic SMTP
                 version_regex: None,
             },
         ]);
         
-        // MySQL signatures
+        // MySQL signatures - specific products first
         m.insert("mysql", vec![
+            ServiceSignature {
+                pattern: "MariaDB",
+                name: "mysql",
+                product: Some("MariaDB"),
+                version_regex: Some(r"([\d.]+)-MariaDB"),
+            },
             ServiceSignature {
                 pattern: "mysql",
                 name: "mysql",
+                product: Some("MySQL"),
                 version_regex: Some(r"([\d.]+)"),
-            },
-            ServiceSignature {
-                pattern: "MariaDB",
-                name: "mariadb",
-                version_regex: Some(r"([\d.]+-MariaDB)"),
             },
         ]);
         
@@ -272,6 +340,7 @@ lazy_static::lazy_static! {
             ServiceSignature {
                 pattern: "PostgreSQL",
                 name: "postgresql",
+                product: Some("PostgreSQL"),
                 version_regex: Some(r"PostgreSQL ([\d.]+)"),
             },
         ]);
@@ -279,19 +348,22 @@ lazy_static::lazy_static! {
         // Redis signatures
         m.insert("redis", vec![
             ServiceSignature {
+                pattern: "redis_version:",
+                name: "redis",
+                product: Some("Redis"),
+                version_regex: Some(r"redis_version:([\d.]+)"),
+            },
+            ServiceSignature {
                 pattern: "-ERR",
                 name: "redis",
+                product: Some("Redis"),
                 version_regex: None,
             },
             ServiceSignature {
                 pattern: "PONG",
                 name: "redis",
+                product: Some("Redis"),
                 version_regex: None,
-            },
-            ServiceSignature {
-                pattern: "redis_version:",
-                name: "redis",
-                version_regex: Some(r"redis_version:([\d.]+)"),
             },
         ]);
         
@@ -300,6 +372,7 @@ lazy_static::lazy_static! {
             ServiceSignature {
                 pattern: "MongoDB",
                 name: "mongodb",
+                product: Some("MongoDB"),
                 version_regex: Some(r"([\d.]+)"),
             },
         ]);
@@ -309,11 +382,13 @@ lazy_static::lazy_static! {
             ServiceSignature {
                 pattern: "RDP",
                 name: "rdp",
+                product: Some("Microsoft Remote Desktop"),
                 version_regex: None,
             },
             ServiceSignature {
                 pattern: "Remote Desktop",
                 name: "rdp",
+                product: Some("Microsoft Remote Desktop"),
                 version_regex: None,
             },
         ]);
@@ -323,16 +398,19 @@ lazy_static::lazy_static! {
             ServiceSignature {
                 pattern: "login:",
                 name: "telnet",
+                product: None, // Generic telnet
                 version_regex: None,
             },
             ServiceSignature {
                 pattern: "Telnet",
                 name: "telnet",
+                product: None,
                 version_regex: None,
             },
             ServiceSignature {
                 pattern: "Welcome to",
                 name: "telnet",
+                product: None,
                 version_regex: None,
             },
         ]);
@@ -341,16 +419,30 @@ lazy_static::lazy_static! {
         m.insert("dns", vec![
             ServiceSignature {
                 pattern: "BIND",
-                name: "bind",
+                name: "dns",
+                product: Some("ISC BIND"),
                 version_regex: Some(r"BIND ([\d.]+)"),
+            },
+            ServiceSignature {
+                pattern: "dnsmasq",
+                name: "dns",
+                product: Some("dnsmasq"),
+                version_regex: Some(r"dnsmasq-([\d.]+)"),
             },
         ]);
         
         // LDAP signatures
         m.insert("ldap", vec![
             ServiceSignature {
+                pattern: "OpenLDAP",
+                name: "ldap",
+                product: Some("OpenLDAP"),
+                version_regex: Some(r"OpenLDAP[/ ]([\d.]+)"),
+            },
+            ServiceSignature {
                 pattern: "LDAP",
                 name: "ldap",
+                product: None, // Generic LDAP
                 version_regex: None,
             },
         ]);
@@ -409,6 +501,7 @@ lazy_static::lazy_static! {
 struct ServiceSignature {
     pattern: &'static str,
     name: &'static str,
+    product: Option<&'static str>, // Actual software product name for CVE lookups
     version_regex: Option<&'static str>,
 }
 
@@ -546,24 +639,26 @@ fn identify_service(port: u16, banner: Option<&str>) -> ServiceInfo {
         // Try to match against known signatures
         for (category, signatures) in SERVICE_SIGNATURES.iter() {
             for sig in signatures {
-                if banner.contains(sig.pattern) {
+                if banner.to_lowercase().contains(&sig.pattern.to_lowercase()) {
                     service_info.name = sig.name.to_string();
-                    service_info.confidence = 80;
+                    service_info.product = sig.product.map(|p| p.to_string()); // Set the product!
+                    service_info.confidence = if sig.product.is_some() { 85 } else { 60 };
                     
                     // Extract version if regex provided
                     if let Some(regex_pattern) = sig.version_regex {
-                        if let Ok(re) = regex::Regex::new(regex_pattern) {
+                        if let Ok(re) = regex::Regex::new(&format!("(?i){}", regex_pattern)) {
                             if let Some(captures) = re.captures(banner) {
                                 if let Some(version) = captures.get(1) {
                                     service_info.version = Some(version.as_str().to_string());
-                                    service_info.confidence = 95;
+                                    service_info.confidence = if sig.product.is_some() { 95 } else { 70 };
                                 }
                             }
                         }
                     }
                     
-                    // Generate CPE if we have enough info
-                    service_info.cpe = generate_cpe(&service_info.name, service_info.version.as_deref());
+                    // Generate CPE if we have enough info (use product name if available)
+                    let product_for_cpe = sig.product.unwrap_or(sig.name);
+                    service_info.cpe = generate_cpe(product_for_cpe, service_info.version.as_deref());
                     
                     // Add category as extra info
                     service_info.extra_info = Some(category.to_string());
@@ -579,24 +674,42 @@ fn identify_service(port: u16, banner: Option<&str>) -> ServiceInfo {
 
 /// Generate CPE (Common Platform Enumeration) string
 fn generate_cpe(product: &str, version: Option<&str>) -> Option<String> {
-    let vendor = match product {
-        "openssh" | "ssh" => "openbsd",
-        "apache" => "apache",
-        "nginx" => "nginx",
-        "iis" => "microsoft",
-        "mysql" | "mariadb" => "oracle",
-        "postgresql" => "postgresql",
-        "redis" => "redis",
-        "mongodb" => "mongodb",
-        "postfix" => "postfix",
-        "exim" => "exim",
-        "vsftpd" => "beasts",
-        "proftpd" => "proftpd_project",
+    let product_lower = product.to_lowercase();
+    let (vendor, cpe_product) = match product_lower.as_str() {
+        "openssh" | "ssh" => ("openbsd", "openssh"),
+        "dropbear ssh" | "dropbear" => ("matt_johnston", "dropbear_ssh_server"),
+        "apache http server" | "apache" => ("apache", "http_server"),
+        "nginx" => ("nginx", "nginx"),
+        "microsoft iis" | "iis" => ("microsoft", "iis"),
+        "litespeed" => ("litespeedtech", "litespeed_web_server"),
+        "caddy" => ("caddyserver", "caddy"),
+        "lighttpd" => ("lighttpd", "lighttpd"),
+        "apache tomcat" | "tomcat" => ("apache", "tomcat"),
+        "eclipse jetty" | "jetty" => ("eclipse", "jetty"),
+        "gunicorn" => ("gunicorn", "gunicorn"),
+        "uvicorn" => ("encode", "uvicorn"),
+        "mysql" => ("oracle", "mysql"),
+        "mariadb" => ("mariadb", "mariadb"),
+        "postgresql" => ("postgresql", "postgresql"),
+        "redis" => ("redis", "redis"),
+        "mongodb" => ("mongodb", "mongodb"),
+        "postfix" => ("postfix", "postfix"),
+        "exim" => ("exim", "exim"),
+        "sendmail" => ("sendmail", "sendmail"),
+        "microsoft exchange" => ("microsoft", "exchange_server"),
+        "vsftpd" => ("beasts", "vsftpd"),
+        "proftpd" => ("proftpd_project", "proftpd"),
+        "pure-ftpd" => ("pureftpd", "pure-ftpd"),
+        "filezilla server" => ("filezilla-project", "filezilla_server"),
+        "isc bind" | "bind" => ("isc", "bind"),
+        "dnsmasq" => ("thekelleys", "dnsmasq"),
+        "openldap" => ("openldap", "openldap"),
+        "microsoft remote desktop" | "rdp" => ("microsoft", "remote_desktop_services"),
         _ => return None,
     };
     
     let version_str = version.unwrap_or("*");
-    Some(format!("cpe:/a:{}:{}:{}", vendor, product, version_str))
+    Some(format!("cpe:/a:{}:{}:{}", vendor, cpe_product, version_str))
 }
 
 /// Scan multiple ports with service detection (concurrent)

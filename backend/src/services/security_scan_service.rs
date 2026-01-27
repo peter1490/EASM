@@ -29,14 +29,14 @@ use crate::{
     },
     repositories::{AssetRepository, SecurityFindingRepository, SecurityScanRepository},
     services::{
-        external::{DnsResolver, ExternalServicesManager, HttpProber, TlsAnalyzer},
+        external::{DnsResolver, EuvdClient, ExternalServicesManager, HttpProber, TlsAnalyzer},
         task_manager::{TaskContext, TaskManager, TaskType},
     },
     utils::{
         crypto::get_tls_certificate_info,
         network::{
-            get_known_vulnerabilities, scan_ports_with_services,
-            EXTENDED_PORTS, PROXY_HEADERS, SECURITY_HEADERS, WAF_SIGNATURES, CDN_SIGNATURES,
+            get_known_vulnerabilities, scan_ports_with_services, CDN_SIGNATURES, EXTENDED_PORTS,
+            PROXY_HEADERS, SECURITY_HEADERS, WAF_SIGNATURES,
         },
     },
 };
@@ -52,6 +52,7 @@ pub struct SecurityScanService {
     dns_resolver: Arc<DnsResolver>,
     http_prober: Arc<HttpProber>,
     tls_analyzer: Arc<TlsAnalyzer>,
+    euvd_client: Arc<EuvdClient>,
 
     // Utilities
     task_manager: Arc<TaskManager>,
@@ -70,6 +71,9 @@ impl SecurityScanService {
         task_manager: Arc<TaskManager>,
         settings: SharedSettings,
     ) -> Self {
+        // Create EUVD client for vulnerability lookups
+        let euvd_client = Arc::new(EuvdClient::new().expect("Failed to create EUVD client"));
+
         Self {
             asset_repo,
             scan_repo,
@@ -77,6 +81,7 @@ impl SecurityScanService {
             external_services,
             dns_resolver,
             http_prober,
+            euvd_client,
             tls_analyzer,
             task_manager,
             settings,
@@ -285,12 +290,26 @@ impl SecurityScanService {
 
         match asset.asset_type {
             AssetType::Domain => {
-                self.scan_domain(ctx, scan_id, asset, &scan_type, &mut summary, &mut risk_factors)
-                    .await?;
+                self.scan_domain(
+                    ctx,
+                    scan_id,
+                    asset,
+                    &scan_type,
+                    &mut summary,
+                    &mut risk_factors,
+                )
+                .await?;
             }
             AssetType::Ip => {
-                self.scan_ip(ctx, scan_id, asset, &scan_type, &mut summary, &mut risk_factors)
-                    .await?;
+                self.scan_ip(
+                    ctx,
+                    scan_id,
+                    asset,
+                    &scan_type,
+                    &mut summary,
+                    &mut risk_factors,
+                )
+                .await?;
             }
             AssetType::Certificate => {
                 self.scan_certificate(ctx, scan_id, asset, &mut summary)
@@ -354,8 +373,11 @@ impl SecurityScanService {
                         scan_type,
                         SecurityScanType::PortScan | SecurityScanType::Full
                     ) {
-                        ctx.update_progress(0.3, Some("Scanning ports and detecting services".to_string()))
-                            .await?;
+                        ctx.update_progress(
+                            0.3,
+                            Some("Scanning ports and detecting services".to_string()),
+                        )
+                        .await?;
                         let (open_ports, services, vulns) = self
                             .scan_ports_with_service_detection(scan_id, asset, *ip, risk_factors)
                             .await?;
@@ -378,10 +400,9 @@ impl SecurityScanService {
                             .await?;
                         summary.security_headers = Some(http_result);
                         summary.proxy_detection = Some(proxy_result);
-                        summary.http_status = summary
-                            .security_headers
-                            .as_ref()
-                            .and_then(|_| Some(200)); // Placeholder
+                        summary.http_status =
+                            summary.security_headers.as_ref().and_then(|_| Some(200));
+                        // Placeholder
                     }
                 }
             }
@@ -459,8 +480,11 @@ impl SecurityScanService {
             scan_type,
             SecurityScanType::PortScan | SecurityScanType::Full
         ) {
-            ctx.update_progress(0.2, Some("Scanning ports and detecting services".to_string()))
-                .await?;
+            ctx.update_progress(
+                0.2,
+                Some("Scanning ports and detecting services".to_string()),
+            )
+            .await?;
             let (open_ports, services, vulns) = self
                 .scan_ports_with_service_detection(scan_id, asset, ip, risk_factors)
                 .await?;
@@ -468,21 +492,21 @@ impl SecurityScanService {
             summary.services_detected = Some(services);
             if !vulns.is_empty() {
                 summary.vulnerabilities_found = Some(vulns);
-        }
+            }
 
-        // HTTP probing on web ports
-        if matches!(
-            scan_type,
-            SecurityScanType::HttpProbe | SecurityScanType::Full
-        ) {
+            // HTTP probing on web ports
+            if matches!(
+                scan_type,
+                SecurityScanType::HttpProbe | SecurityScanType::Full
+            ) {
                 ctx.update_progress(0.5, Some("Analyzing HTTP security".to_string()))
-                .await?;
+                    .await?;
                 for port in &open_ports {
                     if matches!(port, 80 | 443 | 8080 | 8443 | 8000 | 8888 | 9000) {
                         let target = format!("{}:{}", ip, port);
                         let (http_result, proxy_result) = self
                             .analyze_http_security(scan_id, asset, &target, risk_factors)
-                        .await?;
+                            .await?;
                         summary.security_headers = Some(http_result);
                         summary.proxy_detection = Some(proxy_result);
                         break; // Only analyze first web port for now
@@ -502,7 +526,13 @@ impl SecurityScanService {
             for port in &ports {
                 if matches!(port, 443 | 8443) {
                     summary.tls_version = self
-                        .analyze_tls_with_findings(scan_id, asset, &ip.to_string(), *port, risk_factors)
+                        .analyze_tls_with_findings(
+                            scan_id,
+                            asset,
+                            &ip.to_string(),
+                            *port,
+                            risk_factors,
+                        )
                         .await?;
                     break;
                 }
@@ -547,9 +577,9 @@ impl SecurityScanService {
                         .map(|cn| cn.trim().trim_start_matches("CN=").to_string())
                 });
 
-            let ssl_labs_url = domain.as_ref().map(|d| {
-                format!("https://www.ssllabs.com/ssltest/analyze.html?d={}", d)
-            });
+            let ssl_labs_url = domain
+                .as_ref()
+                .map(|d| format!("https://www.ssllabs.com/ssltest/analyze.html?d={}", d));
 
             // Check for expiration
             if let Some(not_after) = metadata.get("not_after").and_then(|v| v.as_str()) {
@@ -558,7 +588,8 @@ impl SecurityScanService {
                     let days_until_expiry = (expiry.with_timezone(&Utc) - now).num_days();
 
                     if days_until_expiry < 0 {
-                        let mut data = json!({ "expiry_date": not_after, "days_overdue": -days_until_expiry });
+                        let mut data =
+                            json!({ "expiry_date": not_after, "days_overdue": -days_until_expiry });
                         if let Some(url) = &ssl_labs_url {
                             data["source_url"] = json!(url);
                             data["source_name"] = json!("SSL Labs");
@@ -588,9 +619,13 @@ impl SecurityScanService {
                             "certificate_expiring_soon",
                             FindingSeverity::High,
                             "Certificate Expiring Soon",
-                            Some(&format!("Certificate expires in {} days", days_until_expiry)),
+                            Some(&format!(
+                                "Certificate expires in {} days",
+                                days_until_expiry
+                            )),
                             data,
-                        ).await?;
+                        )
+                        .await?;
                     } else if days_until_expiry < 90 {
                         let mut data = json!({ "expiry_date": not_after, "days_remaining": days_until_expiry });
                         if let Some(url) = &ssl_labs_url {
@@ -603,9 +638,13 @@ impl SecurityScanService {
                             "certificate_expiring_soon",
                             FindingSeverity::Medium,
                             "Certificate Expiring Within 90 Days",
-                            Some(&format!("Certificate expires in {} days", days_until_expiry)),
+                            Some(&format!(
+                                "Certificate expires in {} days",
+                                days_until_expiry
+                            )),
                             data,
-                        ).await?;
+                        )
+                        .await?;
                     }
                 }
             }
@@ -692,7 +731,8 @@ impl SecurityScanService {
             services.push(detected_service);
 
             // Determine finding severity based on port type
-            let (severity, finding_type, title, description) = self.categorize_port(result.port, &service_name);
+            let (severity, finding_type, title, description) =
+                self.categorize_port(result.port, &service_name);
 
             // Create finding for the open port
             self.create_finding(
@@ -716,9 +756,25 @@ impl SecurityScanService {
             )
             .await?;
 
-            // Check for known vulnerabilities
+            // Check for known vulnerabilities using EUVD API
+            // Use product name if available (more specific than generic service name)
+            let product_for_cve = service_info
+                .and_then(|s| s.product.clone())
+                .unwrap_or_else(|| service_name.clone());
+
             if let Some(ver) = &version {
-                let vulns = get_known_vulnerabilities(&service_name, ver);
+                // First, try EUVD API for real-time vulnerability data
+                let euvd_vulns = self
+                    .lookup_vulnerabilities_from_euvd(&product_for_cve, ver)
+                    .await;
+
+                // Fall back to local database if EUVD fails or returns nothing
+                let vulns = if euvd_vulns.is_empty() {
+                    get_known_vulnerabilities(&product_for_cve, ver)
+                } else {
+                    euvd_vulns
+                };
+
                 for vuln in vulns {
                     let vuln_severity = match vuln.severity.as_str() {
                         "critical" => FindingSeverity::Critical,
@@ -727,7 +783,10 @@ impl SecurityScanService {
                         _ => FindingSeverity::Low,
                     };
 
-                    self.create_finding(
+                    // Generate EUVD link for the CVE
+                    let euvd_url = EuvdClient::get_vulnerability_url(&vuln.cve_id);
+
+                    self.create_finding_with_cvss(
                         scan_id,
                         asset.id,
                         "known_cve",
@@ -738,14 +797,16 @@ impl SecurityScanService {
                             "cve_id": vuln.cve_id,
                             "cvss_score": vuln.cvss_score,
                             "cvss_vector": vuln.cvss_vector,
-                            "affected_service": service_name,
-                            "affected_version": ver,
+                            "affected_service": product_for_cve,  // Use actual product name
+                            "affected_version": vuln.affected_versions,
                             "exploitable": vuln.exploitable,
                             "has_public_exploit": vuln.has_public_exploit,
                             "references": vuln.references,
-                            "source_url": format!("https://nvd.nist.gov/vuln/detail/{}", vuln.cve_id),
-                            "source_name": "NVD",
+                            "source_url": euvd_url,
+                            "source_name": "EUVD (ENISA)",
                         }),
+                        vuln.cvss_score, // Pass CVSS score to the finding
+                        Some(vec![vuln.cve_id.clone()]), // Pass CVE ID
                     )
                     .await?;
 
@@ -754,12 +815,15 @@ impl SecurityScanService {
                         title: vuln.title.clone(),
                         severity: vuln.severity.clone(),
                         cvss_score: vuln.cvss_score,
-                        affected_service: service_name.clone(),
-                        affected_version: ver.clone(),
+                        affected_service: product_for_cve.clone(), // Use actual product name
+                        affected_version: vuln.affected_versions.join(", "),
                         exploitable: vuln.exploitable,
                         has_public_exploit: vuln.has_public_exploit,
                         description: vuln.description.clone(),
-                        remediation: Some(format!("Update {} to the latest version", service_name)),
+                        remediation: Some(format!(
+                            "Update {} to the latest version",
+                            product_for_cve
+                        )),
                         references: vuln.references.clone(),
                     });
 
@@ -771,7 +835,7 @@ impl SecurityScanService {
                         severity: vuln.severity.clone(),
                         description: vuln.description.clone(),
                         impact_score: impact,
-                        data: json!({ "cve_id": vuln.cve_id, "cvss_score": vuln.cvss_score }),
+                        data: json!({ "cve_id": vuln.cve_id, "cvss_score": vuln.cvss_score, "euvd_url": euvd_url }),
                     });
                 }
             }
@@ -792,7 +856,11 @@ impl SecurityScanService {
         Ok((open_ports, services, vulnerabilities))
     }
 
-    fn categorize_port(&self, port: u16, service: &str) -> (FindingSeverity, String, String, String) {
+    fn categorize_port(
+        &self,
+        port: u16,
+        service: &str,
+    ) -> (FindingSeverity, String, String, String) {
         match port {
             // Critical - Dangerous services
             23 => (
@@ -904,7 +972,11 @@ impl SecurityScanService {
                 .last()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(80);
-            let scheme = if port == 443 || port == 8443 { "https" } else { "http" };
+            let scheme = if port == 443 || port == 8443 {
+                "https"
+            } else {
+                "http"
+            };
             format!("{}://{}", scheme, target)
         } else {
             format!("https://{}", target)
@@ -932,191 +1004,204 @@ impl SecurityScanService {
         let headers_map: HashMap<String, String> = response
             .headers()
             .iter()
-            .map(|(k, v)| (k.to_string().to_lowercase(), v.to_str().unwrap_or("").to_string()))
+            .map(|(k, v)| {
+                (
+                    k.to_string().to_lowercase(),
+                    v.to_str().unwrap_or("").to_string(),
+                )
+            })
             .collect();
 
         // Check for security headers
-            let mut missing_headers = Vec::new();
-            let mut present_headers = Vec::new();
-            let mut score: u8 = 100;
+        let mut missing_headers = Vec::new();
+        let mut present_headers = Vec::new();
+        let mut score: u8 = 100;
 
-            for (header, severity, desc, rec) in SECURITY_HEADERS {
-                let header_lower = header.to_lowercase();
-                if headers_map.contains_key(&header_lower) {
-                    present_headers.push(header.to_string());
-                    
-                    // Check specific header values
-                    if header_lower == "strict-transport-security" {
-                        if let Some(value) = headers_map.get(&header_lower) {
-                            security_result.hsts_enabled = true;
-                            // Parse max-age
-                            if let Some(max_age_str) = value.split(';').find(|s| s.trim().starts_with("max-age")) {
-                                if let Some(age) = max_age_str.split('=').nth(1) {
-                                    security_result.hsts_max_age = age.trim().parse().ok();
-                                }
+        for (header, severity, desc, rec) in SECURITY_HEADERS {
+            let header_lower = header.to_lowercase();
+            if headers_map.contains_key(&header_lower) {
+                present_headers.push(header.to_string());
+
+                // Check specific header values
+                if header_lower == "strict-transport-security" {
+                    if let Some(value) = headers_map.get(&header_lower) {
+                        security_result.hsts_enabled = true;
+                        // Parse max-age
+                        if let Some(max_age_str) =
+                            value.split(';').find(|s| s.trim().starts_with("max-age"))
+                        {
+                            if let Some(age) = max_age_str.split('=').nth(1) {
+                                security_result.hsts_max_age = age.trim().parse().ok();
                             }
                         }
                     }
-                    if header_lower == "content-security-policy" {
-                        security_result.csp_present = true;
-                        security_result.csp_policy = headers_map.get(&header_lower).cloned();
-                    }
-                    if header_lower == "x-frame-options" {
-                        security_result.x_frame_options = headers_map.get(&header_lower).cloned();
-                    }
-                } else {
-                    let severity_impact = match *severity {
-                        "critical" => 20,
-                        "high" => 15,
-                        "medium" => 10,
-                        "low" => 5,
-                        _ => 3,
-                    };
-                    score = score.saturating_sub(severity_impact);
-
-                    missing_headers.push(MissingSecurityHeader {
-                        name: header.to_string(),
-                        severity: severity.to_string(),
-                        description: desc.to_string(),
-                        recommendation: rec.to_string(),
-                    });
-
-                    // Create finding for missing security header
-                    let finding_severity = match *severity {
-                        "critical" => FindingSeverity::High,
-                        "high" => FindingSeverity::High,
-                        "medium" => FindingSeverity::Medium,
-                        _ => FindingSeverity::Low,
-                    };
-
-                    self.create_finding(
-                        scan_id,
-                        asset.id,
-                        "missing_security_header",
-                        finding_severity,
-                        &format!("Missing Security Header: {}", header),
-                        Some(desc),
-                        json!({
-                            "header": header,
-                            "severity": severity,
-                            "recommendation": rec,
-                            "url": url,
-                        }),
-                    )
-                    .await?;
                 }
-            }
-
-            security_result.headers_present = present_headers;
-            security_result.headers_missing = missing_headers;
-            security_result.score = score;
-
-            // Check for server version disclosure
-            if let Some(server) = headers_map.get("server") {
-                security_result.server_info = Some(server.clone());
-                
-                // Check if version is disclosed
-                if server.contains('/') || regex::Regex::new(r"\d+\.\d+").unwrap().is_match(server) {
-                    self.create_finding(
-                        scan_id,
-                        asset.id,
-                        "server_version_exposed",
-                        FindingSeverity::Low,
-                        "Server Version Disclosed",
-                        Some(&format!("Server header reveals version information: {}", server)),
-                        json!({
-                            "header": "Server",
-                            "value": server,
-                            "url": url,
-                        }),
-                    )
-                    .await?;
-
-                    risk_factors.push(RiskFactor {
-                        factor_type: "information_disclosure".to_string(),
-                        name: "Server version exposed".to_string(),
-                        severity: "low".to_string(),
-                        description: format!("Server header reveals: {}", server),
-                        impact_score: 0.15,
-                        data: json!({ "server": server }),
-                    });
+                if header_lower == "content-security-policy" {
+                    security_result.csp_present = true;
+                    security_result.csp_policy = headers_map.get(&header_lower).cloned();
                 }
-            }
+                if header_lower == "x-frame-options" {
+                    security_result.x_frame_options = headers_map.get(&header_lower).cloned();
+                }
+            } else {
+                let severity_impact = match *severity {
+                    "critical" => 20,
+                    "high" => 15,
+                    "medium" => 10,
+                    "low" => 5,
+                    _ => 3,
+                };
+                score = score.saturating_sub(severity_impact);
 
-            // Check for proxy/WAF/CDN
-            proxy_result = self.detect_proxy_waf_cdn(&headers_map).await;
+                missing_headers.push(MissingSecurityHeader {
+                    name: header.to_string(),
+                    severity: severity.to_string(),
+                    description: desc.to_string(),
+                    recommendation: rec.to_string(),
+                });
 
-            if !proxy_result.waf_detected {
+                // Create finding for missing security header
+                let finding_severity = match *severity {
+                    "critical" => FindingSeverity::High,
+                    "high" => FindingSeverity::High,
+                    "medium" => FindingSeverity::Medium,
+                    _ => FindingSeverity::Low,
+                };
+
                 self.create_finding(
                     scan_id,
                     asset.id,
-                    "no_waf_detected",
-                    FindingSeverity::Low,
-                    "No WAF Detected",
-                    Some("No Web Application Firewall was detected protecting this asset"),
+                    "missing_security_header",
+                    finding_severity,
+                    &format!("Missing Security Header: {}", header),
+                    Some(desc),
                     json!({
+                        "header": header,
+                        "severity": severity,
+                        "recommendation": rec,
                         "url": url,
-                        "recommendation": "Consider implementing a WAF for additional protection",
+                    }),
+                )
+                .await?;
+            }
+        }
+
+        security_result.headers_present = present_headers;
+        security_result.headers_missing = missing_headers;
+        security_result.score = score;
+
+        // Check for server version disclosure
+        if let Some(server) = headers_map.get("server") {
+            security_result.server_info = Some(server.clone());
+
+            // Check if version is disclosed
+            if server.contains('/') || regex::Regex::new(r"\d+\.\d+").unwrap().is_match(server) {
+                self.create_finding(
+                    scan_id,
+                    asset.id,
+                    "server_version_exposed",
+                    FindingSeverity::Low,
+                    "Server Version Disclosed",
+                    Some(&format!(
+                        "Server header reveals version information: {}",
+                        server
+                    )),
+                    json!({
+                        "header": "Server",
+                        "value": server,
+                        "url": url,
                     }),
                 )
                 .await?;
 
                 risk_factors.push(RiskFactor {
-                    factor_type: "protection".to_string(),
-                    name: "No WAF protection".to_string(),
+                    factor_type: "information_disclosure".to_string(),
+                    name: "Server version exposed".to_string(),
                     severity: "low".to_string(),
-                    description: "No Web Application Firewall detected".to_string(),
-                    impact_score: 0.2,
-                    data: json!({}),
-                });
-            }
-
-            if proxy_result.cdn_detected {
-                // CDN is detected - good for protection
-                if let Some(provider) = &proxy_result.cdn_provider {
-                    tracing::info!("CDN detected: {}", provider);
-                }
-            }
-
-            // HTTPS enforcement check
-            if !security_result.is_https {
-                    self.create_finding(
-                        scan_id,
-                        asset.id,
-                        "https_not_enforced",
-                        FindingSeverity::Medium,
-                        "HTTPS Not Enforced",
-                    Some("The asset is accessible over unencrypted HTTP"),
-                    json!({
-                        "url": url,
-                        "recommendation": "Enforce HTTPS and implement HSTS",
-                    }),
-                    )
-                    .await?;
-
-                risk_factors.push(RiskFactor {
-                    factor_type: "encryption".to_string(),
-                    name: "Unencrypted connection".to_string(),
-                    severity: "medium".to_string(),
-                    description: "Traffic is not encrypted with HTTPS".to_string(),
-                    impact_score: 0.4,
-                    data: json!({ "url": url }),
-                });
-            } else if !security_result.hsts_enabled {
-                risk_factors.push(RiskFactor {
-                    factor_type: "encryption".to_string(),
-                    name: "HSTS not enabled".to_string(),
-                    severity: "low".to_string(),
-                    description: "HTTP Strict Transport Security is not enabled".to_string(),
+                    description: format!("Server header reveals: {}", server),
                     impact_score: 0.15,
-                    data: json!({ "url": url }),
+                    data: json!({ "server": server }),
                 });
             }
+        }
+
+        // Check for proxy/WAF/CDN
+        proxy_result = self.detect_proxy_waf_cdn(&headers_map).await;
+
+        if !proxy_result.waf_detected {
+            self.create_finding(
+                scan_id,
+                asset.id,
+                "no_waf_detected",
+                FindingSeverity::Low,
+                "No WAF Detected",
+                Some("No Web Application Firewall was detected protecting this asset"),
+                json!({
+                    "url": url,
+                    "recommendation": "Consider implementing a WAF for additional protection",
+                }),
+            )
+            .await?;
+
+            risk_factors.push(RiskFactor {
+                factor_type: "protection".to_string(),
+                name: "No WAF protection".to_string(),
+                severity: "low".to_string(),
+                description: "No Web Application Firewall detected".to_string(),
+                impact_score: 0.2,
+                data: json!({}),
+            });
+        }
+
+        if proxy_result.cdn_detected {
+            // CDN is detected - good for protection
+            if let Some(provider) = &proxy_result.cdn_provider {
+                tracing::info!("CDN detected: {}", provider);
+            }
+        }
+
+        // HTTPS enforcement check
+        if !security_result.is_https {
+            self.create_finding(
+                scan_id,
+                asset.id,
+                "https_not_enforced",
+                FindingSeverity::Medium,
+                "HTTPS Not Enforced",
+                Some("The asset is accessible over unencrypted HTTP"),
+                json!({
+                    "url": url,
+                    "recommendation": "Enforce HTTPS and implement HSTS",
+                }),
+            )
+            .await?;
+
+            risk_factors.push(RiskFactor {
+                factor_type: "encryption".to_string(),
+                name: "Unencrypted connection".to_string(),
+                severity: "medium".to_string(),
+                description: "Traffic is not encrypted with HTTPS".to_string(),
+                impact_score: 0.4,
+                data: json!({ "url": url }),
+            });
+        } else if !security_result.hsts_enabled {
+            risk_factors.push(RiskFactor {
+                factor_type: "encryption".to_string(),
+                name: "HSTS not enabled".to_string(),
+                severity: "low".to_string(),
+                description: "HTTP Strict Transport Security is not enabled".to_string(),
+                impact_score: 0.15,
+                data: json!({ "url": url }),
+            });
+        }
 
         Ok((security_result, proxy_result))
     }
 
-    async fn detect_proxy_waf_cdn(&self, headers: &HashMap<String, String>) -> ProxyDetectionResult {
+    async fn detect_proxy_waf_cdn(
+        &self,
+        headers: &HashMap<String, String>,
+    ) -> ProxyDetectionResult {
         let mut result = ProxyDetectionResult::default();
 
         // Check for proxy headers
@@ -1198,6 +1283,21 @@ impl SecurityScanService {
             ..Default::default()
         };
 
+        // Check MX records first to determine if domain handles email
+        // This affects the severity of missing SPF/DMARC findings
+        match self.dns_resolver.lookup_mx(domain).await {
+            Ok(mx_records) => {
+                result.has_mx = !mx_records.is_empty();
+                result.mx_records = mx_records
+                    .iter()
+                    .map(|(priority, exchange)| format!("{} {}", priority, exchange))
+                    .collect();
+            }
+            Err(_) => {
+                result.has_mx = false;
+            }
+        }
+
         // Check SPF record
         match self.dns_resolver.lookup_txt(&format!("{}.", domain)).await {
             Ok(records) => {
@@ -1206,12 +1306,18 @@ impl SecurityScanService {
                         result.has_spf = true;
                         result.spf_record = Some(record.clone());
                         result.spf_valid = !record.contains("+all"); // +all is too permissive
-                        
+
                         if record.contains("+all") {
-                            result.spf_issues.push("SPF record contains +all which allows any IP to send mail".to_string());
+                            result.spf_issues.push(
+                                "SPF record contains +all which allows any IP to send mail"
+                                    .to_string(),
+                            );
                         }
                         if record.contains("~all") {
-                            result.spf_issues.push("SPF record uses soft fail (~all), consider using hard fail (-all)".to_string());
+                            result.spf_issues.push(
+                                "SPF record uses soft fail (~all), consider using hard fail (-all)"
+                                    .to_string(),
+                            );
                         }
                     }
                 }
@@ -1219,7 +1325,8 @@ impl SecurityScanService {
             Err(_) => {}
         }
 
-        if !result.has_spf {
+        // Only flag missing SPF if domain has MX records (handles email)
+        if !result.has_spf && result.has_mx {
             self.create_finding(
                 scan_id,
                 asset.id,
@@ -1238,29 +1345,35 @@ impl SecurityScanService {
                 issue_type: "missing_spf".to_string(),
                 severity: "medium".to_string(),
                 title: "Missing SPF Record".to_string(),
-                description: "No SPF record found for domain".to_string(),
+                description: "No SPF record found for domain with active mail servers".to_string(),
                 remediation: "Add an SPF record: v=spf1 include:_spf.google.com -all".to_string(),
             });
         }
 
         // Check DMARC record
-        match self.dns_resolver.lookup_txt(&format!("_dmarc.{}.", domain)).await {
+        match self
+            .dns_resolver
+            .lookup_txt(&format!("_dmarc.{}.", domain))
+            .await
+        {
             Ok(records) => {
                 for record in &records {
                     if record.starts_with("v=DMARC1") {
                         result.has_dmarc = true;
                         result.dmarc_record = Some(record.clone());
-                        
+
                         // Parse policy
                         if let Some(policy_match) = regex::Regex::new(r"p=(\w+)")
                             .ok()
                             .and_then(|re| re.captures(record))
                         {
                             result.dmarc_policy = Some(policy_match[1].to_string());
-                            
+
                             if &policy_match[1] == "none" {
-                                result.dmarc_issues.push("DMARC policy is 'none' - emails are not rejected".to_string());
-                                
+                                result.dmarc_issues.push(
+                                    "DMARC policy is 'none' - emails are not rejected".to_string(),
+                                );
+
                                 self.create_finding(
                                     scan_id,
                                     asset.id,
@@ -1283,7 +1396,8 @@ impl SecurityScanService {
             Err(_) => {}
         }
 
-        if !result.has_dmarc {
+        // Only flag missing DMARC if domain has MX records (handles email)
+        if !result.has_dmarc && result.has_mx {
             self.create_finding(
                 scan_id,
                 asset.id,
@@ -1302,8 +1416,10 @@ impl SecurityScanService {
                 issue_type: "missing_dmarc".to_string(),
                 severity: "medium".to_string(),
                 title: "Missing DMARC Record".to_string(),
-                description: "No DMARC record found for domain".to_string(),
-                remediation: "Add a DMARC record: v=DMARC1; p=reject; rua=mailto:dmarc@example.com".to_string(),
+                description: "No DMARC record found for domain with active mail servers"
+                    .to_string(),
+                remediation: "Add a DMARC record: v=DMARC1; p=reject; rua=mailto:dmarc@example.com"
+                    .to_string(),
             });
         }
 
@@ -1397,7 +1513,10 @@ impl SecurityScanService {
                             factor_type: "certificate".to_string(),
                             name: "Expired certificate".to_string(),
                             severity: "critical".to_string(),
-                            description: format!("Certificate expired {} days ago", -days_until_expiry),
+                            description: format!(
+                                "Certificate expired {} days ago",
+                                -days_until_expiry
+                            ),
                             impact_score: 0.95,
                             data: json!({ "days_expired": -days_until_expiry }),
                         });
@@ -1425,7 +1544,10 @@ impl SecurityScanService {
                             factor_type: "certificate".to_string(),
                             name: "Certificate expiring soon".to_string(),
                             severity: "high".to_string(),
-                            description: format!("Certificate expires in {} days", days_until_expiry),
+                            description: format!(
+                                "Certificate expires in {} days",
+                                days_until_expiry
+                            ),
                             impact_score: 0.6,
                             data: json!({ "days_remaining": days_until_expiry }),
                         });
@@ -1466,7 +1588,8 @@ impl SecurityScanService {
                         "Self-Signed Certificate",
                         Some("Certificate is self-signed and may not be trusted by browsers"),
                         data,
-                    ).await?;
+                    )
+                    .await?;
 
                     risk_factors.push(RiskFactor {
                         factor_type: "certificate".to_string(),
@@ -1540,7 +1663,8 @@ impl SecurityScanService {
                     factor_type: "reputation".to_string(),
                     name: "Malicious reputation".to_string(),
                     severity: "high".to_string(),
-                    description: "Target is flagged as malicious by threat intelligence".to_string(),
+                    description: "Target is flagged as malicious by threat intelligence"
+                        .to_string(),
                     impact_score: 0.9,
                     data: json!({ "sources": intel.threat_sources }),
                 });
@@ -1590,6 +1714,238 @@ impl SecurityScanService {
     }
 
     // ========================================================================
+    // EUVD VULNERABILITY LOOKUP
+    // ========================================================================
+
+    /// Check if a service name is a generic protocol name (not a specific software product)
+    fn is_generic_protocol(service: &str) -> bool {
+        const GENERIC_PROTOCOLS: &[&str] = &[
+            "http",
+            "https",
+            "ftp",
+            "ftps",
+            "sftp",
+            "ssh",
+            "telnet",
+            "smtp",
+            "smtps",
+            "pop3",
+            "pop3s",
+            "imap",
+            "imaps",
+            "dns",
+            "dhcp",
+            "ntp",
+            "snmp",
+            "ldap",
+            "ldaps",
+            "mysql",
+            "postgresql",
+            "postgres",
+            "redis",
+            "mongodb",
+            "mssql",
+            "oracle",
+            "rdp",
+            "vnc",
+            "sip",
+            "rtsp",
+            "mqtt",
+            "amqp",
+            "ws",
+            "wss",
+            "tcp",
+            "udp",
+            "icmp",
+            "ssl",
+            "tls",
+            "kerberos",
+            "smb",
+            "nfs",
+            "iscsi",
+            "http-proxy",
+            "socks",
+            "socks5",
+            "unknown",
+        ];
+
+        let normalized = service.to_lowercase();
+        GENERIC_PROTOCOLS.contains(&normalized.as_str())
+    }
+
+    /// Check if a version string looks like a real software version (not a protocol version)
+    fn is_valid_software_version(version: &str) -> bool {
+        // Protocol versions are typically simple: 1.0, 1.1, 2.0, 2, 3
+        // Software versions are more complex: 2.4.63, 1.19.0, 8.0.32, 7.4-p1
+
+        // Must have at least 2 dots for a meaningful version (e.g., 2.4.63)
+        // OR have additional qualifiers like -p1, -rc1, etc.
+        let has_multiple_dots = version.matches('.').count() >= 2;
+        let has_qualifiers =
+            version.contains('-') || version.contains('_') || version.contains('+');
+        let is_long_enough = version.len() >= 5; // e.g., "1.2.3" is 5 chars
+
+        // Also accept versions with letters like "8u202" (Java) or "5.7.42-log" (MySQL)
+        let has_letter_prefix_suffix = version.chars().any(|c| c.is_alphabetic());
+
+        has_multiple_dots || has_qualifiers || (is_long_enough && has_letter_prefix_suffix)
+    }
+
+    /// Lookup vulnerabilities from EUVD (European Union Vulnerability Database)
+    async fn lookup_vulnerabilities_from_euvd(
+        &self,
+        product: &str,
+        version: &str,
+    ) -> Vec<crate::utils::network::VulnerabilityInfo> {
+        use crate::utils::network::VulnerabilityInfo;
+
+        // Skip CVE search for generic protocol names
+        if Self::is_generic_protocol(product) {
+            tracing::debug!(
+                "Skipping EUVD lookup for generic protocol '{}' (version '{}')",
+                product,
+                version
+            );
+            return Vec::new();
+        }
+
+        // Skip if version looks like a protocol version rather than software version
+        if !Self::is_valid_software_version(version) {
+            tracing::debug!(
+                "Skipping EUVD lookup for '{}' - version '{}' appears to be a protocol version",
+                product,
+                version
+            );
+            return Vec::new();
+        }
+
+        // Normalize product name for EUVD search
+        let normalized_product = product.to_lowercase();
+
+        tracing::info!(
+            "Searching EUVD for vulnerabilities in '{}' version '{}'",
+            normalized_product,
+            version
+        );
+
+        // Search EUVD for vulnerabilities affecting this product
+        match self
+            .euvd_client
+            .search_by_product(&normalized_product, None)
+            .await
+        {
+            Ok(euvd_vulns) => {
+                let mut results = Vec::new();
+
+                for euvd_vuln in euvd_vulns {
+                    // Check version match first
+                    if !EuvdClient::is_version_affected(&euvd_vuln, &normalized_product, version) {
+                        continue;
+                    } else {
+                        tracing::info!(
+                            "Found vulnerability in '{}' version '{}' - {}",
+                            normalized_product,
+                            version,
+                            euvd_vuln.id.clone().unwrap_or_default()
+                        );
+                    }
+
+                    // Extract CVE ID from aliases
+                    let cve_id = euvd_vuln
+                        .aliases
+                        .as_ref()
+                        .and_then(|aliases| aliases.iter().find(|a| a.starts_with("CVE-")).cloned())
+                        .or_else(|| euvd_vuln.id.clone())
+                        .unwrap_or_else(|| "Unknown".to_string());
+
+                    // Determine severity from CVSS score
+                    let severity = match euvd_vuln.base_score {
+                        Some(score) if score >= 9.0 => "critical".to_string(),
+                        Some(score) if score >= 7.0 => "high".to_string(),
+                        Some(score) if score >= 4.0 => "medium".to_string(),
+                        Some(_) => "low".to_string(),
+                        None => euvd_vuln
+                            .base_severity
+                            .clone()
+                            .unwrap_or_else(|| "medium".to_string())
+                            .to_lowercase(),
+                    };
+
+                    // Build references list
+                    let mut references = euvd_vuln.references.clone();
+                    // Add EUVD link as primary reference
+                    references.insert(0, EuvdClient::get_vulnerability_url(&cve_id));
+
+                    // Extract title from description or use CVE ID
+                    let title = euvd_vuln
+                        .description
+                        .as_ref()
+                        .map(|d| {
+                            // Take first sentence or first 100 chars as title
+                            let first_sentence = d.split('.').next().unwrap_or(d);
+                            if first_sentence.len() > 100 {
+                                format!("{}...", &first_sentence[..97])
+                            } else {
+                                first_sentence.to_string()
+                            }
+                        })
+                        .unwrap_or_else(|| format!("{} Vulnerability", cve_id));
+
+                    // tracing affected_products
+                    tracing::info!("Affected products: {:?}", euvd_vuln.affected_products);
+
+                    // Update affected versions to show the actual range from EUVD if available
+                    let affected_versions_display =
+                        if let Some(affected_products) = &euvd_vuln.affected_products {
+                            let tmp: Vec<String> = affected_products
+                                .iter()
+                                .map(|ap| ap.product_version.clone())
+                                .collect();
+                            // tracing affected_versions_display
+                            tracing::info!("Affected versions: {}", tmp.join(", "));
+                            tmp
+                        } else {
+                            vec!["Unknown".to_string()]
+                        };
+
+                    results.push(VulnerabilityInfo {
+                        cve_id,
+                        title,
+                        description: euvd_vuln
+                            .description
+                            .unwrap_or_else(|| "No description available".to_string()),
+                        severity,
+                        cvss_score: euvd_vuln.base_score,
+                        cvss_vector: euvd_vuln.base_score_vector,
+                        affected_versions: affected_versions_display,
+                        references,
+                        exploitable: euvd_vuln.exploited.unwrap_or(false),
+                        has_public_exploit: euvd_vuln.exploited.unwrap_or(false),
+                    });
+                }
+
+                // Limit results to avoid too many findings
+                //results.truncate(10);
+
+                if !results.is_empty() {
+                    tracing::info!(
+                        "EUVD returned {} vulnerabilities for product '{}' version '{}'",
+                        results.len(),
+                        product,
+                        version
+                    );
+                }
+
+                results
+            }
+            Err(e) => {
+                tracing::warn!("EUVD lookup failed for {}: {}", product, e);
+                Vec::new()
+            }
+        }
+    }
+
+    // ========================================================================
     // FINDING CREATION
     // ========================================================================
 
@@ -1603,6 +1959,32 @@ impl SecurityScanService {
         description: Option<&str>,
         data: Value,
     ) -> Result<SecurityFinding, ApiError> {
+        self.create_finding_with_cvss(
+            scan_id,
+            asset_id,
+            finding_type,
+            severity,
+            title,
+            description,
+            data,
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn create_finding_with_cvss(
+        &self,
+        scan_id: Uuid,
+        asset_id: Uuid,
+        finding_type: &str,
+        severity: FindingSeverity,
+        title: &str,
+        description: Option<&str>,
+        data: Value,
+        cvss_score: Option<f64>,
+        cve_ids: Option<Vec<String>>,
+    ) -> Result<SecurityFinding, ApiError> {
         let finding = SecurityFindingCreate {
             security_scan_id: Some(scan_id),
             asset_id,
@@ -1612,8 +1994,8 @@ impl SecurityScanService {
             description: description.map(String::from),
             remediation: get_remediation(finding_type),
             data,
-            cvss_score: None,
-            cve_ids: None,
+            cvss_score,
+            cve_ids,
             tags: None,
         };
 
@@ -1653,6 +2035,7 @@ impl Clone for SecurityScanService {
             dns_resolver: Arc::clone(&self.dns_resolver),
             http_prober: Arc::clone(&self.http_prober),
             tls_analyzer: Arc::clone(&self.tls_analyzer),
+            euvd_client: Arc::clone(&self.euvd_client),
             task_manager: Arc::clone(&self.task_manager),
             settings: Arc::clone(&self.settings),
         }

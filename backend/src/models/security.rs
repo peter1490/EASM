@@ -465,6 +465,7 @@ pub struct ScanConfig {
 pub struct ScanResultSummary {
     pub open_ports: Option<Vec<u16>>,
     pub tls_version: Option<String>,
+    pub tls_certificates: Option<Vec<TlsCertificateDetails>>,
     pub http_status: Option<i32>,
     pub findings_by_severity: Option<std::collections::HashMap<String, i32>>,
     pub scan_duration_ms: Option<i64>,
@@ -492,6 +493,30 @@ pub struct DetectedService {
     pub confidence: u8,
     pub is_encrypted: bool,
     pub vulnerabilities: Vec<String>, // CVE IDs
+}
+
+/// TLS certificate details captured during scans
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsCertificateDetails {
+    pub host: String,
+    pub port: u16,
+    pub certificate_chain: Vec<TlsCertificateInfo>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsCertificateInfo {
+    pub subject: String,
+    pub issuer: String,
+    pub organization: Option<String>,
+    pub common_name: Option<String>,
+    pub san_domains: Vec<String>,
+    pub not_before: String,
+    pub not_after: String,
+    pub serial_number: String,
+    pub signature_algorithm: String,
+    pub public_key_type: Option<String>,
+    pub public_key_bits: Option<u32>,
 }
 
 /// Vulnerability detection result

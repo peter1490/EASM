@@ -1,7 +1,7 @@
 use crate::{
     auth::{context::UserContext, rbac::Role},
     error::ApiError,
-    models::{Asset, AssetType, Seed, SeedCreate},
+    models::{Asset, AssetEvolutionResponse, AssetScanHistoryEntry, AssetType, Seed, SeedCreate},
     AppState,
 };
 use axum::{
@@ -67,6 +67,12 @@ pub struct AssetListResponse {
 #[derive(Debug, Deserialize)]
 pub struct UpdateImportanceRequest {
     pub importance: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AssetEvolutionQuery {
+    #[serde(default)]
+    pub limit: Option<i64>,
 }
 
 pub async fn create_seed(
@@ -190,6 +196,53 @@ pub async fn update_asset_importance(
         .update_importance(company_id, &id, payload.importance)
         .await?;
     Ok(Json(asset))
+}
+
+/// GET /api/assets/:id/evolution - Get evolution history for an asset
+pub async fn get_asset_evolution(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
+    Path(id): Path<Uuid>,
+    Query(params): Query<AssetEvolutionQuery>,
+) -> Result<Json<AssetEvolutionResponse>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
+    let limit = params.limit.unwrap_or(50).min(200);
+
+    // Ensure asset exists and is accessible
+    let _asset = app_state
+        .asset_repository
+        .get_by_id(company_id, &id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("Asset {} not found", id)))?;
+
+    let risk_history = app_state
+        .asset_repository
+        .get_risk_history(company_id, &id, limit)
+        .await?;
+
+    let scans = app_state
+        .security_scan_service
+        .list_scans_for_asset(&id, company_id)
+        .await?;
+
+    let scan_history: Vec<AssetScanHistoryEntry> = scans
+        .into_iter()
+        .take(limit as usize)
+        .map(|scan| AssetScanHistoryEntry {
+            id: scan.id,
+            scan_type: scan.scan_type,
+            status: scan.status,
+            created_at: scan.created_at,
+            started_at: scan.started_at,
+            completed_at: scan.completed_at,
+            result_summary: scan.result_summary,
+        })
+        .collect();
+
+    Ok(Json(AssetEvolutionResponse {
+        risk_history,
+        scan_history,
+    }))
 }
 
 /// Advanced search response with sources list

@@ -369,6 +369,11 @@ pub trait SecurityFindingRepository: Send + Sync {
         resolved_by: Uuid,
         company_id: Uuid,
     ) -> Result<SecurityFinding, ApiError>;
+    async fn resolve_by_ids(
+        &self,
+        ids: &[Uuid],
+        company_id: Uuid,
+    ) -> Result<u64, ApiError>;
     async fn count_by_severity(
         &self,
         company_id: Uuid,
@@ -378,6 +383,7 @@ pub trait SecurityFindingRepository: Send + Sync {
         company_id: Uuid,
     ) -> Result<std::collections::HashMap<String, i64>, ApiError>;
     async fn count_by_asset(&self, asset_id: &Uuid, company_id: Uuid) -> Result<i64, ApiError>;
+    async fn count_active(&self, company_id: Uuid) -> Result<i64, ApiError>;
 }
 
 pub struct SqlxSecurityFindingRepository {
@@ -542,22 +548,7 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         filter: &SecurityFindingFilter,
         company_id: Uuid,
     ) -> Result<(Vec<SecurityFinding>, i64), ApiError> {
-        // Build dynamic query
-        let mut conditions: Vec<String> = Vec::new();
-        let mut params_count = 0u32;
-
-        // Start with base query
-        let mut query = String::from("SELECT * FROM security_findings WHERE 1=1");
-        let mut count_query = String::from("SELECT COUNT(*) FROM security_findings WHERE 1=1");
-
-        // Add company_id condition
-        params_count += 1;
-        let cond = format!(" AND company_id = ${}", params_count);
-        query.push_str(&cond);
-        count_query.push_str(&cond);
-
-        // Add other filters (implementation simplified as helper logic for query building should handle company_id injection if refactored, but here we just bind it manually in the sqlx query below)
-        // Since sqlx query below is hardcoded with $1, $2 etc, I will just modify IT.
+        // Filters are applied via parameterized query below.
 
         let rows = sqlx::query_as::<_, SecurityFinding>(
             r#"
@@ -659,6 +650,34 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         Ok(row)
     }
 
+    async fn resolve_by_ids(
+        &self,
+        ids: &[Uuid],
+        company_id: Uuid,
+    ) -> Result<u64, ApiError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let now = Utc::now();
+        let result = sqlx::query(
+            r#"
+            UPDATE security_findings
+            SET status = 'resolved',
+                resolved_at = $2,
+                updated_at = $2
+            WHERE id = ANY($1) AND company_id = $3
+            "#,
+        )
+        .bind(ids)
+        .bind(now)
+        .bind(company_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
     async fn count_by_severity(
         &self,
         company_id: Uuid,
@@ -692,6 +711,17 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
             "SELECT COUNT(*) FROM security_findings WHERE asset_id = $1 AND company_id = $2",
         )
         .bind(asset_id)
+        .bind(company_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count)
+    }
+
+    async fn count_active(&self, company_id: Uuid) -> Result<i64, ApiError> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM security_findings WHERE status NOT IN ('resolved', 'false_positive') AND company_id = $1",
+        )
         .bind(company_id)
         .fetch_one(&self.pool)
         .await?;

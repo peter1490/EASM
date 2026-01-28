@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import {
   searchAssetsAdvanced,
   getDiscoveryStatus,
-  createScan,
+  triggerAssetScan,
   type Asset,
   type AssetSearchParams,
   type AssetSearchResponse,
@@ -169,7 +169,7 @@ export default function AssetsPage() {
         .filter((a): a is Asset => !!a);
 
       for (const asset of selectedAssetList) {
-        await createScan(asset.value, `Bulk scan from assets page`);
+        await triggerAssetScan(asset.id, "full", `Bulk scan from assets page`);
       }
 
       setBulkScanMessage(`Successfully initiated ${selectedAssetList.length} scans`);
@@ -608,7 +608,7 @@ export default function AssetsPage() {
                             {asset.last_scan_status && (
                               <div onClick={(e) => e.stopPropagation()}>
                                 {asset.last_scan_id ? (
-                                  <Link href={`/scan/${asset.last_scan_id}`}>
+                                  <Link href={`/security/scans/${asset.last_scan_id}`}>
                                     <Badge
                                       variant={asset.last_scan_status === "completed" ? "success" : asset.last_scan_status === "failed" ? "error" : "warning"}
                                       className="cursor-pointer hover:opacity-80 transition-opacity"
@@ -634,8 +634,8 @@ export default function AssetsPage() {
                           variant="outline"
                           onClick={async () => {
                             try {
-                              await createScan(asset.value, `Quick scan of ${asset.value}`);
-                              alert(`Scan initiated for ${asset.value}`);
+                              await triggerAssetScan(asset.id, "full", `Quick scan of ${asset.value}`);
+                              alert(`Security scan initiated for ${asset.value}`);
                             } catch (e) {
                               alert(`Error: ${(e as Error).message}`);
                             }

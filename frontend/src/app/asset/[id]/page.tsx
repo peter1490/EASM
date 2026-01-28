@@ -6,11 +6,11 @@ import { useParams } from "next/navigation";
 import {
   getAsset,
   getAssetFindings,
+  getAssetEvolution,
   recalculateAssetRisk,
   triggerAssetScan,
   updateAssetImportance,
   listSecurityScans,
-  listScans,
   updateSecurityFinding,
   resolveSecurityFinding,
   getAssetTags,
@@ -19,9 +19,9 @@ import {
   listTags,
   blacklistFromAsset,
   type Asset,
+  type AssetEvolutionResponse,
   type SecurityFinding,
   type SecurityScan,
-  type Scan,
   type FindingStatus,
   type AssetTagDetail,
   type TagWithCount,
@@ -37,7 +37,7 @@ import Modal from "@/components/ui/Modal";
 import Checkbox from "@/components/ui/Checkbox";
 import AssetDiscoveryGraph from "@/components/AssetDiscoveryGraph";
 
-type TabType = "overview" | "security" | "scans" | "metadata";
+type TabType = "overview" | "security" | "scans" | "evolution" | "metadata";
 
 const SEVERITY_COLORS: Record<string, "error" | "warning" | "info" | "secondary" | "success"> = {
   critical: "error",
@@ -106,7 +106,7 @@ export default function AssetDetailPage() {
   const [asset, setAsset] = useState<Asset | null>(null);
   const [findings, setFindings] = useState<SecurityFinding[]>([]);
   const [securityScans, setSecurityScans] = useState<SecurityScan[]>([]);
-  const [legacyScans, setLegacyScans] = useState<Scan[]>([]);
+  const [assetEvolution, setAssetEvolution] = useState<AssetEvolutionResponse | null>(null);
   const [assetTags, setAssetTags] = useState<AssetTagDetail[]>([]);
   const [allTags, setAllTags] = useState<TagWithCount[]>([]);
   const [loading, setLoading] = useState(true);
@@ -148,11 +148,11 @@ export default function AssetDetailPage() {
       }
       // For auto-refresh in background, don't change any loading states
       
-      const [assetData, findingsData, securityScansData, legacyScansData, assetTagsData, allTagsData] = await Promise.all([
+      const [assetData, findingsData, securityScansData, evolutionData, assetTagsData, allTagsData] = await Promise.all([
         getAsset(id),
         getAssetFindings(id).catch(() => []),
         listSecurityScans(50, 0, id).catch(() => []),
-        listScans().catch(() => []),
+        getAssetEvolution(id, 50).catch(() => null),
         getAssetTags(id).catch(() => []),
         listTags(100, 0).catch(() => ({ tags: [], total_count: 0 })),
       ]);
@@ -160,15 +160,10 @@ export default function AssetDetailPage() {
       setAsset(assetData);
       setFindings(findingsData);
       setSecurityScans(securityScansData);
+      setAssetEvolution(evolutionData);
       setAssetTags(assetTagsData);
       setAllTags(allTagsData.tags);
-      
-      // Filter legacy scans that target this asset's value
-      const relatedScans = legacyScansData.filter(
-        s => s.target.toLowerCase().trim() === assetData.value.toLowerCase().trim()
-      );
-      setLegacyScans(relatedScans);
-      
+
       setError(null);
       hasInitialLoadRef.current = true;
     } catch (err) {
@@ -333,10 +328,27 @@ export default function AssetDetailPage() {
     open: findings.filter(f => f.status === "open").length,
   };
 
+  const riskHistory = assetEvolution?.risk_history ?? [];
+  const scanHistory = assetEvolution?.scan_history ?? [];
+  const latestRisk = riskHistory[0];
+  const previousRisk = riskHistory[1];
+  const riskDelta = latestRisk && previousRisk ? latestRisk.risk_score - previousRisk.risk_score : null;
+
+  const getFindingsBySeverity = (summary?: Record<string, unknown>) => {
+    const bySeverity = summary?.findings_by_severity as Record<string, number> | undefined;
+    return bySeverity || {};
+  };
+
+  const getFindingsTotal = (summary?: Record<string, unknown>) => {
+    const bySeverity = getFindingsBySeverity(summary);
+    return Object.values(bySeverity).reduce((acc, val) => acc + (Number(val) || 0), 0);
+  };
+
   const tabs: Array<{ id: TabType; label: string; icon: string; badge?: number }> = [
     { id: "overview", label: "Overview", icon: "📊" },
     { id: "security", label: "Security", icon: "🛡️", badge: findingsStats.total },
-    { id: "scans", label: "Scans", icon: "🔍", badge: securityScans.length + legacyScans.length },
+    { id: "scans", label: "Scans", icon: "🔍", badge: securityScans.length },
+    { id: "evolution", label: "Evolution", icon: "📈" },
     { id: "metadata", label: "Metadata", icon: "📋" },
   ];
 
@@ -812,7 +824,7 @@ export default function AssetDetailPage() {
                   <div>
                     <div className="text-sm text-muted-foreground mb-1">Status</div>
                     {asset.last_scan_id ? (
-                      <Link href={`/scan/${asset.last_scan_id}`}>
+                      <Link href={`/security/scans/${asset.last_scan_id}`}>
                         <Badge
                           variant={SCAN_STATUS_COLORS[asset.last_scan_status] || "secondary"}
                           className="cursor-pointer hover:opacity-80"
@@ -1039,42 +1051,138 @@ export default function AssetDetailPage() {
             </CardContent>
           </Card>
 
-          {/* Legacy Scans */}
-          {legacyScans.length > 0 && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Related Scans</CardTitle>
-                <CardDescription>Legacy scans targeting this asset</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-2">
-                  {legacyScans.map((scan) => (
-                    <Link key={scan.id} href={`/scan/${scan.id}`}>
-                      <div className="flex items-center justify-between p-3 rounded-lg bg-muted hover:bg-muted/80 transition-colors cursor-pointer">
-                        <div className="space-y-1">
-                          <div className="text-sm font-medium">{scan.target}</div>
-                          <div className="text-xs text-muted-foreground">
-                            {new Date(scan.created_at).toLocaleString()}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <Badge variant={SCAN_STATUS_COLORS[scan.status] || "secondary"}>
-                            {scan.status}
-                          </Badge>
-                          {scan.findings_count !== undefined && (
-                            <span className="text-xs text-muted-foreground">
-                              {scan.findings_count} findings
+        </div>
+      )}
+
+      {activeTab === "evolution" && (
+        <div className="space-y-6 stagger-children">
+          <Card>
+            <CardHeader>
+              <CardTitle>Risk Score Evolution</CardTitle>
+              <CardDescription>Track how risk changes over time for this asset</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {riskHistory.length > 0 ? (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Date</TableHead>
+                      <TableHead>Risk Score</TableHead>
+                      <TableHead>Risk Level</TableHead>
+                      <TableHead>Change</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {riskHistory.map((entry, idx) => {
+                      const next = riskHistory[idx + 1];
+                      const delta = next ? entry.risk_score - next.risk_score : null;
+                      const deltaLabel = delta === null ? "—" : `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}`;
+                      return (
+                        <TableRow key={`${entry.calculated_at}-${idx}`}>
+                          <TableCell className="text-muted-foreground text-sm">
+                            {new Date(entry.calculated_at).toLocaleString()}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex items-center gap-3">
+                              <div className="w-28 h-2 bg-muted rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full ${getRiskBgColor(entry.risk_level)}`}
+                                  style={{ width: `${Math.min(entry.risk_score, 100)}%` }}
+                                />
+                              </div>
+                              <span className="font-mono font-semibold">{entry.risk_score.toFixed(1)}</span>
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={RISK_COLORS[entry.risk_level.toLowerCase()] || "secondary"}>
+                              {entry.risk_level}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <span className={`font-mono text-sm ${delta !== null && delta > 0 ? "text-destructive" : delta !== null && delta < 0 ? "text-success" : "text-muted-foreground"}`}>
+                              {deltaLabel}
                             </span>
-                          )}
-                          <span className="text-muted-foreground">→</span>
-                        </div>
-                      </div>
-                    </Link>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-          )}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              ) : (
+                <EmptyState
+                  icon="📈"
+                  title="No risk history"
+                  description="Risk history will appear after risk calculations run for this asset."
+                />
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Security Scan Evolution</CardTitle>
+              <CardDescription>See how findings change across scans</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {scanHistory.length > 0 ? (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Date</TableHead>
+                      <TableHead>Scan Type</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Findings</TableHead>
+                      <TableHead className="text-right">Details</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {scanHistory.map((scan) => {
+                      const findingsTotal = getFindingsTotal(scan.result_summary);
+                      const bySeverity = getFindingsBySeverity(scan.result_summary);
+                      return (
+                        <TableRow key={scan.id} className="hover:bg-muted/50">
+                          <TableCell className="text-muted-foreground text-sm">
+                            {new Date(scan.created_at).toLocaleString()}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="info">{scan.scan_type}</Badge>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={SCAN_STATUS_COLORS[scan.status] || "secondary"}>
+                              {scan.status}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-wrap items-center gap-2 text-xs">
+                              <span className="font-mono">{findingsTotal} total</span>
+                              {Object.entries(bySeverity).slice(0, 4).map(([severity, count]) => (
+                                <Badge key={severity} variant={SEVERITY_COLORS[severity] || "secondary"}>
+                                  {severity}: {count}
+                                </Badge>
+                              ))}
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Link href={`/security/scans/${scan.id}`}>
+                              <Button size="sm" variant="outline">
+                                View
+                              </Button>
+                            </Link>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              ) : (
+                <EmptyState
+                  icon="🔍"
+                  title="No scans yet"
+                  description="Run a security scan to start tracking changes."
+                />
+              )}
+            </CardContent>
+          </Card>
         </div>
       )}
 
@@ -1519,4 +1627,3 @@ export default function AssetDetailPage() {
     </div>
   );
 }
-

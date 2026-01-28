@@ -82,6 +82,27 @@ interface SecurityHeadersResult {
   score: number;
 }
 
+interface TlsCertificateInfo {
+  subject: string;
+  issuer: string;
+  organization?: string | null;
+  common_name?: string | null;
+  san_domains: string[];
+  not_before: string;
+  not_after: string;
+  serial_number: string;
+  signature_algorithm: string;
+  public_key_type?: string | null;
+  public_key_bits?: number | null;
+}
+
+interface TlsCertificateDetails {
+  host: string;
+  port: number;
+  certificate_chain: TlsCertificateInfo[];
+  error?: string | null;
+}
+
 interface DnsIssue {
   issue_type: string;
   severity: string;
@@ -136,6 +157,7 @@ interface RiskFactor {
 interface ScanResultSummary {
   open_ports?: number[];
   tls_version?: string;
+  tls_certificates?: TlsCertificateDetails[];
   http_status?: number;
   findings_by_severity?: Record<string, number>;
   scan_duration_ms?: number;
@@ -149,7 +171,7 @@ interface ScanResultSummary {
   risk_factors?: RiskFactor[];
 }
 
-type TabType = "overview" | "services" | "vulnerabilities" | "headers" | "dns" | "findings";
+type TabType = "overview" | "services" | "vulnerabilities" | "headers" | "dns" | "tls" | "findings";
 
 export default function SecurityScanDetailPage() {
   const params = useParams();
@@ -234,6 +256,7 @@ export default function SecurityScanDetailPage() {
     { id: "vulnerabilities" as TabType, label: "Vulnerabilities", icon: "🛡️", badge: summary.vulnerabilities_found?.length },
     { id: "headers" as TabType, label: "Security Headers", icon: "📋" },
     { id: "dns" as TabType, label: "DNS Security", icon: "🌐" },
+    { id: "tls" as TabType, label: "SSL/TLS", icon: "🔒", badge: summary.tls_certificates?.length },
     { id: "findings" as TabType, label: "All Findings", icon: "📝", badge: findings.length },
   ];
 
@@ -954,6 +977,120 @@ export default function SecurityScanDetailPage() {
         </div>
       )}
 
+      {/* SSL/TLS Tab */}
+      {activeTab === "tls" && (
+        <div className="space-y-6">
+          {summary.tls_certificates && summary.tls_certificates.length > 0 ? (
+            summary.tls_certificates.map((tls, idx) => (
+              <Card key={`${tls.host}-${tls.port}-${idx}`}>
+                <CardHeader>
+                  <CardTitle>
+                    Certificate Details • {tls.host}:{tls.port}
+                  </CardTitle>
+                  <CardDescription>Advanced SSL/TLS analysis results</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {tls.error && (
+                    <div className="p-3 rounded-lg bg-destructive/10 text-sm text-destructive">
+                      {tls.error}
+                    </div>
+                  )}
+
+                  {tls.certificate_chain.length === 0 ? (
+                    <EmptyState
+                      icon="🔒"
+                      title="No certificate data"
+                      description="No TLS certificate details were collected for this scan."
+                    />
+                  ) : (
+                    <div className="space-y-4">
+                      {tls.certificate_chain.map((cert, certIdx) => (
+                        <div
+                          key={`${cert.serial_number}-${certIdx}`}
+                          className="border border-border rounded-lg p-4 bg-muted/30"
+                        >
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-2">
+                              <Badge variant={certIdx === 0 ? "success" : "secondary"}>
+                                {certIdx === 0 ? "Leaf" : `Chain ${certIdx + 1}`}
+                              </Badge>
+                              <span className="text-sm font-medium">Serial: {cert.serial_number}</span>
+                            </div>
+                            <Badge variant="info">{cert.signature_algorithm}</Badge>
+                          </div>
+                          <div className="grid gap-3 md:grid-cols-2 text-sm">
+                            <div>
+                              <div className="text-muted-foreground">Subject</div>
+                              <div className="font-mono text-xs break-all">{cert.subject}</div>
+                            </div>
+                            <div>
+                              <div className="text-muted-foreground">Issuer</div>
+                              <div className="font-mono text-xs break-all">{cert.issuer}</div>
+                            </div>
+                            <div>
+                              <div className="text-muted-foreground">Valid From</div>
+                              <div>{new Date(cert.not_before).toLocaleString()}</div>
+                            </div>
+                            <div>
+                              <div className="text-muted-foreground">Valid Until</div>
+                              <div>{new Date(cert.not_after).toLocaleString()}</div>
+                            </div>
+                            <div>
+                              <div className="text-muted-foreground">Common Name</div>
+                              <div>{cert.common_name || "—"}</div>
+                            </div>
+                            <div>
+                              <div className="text-muted-foreground">Organization</div>
+                              <div>{cert.organization || "—"}</div>
+                            </div>
+                            <div>
+                              <div className="text-muted-foreground">Public Key</div>
+                              <div>
+                                {cert.public_key_type ? cert.public_key_type.toUpperCase() : "Unknown"}
+                                {cert.public_key_bits ? ` • ${cert.public_key_bits} bits` : ""}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-muted-foreground">SAN Domains</div>
+                              <div className="flex flex-wrap gap-2">
+                                {cert.san_domains.length > 0 ? (
+                                  cert.san_domains.slice(0, 6).map((san) => (
+                                    <Badge key={san} variant="secondary" className="text-xs">
+                                      {san}
+                                    </Badge>
+                                  ))
+                                ) : (
+                                  <span className="text-muted-foreground">—</span>
+                                )}
+                                {cert.san_domains.length > 6 && (
+                                  <Badge variant="secondary" className="text-xs">
+                                    +{cert.san_domains.length - 6} more
+                                  </Badge>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            ))
+          ) : (
+            <Card>
+              <CardContent className="py-8">
+                <EmptyState
+                  icon="🔒"
+                  title="No TLS data captured"
+                  description="SSL/TLS analysis was not performed for this scan."
+                />
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      )}
+
       {/* All Findings Tab */}
       {activeTab === "findings" && (
         <Card>
@@ -1055,4 +1192,3 @@ export default function SecurityScanDetailPage() {
     </div>
   );
 }
-

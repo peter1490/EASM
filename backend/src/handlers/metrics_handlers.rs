@@ -5,12 +5,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{
-    auth::context::UserContext,
-    error::ApiError,
-    models::{FindingFilter, ScanStatus},
-    AppState,
-};
+use crate::{auth::context::UserContext, error::ApiError, AppState};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DashboardMetrics {
@@ -43,10 +38,12 @@ pub async fn get_metrics(
 
     // Get counts from repositories
     let active_scans = app_state
-        .scan_repository
-        .list_by_status(company_id, Some(ScanStatus::Running))
+        .security_scan_repository
+        .count_by_status(company_id)
         .await
-        .map(|scans| scans.len() as i64)
+        .map(|counts| {
+            counts.get("running").unwrap_or(&0) + counts.get("pending").unwrap_or(&0)
+        })
         .unwrap_or(0);
 
     let total_assets = app_state
@@ -56,10 +53,9 @@ pub async fn get_metrics(
         .unwrap_or(0);
 
     let total_findings = app_state
-        .finding_repository
-        .filter(&FindingFilter::default(), company_id)
+        .security_finding_repository
+        .count_active(company_id)
         .await
-        .map(|response| response.total_count)
         .unwrap_or(0);
 
     // Construct response

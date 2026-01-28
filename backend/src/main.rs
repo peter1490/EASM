@@ -89,10 +89,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/admin/settings",
             patch(handlers::settings_handlers::update_settings),
         )
-        // Scan endpoints
-        .route("/api/scans", post(handlers::scan_handlers::create_scan))
-        .route("/api/scans", get(handlers::scan_handlers::list_scans))
-        .route("/api/scans/:id", get(handlers::scan_handlers::get_scan))
         // Asset endpoints
         .route("/api/assets", get(handlers::asset_handlers::list_assets))
         .route(
@@ -103,6 +99,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/assets/:id/path",
             get(handlers::asset_handlers::get_asset_path),
+        )
+        .route(
+            "/api/assets/:id/evolution",
+            get(handlers::asset_handlers::get_asset_evolution),
         )
         .route(
             "/api/assets/:id/importance",
@@ -144,28 +144,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/discovery/runs/:id",
             get(handlers::discovery_handlers::get_discovery_run),
         )
-        // Evidence endpoints
-        .route(
-            "/api/scans/:scan_id/evidence",
-            post(handlers::evidence_handlers::upload_evidence),
-        )
-        .route(
-            "/api/scans/:scan_id/evidence",
-            get(handlers::evidence_handlers::list_evidence_by_scan),
-        )
-        .route(
-            "/api/evidence/:id",
-            get(handlers::evidence_handlers::get_evidence),
-        )
-        .route(
-            "/api/evidence/:id/download",
-            get(handlers::evidence_handlers::download_evidence),
-        )
-        // Static file serving for evidence files
-        .route(
-            "/api/static/evidence/*file",
-            get(handlers::serve_evidence_file),
-        )
         .route(
             "/api/static/health",
             get(handlers::static_files_health_check),
@@ -190,15 +168,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/risk/high-risk-assets",
             get(handlers::risk_handlers::get_high_risk_assets),
-        )
-        // Port drift detection endpoints
-        .route(
-            "/api/scans/:id/drift/detect",
-            post(handlers::drift_handlers::detect_port_drift),
-        )
-        .route(
-            "/api/scans/:id/drift/findings",
-            get(handlers::drift_handlers::get_drift_findings),
         )
         // Search endpoints
         .route(

@@ -12,7 +12,7 @@
 
 use chrono::Utc;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,11 +25,13 @@ use crate::{
         Asset, AssetType, DetectedService, DnsIssue, DnsSecurityResult, FindingSeverity,
         MissingSecurityHeader, ProxyDetectionResult, RiskFactor, ScanResultSummary,
         SecurityFinding, SecurityFindingCreate, SecurityHeadersResult, SecurityScan,
-        SecurityScanCreate, SecurityScanType, VulnerabilityResult,
+        SecurityScanCreate, SecurityScanType, TlsCertificateDetails, TlsCertificateInfo,
+        VulnerabilityResult,
     },
     repositories::{AssetRepository, SecurityFindingRepository, SecurityScanRepository},
     services::{
         external::{DnsResolver, EuvdClient, ExternalServicesManager, HttpProber, TlsAnalyzer},
+        risk_service::RiskService,
         task_manager::{TaskContext, TaskManager, TaskType},
     },
     utils::{
@@ -46,6 +48,7 @@ pub struct SecurityScanService {
     asset_repo: Arc<dyn AssetRepository + Send + Sync>,
     scan_repo: Arc<dyn SecurityScanRepository + Send + Sync>,
     finding_repo: Arc<dyn SecurityFindingRepository + Send + Sync>,
+    risk_service: Arc<RiskService>,
 
     // External services
     external_services: Arc<ExternalServicesManager>,
@@ -64,6 +67,7 @@ impl SecurityScanService {
         asset_repo: Arc<dyn AssetRepository + Send + Sync>,
         scan_repo: Arc<dyn SecurityScanRepository + Send + Sync>,
         finding_repo: Arc<dyn SecurityFindingRepository + Send + Sync>,
+        risk_service: Arc<RiskService>,
         external_services: Arc<ExternalServicesManager>,
         dns_resolver: Arc<DnsResolver>,
         http_prober: Arc<HttpProber>,
@@ -78,6 +82,7 @@ impl SecurityScanService {
             asset_repo,
             scan_repo,
             finding_repo,
+            risk_service,
             external_services,
             dns_resolver,
             http_prober,
@@ -262,6 +267,7 @@ impl SecurityScanService {
         tracing::info!("Starting security scan {}", scan_id);
 
         // Mark scan as running
+        let scan_started_at = Utc::now();
         self.scan_repo.start(&scan_id, company_id).await?;
         ctx.update_progress(0.05, Some("Scan started".to_string()))
             .await?;
@@ -284,17 +290,47 @@ impl SecurityScanService {
 
         // Execute appropriate scan based on asset type and scan type
         let result = self
-            .execute_scan_internal(&ctx, scan_id, &asset, scan_type, company_id)
+            .execute_scan_internal(&ctx, scan_id, &asset, &scan_type, company_id)
             .await;
 
         // Finalize scan
         match result {
-            Ok(summary) => {
+            Ok(mut summary) => {
+                if let Err(e) = self
+                    .resolve_stale_findings(
+                        scan_id,
+                        asset.id,
+                        &scan_type,
+                        scan_started_at,
+                        company_id,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to resolve stale findings for asset {}: {}",
+                        asset.id,
+                        e
+                    );
+                }
+
                 let summary_json = serde_json::to_value(&summary).unwrap_or(json!({}));
                 self.scan_repo
                     .complete(&scan_id, &summary_json, company_id)
                     .await?;
                 tracing::info!("Security scan {} completed successfully", scan_id);
+
+                if let Err(e) = self
+                    .risk_service
+                    .calculate_asset_risk(company_id, asset.id)
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to recalculate risk for asset {} after scan {}: {}",
+                        asset.id,
+                        scan_id,
+                        e
+                    );
+                }
             }
             Err(e) => {
                 self.scan_repo
@@ -313,7 +349,7 @@ impl SecurityScanService {
         ctx: &TaskContext,
         scan_id: Uuid,
         asset: &Asset,
-        scan_type: SecurityScanType,
+        scan_type: &SecurityScanType,
         company_id: Uuid,
     ) -> Result<ScanResultSummary, ApiError> {
         let mut summary = ScanResultSummary::default();
@@ -346,7 +382,14 @@ impl SecurityScanService {
                 .await?;
             }
             AssetType::Certificate => {
-                self.scan_certificate(ctx, scan_id, asset, &mut summary, company_id)
+                self.scan_certificate(
+                    ctx,
+                    scan_id,
+                    asset,
+                    &mut summary,
+                    &mut risk_factors,
+                    company_id,
+                )
                     .await?;
             }
             _ => {
@@ -479,9 +522,12 @@ impl SecurityScanService {
         ) {
             ctx.update_progress(0.7, Some("Analyzing TLS".to_string()))
                 .await?;
-            summary.tls_version = self
+            if let Some(tls_details) = self
                 .analyze_tls_with_findings(scan_id, asset, domain, 443, risk_factors, company_id)
-                .await?;
+                .await?
+            {
+                summary.tls_certificates = Some(vec![tls_details]);
+            }
         }
 
         // Step 4: Threat intelligence
@@ -576,7 +622,7 @@ impl SecurityScanService {
             let ports = summary.open_ports.as_ref().cloned().unwrap_or_default();
             for port in &ports {
                 if matches!(port, 443 | 8443) {
-                    summary.tls_version = self
+                    if let Some(tls_details) = self
                         .analyze_tls_with_findings(
                             scan_id,
                             asset,
@@ -585,7 +631,10 @@ impl SecurityScanService {
                             risk_factors,
                             company_id,
                         )
-                        .await?;
+                        .await?
+                    {
+                        summary.tls_certificates = Some(vec![tls_details]);
+                    }
                     break;
                 }
             }
@@ -614,10 +663,52 @@ impl SecurityScanService {
         _ctx: &TaskContext,
         scan_id: Uuid,
         asset: &Asset,
-        _summary: &mut ScanResultSummary,
+        summary: &mut ScanResultSummary,
+        risk_factors: &mut Vec<RiskFactor>,
         company_id: Uuid,
     ) -> Result<(), ApiError> {
-        // Check certificate metadata for issues
+        // Attempt live TLS analysis using a hostname from metadata if available
+        let mut tls_details = None;
+        if let Some(metadata) = asset.metadata.as_object() {
+            let mut host_candidates: Vec<String> = Vec::new();
+
+            if let Some(sans) = metadata.get("san_domains").and_then(|v| v.as_array()) {
+                for entry in sans {
+                    if let Some(domain) = entry.as_str() {
+                        host_candidates.push(domain.to_string());
+                    }
+                }
+            }
+
+            if let Some(common_name) = metadata.get("common_name").and_then(|v| v.as_str()) {
+                host_candidates.push(common_name.to_string());
+            }
+
+            if host_candidates.is_empty() {
+                if let Some(subject) = metadata.get("subject").and_then(|v| v.as_str()) {
+                    if let Some(cn) = subject
+                        .split(',')
+                        .find(|part| part.trim().starts_with("CN="))
+                        .map(|cn| cn.trim().trim_start_matches("CN=").to_string())
+                    {
+                        host_candidates.push(cn);
+                    }
+                }
+            }
+
+            if let Some(host) = host_candidates.first() {
+                tls_details = self
+                    .analyze_tls_with_findings(scan_id, asset, host, 443, risk_factors, company_id)
+                    .await?;
+            }
+        }
+
+        if let Some(details) = tls_details {
+            summary.tls_certificates = Some(vec![details]);
+            return Ok(());
+        }
+
+        // Fallback: Check certificate metadata for issues
         if let Some(metadata) = asset.metadata.as_object() {
             // Try to get domain from certificate subject for SSL Labs URL
             let domain = metadata
@@ -1541,115 +1632,37 @@ impl SecurityScanService {
         port: u16,
         risk_factors: &mut Vec<RiskFactor>,
         company_id: Uuid,
-    ) -> Result<Option<String>, ApiError> {
-        match get_tls_certificate_info(host, port).await {
-            Ok(cert_info) => {
-                // Build SSL Labs URL for certificate analysis (only for domains, not IPs)
-                let ssl_labs_url = if host.parse::<IpAddr>().is_err() {
-                    Some(format!(
-                        "https://www.ssllabs.com/ssltest/analyze.html?d={}",
-                        host
-                    ))
-                } else {
-                    None
-                };
+    ) -> Result<Option<TlsCertificateDetails>, ApiError> {
+        let mut tls_details = self.build_tls_details_from_analyzer(host, port).await;
+        if tls_details.is_none() {
+            tls_details = self.build_tls_details_from_fallback(host, port).await;
+        }
 
-                // Check certificate expiration using the not_after string field
-                if let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(&cert_info.not_after) {
-                    let now = Utc::now();
-                    let expiry_utc = expiry.with_timezone(&Utc);
-                    let days_until_expiry = (expiry_utc - now).num_days();
+        if tls_details.is_none() {
+            return Ok(None);
+        }
 
-                    if days_until_expiry < 0 {
-                        let mut data = json!({ "expiry_date": cert_info.not_after, "host": host });
-                        if let Some(url) = &ssl_labs_url {
-                            data["source_url"] = json!(url);
-                            data["source_name"] = json!("SSL Labs");
-                        }
-                        self.create_finding(
-                            scan_id,
-                            asset.id,
-                            "expired_certificate",
-                            FindingSeverity::Critical,
-                            "Expired SSL/TLS Certificate",
-                            Some(&format!(
-                                "The SSL/TLS certificate expired {} days ago",
-                                -days_until_expiry
-                            )),
-                            data,
-                            company_id,
-                        )
-                        .await?;
+        let details = tls_details.as_mut().unwrap();
 
-                        risk_factors.push(RiskFactor {
-                            factor_type: "certificate".to_string(),
-                            name: "Expired certificate".to_string(),
-                            severity: "critical".to_string(),
-                            description: format!(
-                                "Certificate expired {} days ago",
-                                -days_until_expiry
-                            ),
-                            impact_score: 0.95,
-                            data: json!({ "days_expired": -days_until_expiry }),
-                        });
-                    } else if days_until_expiry < 30 {
-                        let mut data = json!({ "expiry_date": cert_info.not_after, "host": host });
-                        if let Some(url) = &ssl_labs_url {
-                            data["source_url"] = json!(url);
-                            data["source_name"] = json!("SSL Labs");
-                        }
-                        self.create_finding(
-                            scan_id,
-                            asset.id,
-                            "certificate_expiring_soon",
-                            FindingSeverity::High,
-                            "Certificate Expiring Soon",
-                            Some(&format!(
-                                "Certificate expires in {} days",
-                                days_until_expiry
-                            )),
-                            data,
-                            company_id,
-                        )
-                        .await?;
+        // Build SSL Labs URL for certificate analysis (only for domains, not IPs)
+        let ssl_labs_url = if host.parse::<IpAddr>().is_err() {
+            Some(format!(
+                "https://www.ssllabs.com/ssltest/analyze.html?d={}",
+                host
+            ))
+        } else {
+            None
+        };
 
-                        risk_factors.push(RiskFactor {
-                            factor_type: "certificate".to_string(),
-                            name: "Certificate expiring soon".to_string(),
-                            severity: "high".to_string(),
-                            description: format!(
-                                "Certificate expires in {} days",
-                                days_until_expiry
-                            ),
-                            impact_score: 0.6,
-                            data: json!({ "days_remaining": days_until_expiry }),
-                        });
-                    } else if days_until_expiry < 90 {
-                        let mut data = json!({ "expiry_date": cert_info.not_after, "host": host });
-                        if let Some(url) = &ssl_labs_url {
-                            data["source_url"] = json!(url);
-                            data["source_name"] = json!("SSL Labs");
-                        }
-                        self.create_finding(
-                            scan_id,
-                            asset.id,
-                            "certificate_expiring_soon",
-                            FindingSeverity::Medium,
-                            "Certificate Expiring Within 90 Days",
-                            Some(&format!(
-                                "Certificate expires in {} days",
-                                days_until_expiry
-                            )),
-                            data,
-                            company_id,
-                        )
-                        .await?;
-                    }
-                }
+        if let Some(cert_info) = details.certificate_chain.first() {
+            // Check certificate validity window
+            if let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(&cert_info.not_after) {
+                let now = Utc::now();
+                let expiry_utc = expiry.with_timezone(&Utc);
+                let days_until_expiry = (expiry_utc - now).num_days();
 
-                // Check for self-signed certificate
-                if cert_info.subject == cert_info.issuer {
-                    let mut data = json!({ "subject": cert_info.subject, "issuer": cert_info.issuer, "host": host });
+                if days_until_expiry < 0 {
+                    let mut data = json!({ "expiry_date": cert_info.not_after, "host": host, "port": port });
                     if let Some(url) = &ssl_labs_url {
                         data["source_url"] = json!(url);
                         data["source_name"] = json!("SSL Labs");
@@ -1657,10 +1670,13 @@ impl SecurityScanService {
                     self.create_finding(
                         scan_id,
                         asset.id,
-                        "self_signed_certificate",
-                        FindingSeverity::Medium,
-                        "Self-Signed Certificate",
-                        Some("Certificate is self-signed and may not be trusted by browsers"),
+                        "expired_certificate",
+                        FindingSeverity::Critical,
+                        "Expired SSL/TLS Certificate",
+                        Some(&format!(
+                            "The SSL/TLS certificate expired {} days ago",
+                            -days_until_expiry
+                        )),
                         data,
                         company_id,
                     )
@@ -1668,22 +1684,337 @@ impl SecurityScanService {
 
                     risk_factors.push(RiskFactor {
                         factor_type: "certificate".to_string(),
-                        name: "Self-signed certificate".to_string(),
-                        severity: "medium".to_string(),
-                        description: "Certificate is self-signed".to_string(),
-                        impact_score: 0.4,
-                        data: json!({}),
+                        name: "Expired certificate".to_string(),
+                        severity: "critical".to_string(),
+                        description: format!(
+                            "Certificate expired {} days ago",
+                            -days_until_expiry
+                        ),
+                        impact_score: 0.95,
+                        data: json!({ "days_expired": -days_until_expiry }),
                     });
-                }
+                } else if days_until_expiry < 30 {
+                    let mut data = json!({ "expiry_date": cert_info.not_after, "host": host, "port": port });
+                    if let Some(url) = &ssl_labs_url {
+                        data["source_url"] = json!(url);
+                        data["source_name"] = json!("SSL Labs");
+                    }
+                    self.create_finding(
+                        scan_id,
+                        asset.id,
+                        "certificate_expiring_soon",
+                        FindingSeverity::High,
+                        "Certificate Expiring Soon",
+                        Some(&format!(
+                            "Certificate expires in {} days",
+                            days_until_expiry
+                        )),
+                        data,
+                        company_id,
+                    )
+                    .await?;
 
-                // Return the issuer as a proxy for TLS info
-                Ok(Some(cert_info.issuer))
+                    risk_factors.push(RiskFactor {
+                        factor_type: "certificate".to_string(),
+                        name: "Certificate expiring soon".to_string(),
+                        severity: "high".to_string(),
+                        description: format!(
+                            "Certificate expires in {} days",
+                            days_until_expiry
+                        ),
+                        impact_score: 0.6,
+                        data: json!({ "days_remaining": days_until_expiry }),
+                    });
+                } else if days_until_expiry < 90 {
+                    let mut data = json!({ "expiry_date": cert_info.not_after, "host": host, "port": port });
+                    if let Some(url) = &ssl_labs_url {
+                        data["source_url"] = json!(url);
+                        data["source_name"] = json!("SSL Labs");
+                    }
+                    self.create_finding(
+                        scan_id,
+                        asset.id,
+                        "certificate_expiring_soon",
+                        FindingSeverity::Medium,
+                        "Certificate Expiring Within 90 Days",
+                        Some(&format!(
+                            "Certificate expires in {} days",
+                            days_until_expiry
+                        )),
+                        data,
+                        company_id,
+                    )
+                    .await?;
+                }
             }
-            Err(e) => {
-                tracing::debug!("TLS analysis failed for {}:{}: {}", host, port, e);
-                Ok(None)
+
+            if let Ok(not_before) = chrono::DateTime::parse_from_rfc3339(&cert_info.not_before) {
+                if not_before.with_timezone(&Utc) > Utc::now() {
+                    self.create_finding(
+                        scan_id,
+                        asset.id,
+                        "certificate_not_yet_valid",
+                        FindingSeverity::Medium,
+                        "Certificate Not Yet Valid",
+                        Some("Certificate validity period starts in the future"),
+                        json!({
+                            "not_before": cert_info.not_before,
+                            "host": host,
+                            "port": port,
+                        }),
+                        company_id,
+                    )
+                    .await?;
+                }
+            }
+
+            // Check for self-signed certificate
+            if cert_info.subject == cert_info.issuer {
+                let mut data =
+                    json!({ "subject": cert_info.subject, "issuer": cert_info.issuer, "host": host, "port": port });
+                if let Some(url) = &ssl_labs_url {
+                    data["source_url"] = json!(url);
+                    data["source_name"] = json!("SSL Labs");
+                }
+                self.create_finding(
+                    scan_id,
+                    asset.id,
+                    "self_signed_certificate",
+                    FindingSeverity::Medium,
+                    "Self-Signed Certificate",
+                    Some("Certificate is self-signed and may not be trusted by browsers"),
+                    data,
+                    company_id,
+                )
+                .await?;
+
+                risk_factors.push(RiskFactor {
+                    factor_type: "certificate".to_string(),
+                    name: "Self-signed certificate".to_string(),
+                    severity: "medium".to_string(),
+                    description: "Certificate is self-signed".to_string(),
+                    impact_score: 0.4,
+                    data: json!({}),
+                });
+            }
+
+            // Missing SAN (modern browsers require SAN)
+            if cert_info.san_domains.is_empty() {
+                self.create_finding(
+                    scan_id,
+                    asset.id,
+                    "certificate_missing_san",
+                    FindingSeverity::Low,
+                    "Certificate Missing SAN",
+                    Some("Certificate does not include Subject Alternative Names"),
+                    json!({
+                        "host": host,
+                        "port": port,
+                    }),
+                    company_id,
+                )
+                .await?;
+            }
+
+            // Hostname mismatch (only for domain names)
+            if host.parse::<IpAddr>().is_err()
+                && !self.hostname_matches_certificate(host, cert_info)
+            {
+                self.create_finding(
+                    scan_id,
+                    asset.id,
+                    "certificate_hostname_mismatch",
+                    FindingSeverity::High,
+                    "Certificate Hostname Mismatch",
+                    Some("Certificate does not match the requested hostname"),
+                    json!({
+                        "host": host,
+                        "port": port,
+                        "common_name": cert_info.common_name,
+                        "san_domains": cert_info.san_domains,
+                    }),
+                    company_id,
+                )
+                .await?;
+            }
+
+            // Weak signature algorithms
+            let signature = cert_info.signature_algorithm.to_lowercase();
+            if signature.contains("sha1") || signature.contains("md5") {
+                self.create_finding(
+                    scan_id,
+                    asset.id,
+                    "weak_signature_algorithm",
+                    FindingSeverity::High,
+                    "Weak Certificate Signature Algorithm",
+                    Some("Certificate uses a weak or deprecated signature algorithm"),
+                    json!({
+                        "signature_algorithm": cert_info.signature_algorithm,
+                        "host": host,
+                        "port": port,
+                    }),
+                    company_id,
+                )
+                .await?;
+            }
+
+            // Weak key strength
+            if let Some(bits) = cert_info.public_key_bits {
+                let weak_key = match cert_info.public_key_type.as_deref() {
+                    Some("rsa") => bits < 2048,
+                    Some("ecdsa") => bits < 256,
+                    _ => bits < 2048,
+                };
+
+                if weak_key {
+                    self.create_finding(
+                        scan_id,
+                        asset.id,
+                        "weak_key_strength",
+                        FindingSeverity::High,
+                        "Weak Certificate Key Strength",
+                        Some("Certificate uses a weak public key length"),
+                        json!({
+                            "key_bits": bits,
+                            "key_type": cert_info.public_key_type,
+                            "host": host,
+                            "port": port,
+                        }),
+                        company_id,
+                    )
+                    .await?;
+                }
             }
         }
+
+        if details.certificate_chain.len() <= 1 {
+            if let Some(cert_info) = details.certificate_chain.first() {
+                if cert_info.subject != cert_info.issuer {
+                    self.create_finding(
+                        scan_id,
+                        asset.id,
+                        "certificate_chain_incomplete",
+                        FindingSeverity::Medium,
+                        "Incomplete Certificate Chain",
+                        Some("Certificate chain is incomplete or missing intermediates"),
+                        json!({
+                            "host": host,
+                            "port": port,
+                        }),
+                        company_id,
+                    )
+                    .await?;
+                }
+            }
+        }
+
+        Ok(tls_details)
+    }
+
+    async fn build_tls_details_from_analyzer(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Option<TlsCertificateDetails> {
+        let result = self.tls_analyzer.get_tls_certificate_info(host, port).await.ok()?;
+
+        let chain: Vec<TlsCertificateInfo> = result
+            .certificate_chain
+            .iter()
+            .map(Self::map_tls_info)
+            .collect();
+
+        if chain.is_empty() {
+            return None;
+        }
+
+        Some(TlsCertificateDetails {
+            host: host.to_string(),
+            port,
+            certificate_chain: chain,
+            error: result.error,
+        })
+    }
+
+    async fn build_tls_details_from_fallback(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Option<TlsCertificateDetails> {
+        match get_tls_certificate_info(host, port).await {
+            Ok(cert_info) => Some(TlsCertificateDetails {
+                host: host.to_string(),
+                port,
+                certificate_chain: vec![Self::map_raw_tls_info(cert_info)],
+                error: None,
+            }),
+            Err(e) => Some(TlsCertificateDetails {
+                host: host.to_string(),
+                port,
+                certificate_chain: Vec::new(),
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+
+    fn map_tls_info(info: &crate::services::external::TlsInfo) -> TlsCertificateInfo {
+        TlsCertificateInfo {
+            subject: info.subject.clone(),
+            issuer: info.issuer.clone(),
+            organization: info.organization.clone(),
+            common_name: info.common_name.clone(),
+            san_domains: info.san_domains.clone(),
+            not_before: info.not_before.clone(),
+            not_after: info.not_after.clone(),
+            serial_number: info.serial_number.clone(),
+            signature_algorithm: info.signature_algorithm.clone(),
+            public_key_type: info.public_key_type.clone(),
+            public_key_bits: info.public_key_bits,
+        }
+    }
+
+    fn map_raw_tls_info(info: crate::utils::crypto::TlsCertificateInfo) -> TlsCertificateInfo {
+        TlsCertificateInfo {
+            subject: info.subject,
+            issuer: info.issuer,
+            organization: info.organization,
+            common_name: info.common_name,
+            san_domains: info.san_domains,
+            not_before: info.not_before,
+            not_after: info.not_after,
+            serial_number: info.serial_number,
+            signature_algorithm: info.signature_algorithm,
+            public_key_type: info.public_key_type,
+            public_key_bits: info.public_key_bits,
+        }
+    }
+
+    fn hostname_matches_certificate(&self, host: &str, cert: &TlsCertificateInfo) -> bool {
+        let normalized_host = host.trim_end_matches('.').to_lowercase();
+        let mut names = Vec::new();
+        names.extend(cert.san_domains.iter().cloned());
+        if let Some(cn) = &cert.common_name {
+            names.push(cn.clone());
+        }
+
+        for name in names {
+            if Self::hostname_matches_pattern(&normalized_host, &name) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn hostname_matches_pattern(host: &str, pattern: &str) -> bool {
+        let pattern = pattern.trim_end_matches('.').to_lowercase();
+        if pattern.starts_with("*.") {
+            let suffix = &pattern[2..];
+            return host.ends_with(suffix)
+                && host.split('.').count() > suffix.split('.').count();
+        }
+
+        host == pattern
     }
 
     // ========================================================================
@@ -2027,6 +2358,118 @@ impl SecurityScanService {
     // FINDING CREATION
     // ========================================================================
 
+    async fn resolve_stale_findings(
+        &self,
+        scan_id: Uuid,
+        asset_id: Uuid,
+        scan_type: &SecurityScanType,
+        scan_started_at: chrono::DateTime<Utc>,
+        company_id: Uuid,
+    ) -> Result<u64, ApiError> {
+        let types_checked = Self::finding_types_for_scan(scan_type);
+        if types_checked.is_empty() {
+            return Ok(0);
+        }
+
+        let type_set: HashSet<&str> = types_checked.into_iter().collect();
+
+        let current_findings = self.finding_repo.list_by_scan(&scan_id, company_id).await?;
+        let mut seen_keys: HashSet<(String, String)> = HashSet::new();
+        for finding in current_findings {
+            seen_keys.insert((finding.finding_type, finding.title));
+        }
+
+        let asset_findings = self
+            .finding_repo
+            .list_by_asset(&asset_id, 5000, company_id)
+            .await?;
+
+        let mut stale_ids = Vec::new();
+        for finding in asset_findings {
+            if !type_set.contains(finding.finding_type.as_str()) {
+                continue;
+            }
+            if finding.status == "resolved" || finding.status == "false_positive" {
+                continue;
+            }
+            if finding.last_seen_at >= scan_started_at {
+                continue;
+            }
+
+            if seen_keys.contains(&(finding.finding_type.clone(), finding.title.clone())) {
+                continue;
+            }
+
+            stale_ids.push(finding.id);
+        }
+
+        self.finding_repo
+            .resolve_by_ids(&stale_ids, company_id)
+            .await
+    }
+
+    fn finding_types_for_scan(scan_type: &SecurityScanType) -> Vec<&'static str> {
+        const PORT_TYPES: [&str; 6] = [
+            "open_port",
+            "sensitive_port",
+            "database_exposed",
+            "admin_port_exposed",
+            "known_cve",
+            "dns_resolution_failed",
+        ];
+        const HTTP_TYPES: [&str; 4] = [
+            "missing_security_header",
+            "https_not_enforced",
+            "server_version_exposed",
+            "no_waf_detected",
+        ];
+        const TLS_TYPES: [&str; 9] = [
+            "expired_certificate",
+            "certificate_expiring_soon",
+            "self_signed_certificate",
+            "certificate_not_yet_valid",
+            "weak_signature_algorithm",
+            "weak_key_strength",
+            "certificate_missing_san",
+            "certificate_hostname_mismatch",
+            "certificate_chain_incomplete",
+        ];
+        const DNS_TYPES: [&str; 4] = [
+            "missing_spf",
+            "missing_dmarc",
+            "weak_dmarc_policy",
+            "missing_caa",
+        ];
+        const THREAT_TYPES: [&str; 1] = ["reputation_issue"];
+
+        let mut types = Vec::new();
+        match scan_type {
+            SecurityScanType::Full => {
+                types.extend_from_slice(&PORT_TYPES);
+                types.extend_from_slice(&HTTP_TYPES);
+                types.extend_from_slice(&TLS_TYPES);
+                types.extend_from_slice(&DNS_TYPES);
+                types.extend_from_slice(&THREAT_TYPES);
+            }
+            SecurityScanType::PortScan => {
+                types.extend_from_slice(&PORT_TYPES);
+            }
+            SecurityScanType::HttpProbe => {
+                types.extend_from_slice(&HTTP_TYPES);
+                types.push("dns_resolution_failed");
+            }
+            SecurityScanType::TlsAnalysis => {
+                types.extend_from_slice(&TLS_TYPES);
+                types.push("dns_resolution_failed");
+            }
+            SecurityScanType::ThreatIntel => {
+                types.extend_from_slice(&THREAT_TYPES);
+            }
+        }
+
+        types
+    }
+
     async fn create_finding(
         &self,
         scan_id: Uuid,
@@ -2122,6 +2565,7 @@ impl Clone for SecurityScanService {
             asset_repo: Arc::clone(&self.asset_repo),
             scan_repo: Arc::clone(&self.scan_repo),
             finding_repo: Arc::clone(&self.finding_repo),
+            risk_service: Arc::clone(&self.risk_service),
             external_services: Arc::clone(&self.external_services),
             dns_resolver: Arc::clone(&self.dns_resolver),
             http_prober: Arc::clone(&self.http_prober),
@@ -2142,7 +2586,13 @@ fn get_remediation(finding_type: &str) -> Option<String> {
         "weak_tls_version" => Some("Disable support for TLS versions older than TLS 1.2. Update server configuration to only support TLS 1.2 and TLS 1.3.".to_string()),
         "expired_certificate" => Some("Renew the SSL/TLS certificate immediately. Consider using automated certificate management with Let's Encrypt or similar services.".to_string()),
         "certificate_expiring_soon" => Some("Renew the SSL/TLS certificate before expiration. Set up automated renewal if possible.".to_string()),
+        "certificate_not_yet_valid" => Some("Adjust system time or reissue the certificate so its validity period starts immediately.".to_string()),
         "self_signed_certificate" => Some("Replace self-signed certificate with a certificate from a trusted Certificate Authority.".to_string()),
+        "weak_signature_algorithm" => Some("Reissue the certificate using a modern signature algorithm (SHA-256 or stronger).".to_string()),
+        "weak_key_strength" => Some("Reissue the certificate with a stronger key (RSA 2048+ or ECDSA P-256+).".to_string()),
+        "certificate_missing_san" => Some("Reissue the certificate with Subject Alternative Names (SAN) matching the hostnames.".to_string()),
+        "certificate_hostname_mismatch" => Some("Reissue or configure the certificate so it matches the requested hostname.".to_string()),
+        "certificate_chain_incomplete" => Some("Install the full certificate chain, including intermediate certificates.".to_string()),
         "missing_security_header" => Some("Add the missing security header to your web server configuration.".to_string()),
         "https_not_enforced" => Some("Configure HTTP to HTTPS redirect. Add Strict-Transport-Security header.".to_string()),
         "reputation_issue" => Some("Investigate the cause of the reputation issue. Check for malware, spam, or other malicious activity.".to_string()),

@@ -226,6 +226,31 @@ pub struct Seed {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct AssetRiskHistoryEntry {
+    pub risk_score: f64,
+    pub risk_level: String,
+    pub factors: Value,
+    pub calculated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AssetScanHistoryEntry {
+    pub id: Uuid,
+    pub scan_type: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub result_summary: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AssetEvolutionResponse {
+    pub risk_history: Vec<AssetRiskHistoryEntry>,
+    pub scan_history: Vec<AssetScanHistoryEntry>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AssetCreate {
     pub asset_type: AssetType,

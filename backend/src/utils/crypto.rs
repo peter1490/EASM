@@ -18,6 +18,9 @@ pub struct TlsCertificateInfo {
     pub organization: Option<String>,
     pub common_name: Option<String>,
     pub san_domains: Vec<String>,
+    pub signature_algorithm: String,
+    pub public_key_type: Option<String>,
+    pub public_key_bits: Option<u32>,
 }
 
 /// Extract organization name from certificate subject or issuer
@@ -54,11 +57,24 @@ fn extract_common_name(name: &X509Name) -> Option<String> {
 
 /// Extract Subject Alternative Names from certificate extensions
 /// Note: This is a simplified implementation. Full SAN parsing would require additional dependencies.
-fn extract_san_domains(_cert: &X509Certificate) -> Vec<String> {
-    // TODO: Implement proper SAN parsing
-    // For now, return empty vector as this is complex to implement correctly
-    // with the current x509-parser version
-    Vec::new()
+fn extract_san_domains(cert: &X509Certificate) -> Vec<String> {
+    let mut san_domains = Vec::new();
+
+    if let Some(san_ext) = cert
+        .extensions()
+        .iter()
+        .find(|ext| ext.oid == x509_parser::oid_registry::OID_X509_EXT_SUBJECT_ALT_NAME)
+    {
+        if let Ok((_, san)) = SubjectAlternativeName::from_der(san_ext.value) {
+            for name in &san.general_names {
+                if let GeneralName::DNSName(dns_name) = name {
+                    san_domains.push(dns_name.to_string());
+                }
+            }
+        }
+    }
+
+    san_domains
 }
 
 /// Format X509Name as a readable string
@@ -221,6 +237,23 @@ pub async fn get_tls_certificate_info(
     // Extract Subject Alternative Names
     let san_domains = extract_san_domains(&cert);
 
+    let signature_algorithm = cert.signature_algorithm.algorithm.to_string();
+
+    let (public_key_type, public_key_bits) = {
+        let alg_oid = cert.public_key().algorithm.algorithm.to_id_string();
+        let key_type = match alg_oid.as_str() {
+            "1.2.840.113549.1.1.1" => Some("rsa".to_string()),
+            "1.2.840.10045.2.1" => Some("ecdsa".to_string()),
+            "1.3.101.112" => Some("ed25519".to_string()),
+            "1.3.101.113" => Some("ed448".to_string()),
+            _ => None,
+        };
+
+        let bit_len = cert.public_key().subject_public_key.data.len() as u32 * 8;
+        let key_bits = if bit_len > 0 { Some(bit_len) } else { None };
+        (key_type, key_bits)
+    };
+
     Ok(TlsCertificateInfo {
         subject,
         issuer,
@@ -230,6 +263,9 @@ pub async fn get_tls_certificate_info(
         organization,
         common_name,
         san_domains,
+        signature_algorithm,
+        public_key_type,
+        public_key_bits,
     })
 }
 

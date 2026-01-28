@@ -194,11 +194,19 @@ impl AppState {
             shared_settings.clone(),
         ));
 
+        // Create risk service (uses security findings for proper risk calculation)
+        let risk_service = Arc::new(RiskService::new(
+            asset_repository.clone(),
+            security_finding_repository.clone(),
+            db_pool.clone(),
+        ));
+
         // Create security scan service FIRST (discovery service depends on it)
         let security_scan_service = Arc::new(SecurityScanService::new(
             asset_repository.clone(),
             security_scan_repository.clone(),
             security_finding_repository.clone(),
+            risk_service.clone(),
             external_services.clone(),
             dns_resolver.clone(),
             http_analyzer.clone(), // HttpProber
@@ -260,13 +268,6 @@ impl AppState {
         let auth_service = Arc::new(AuthService::new(
             shared_settings.clone(),
             user_repository.clone(),
-        ));
-
-        // Create risk service (uses security findings for proper risk calculation)
-        let risk_service = Arc::new(RiskService::new(
-            asset_repository.clone(),
-            security_finding_repository.clone(),
-            db_pool.clone(),
         ));
 
         // Create tag service

@@ -7,8 +7,8 @@ import {
   getDiscoveryStatus, 
   getSecurityFindingsSummary,
   getRiskOverview,
-  listScans, 
-  type Scan, 
+  listSecurityScans,
+  type SecurityScan,
   type SystemMetrics,
   type DiscoveryStatus,
 } from "@/app/api";
@@ -23,7 +23,7 @@ import { useAuth } from "@/context/AuthContext";
 
 export default function Dashboard() {
   const { user } = useAuth();
-  const [scans, setScans] = useState<Scan[]>([]);
+  const [scans, setScans] = useState<SecurityScan[]>([]);
   const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
   const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus | null>(null);
   const [findingsSummary, setFindingsSummary] = useState<Record<string, number>>({});
@@ -35,7 +35,7 @@ export default function Dashboard() {
   async function loadData() {
     try {
       const [scansData, metricsData, discoveryData, findingsData, riskData] = await Promise.all([
-        listScans(),
+        listSecurityScans(25),
         getMetrics(),
         getDiscoveryStatus(),
         getSecurityFindingsSummary(),
@@ -70,6 +70,13 @@ export default function Dashboard() {
   const highRiskAssets = assetsByRisk?.high || 0;
 
   const recentScans = scans.slice(0, 5);
+
+  const getFindingsCount = (scan: SecurityScan) => {
+    const summary = scan.result_summary as Record<string, unknown> | undefined;
+    const bySeverity = summary?.findings_by_severity as Record<string, number> | undefined;
+    if (!bySeverity) return 0;
+    return Object.values(bySeverity).reduce((acc, val) => acc + (Number(val) || 0), 0);
+  };
 
   return (
     <div className="space-y-8 animate-fade-in">
@@ -313,7 +320,7 @@ export default function Dashboard() {
             <EmptyState
               icon="🔍"
               title="No scans yet"
-              description="Run discovery or create a scan to start discovering your attack surface"
+              description="Run discovery or start a security scan to assess your assets"
               action={
                 <Link href="/discovery">
                   <Button>Start Discovery</Button>
@@ -324,7 +331,8 @@ export default function Dashboard() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Target</TableHead>
+                  <TableHead>Asset</TableHead>
+                  <TableHead>Scan Type</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Findings</TableHead>
                   <TableHead>Created</TableHead>
@@ -334,7 +342,16 @@ export default function Dashboard() {
               <TableBody>
                 {recentScans.map((scan) => (
                   <TableRow key={scan.id}>
-                    <TableCell className="font-medium font-mono">{scan.target}</TableCell>
+                    <TableCell>
+                      <Link href={`/asset/${scan.asset_id}`}>
+                        <span className="font-medium font-mono hover:text-primary transition-colors">
+                          {scan.asset_id.slice(0, 8)}...
+                        </span>
+                      </Link>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="info">{scan.scan_type}</Badge>
+                    </TableCell>
                     <TableCell>
                       <Badge 
                         variant={
@@ -349,7 +366,7 @@ export default function Dashboard() {
                     <TableCell>
                       <div className="flex items-center gap-2">
                         <span className="font-mono font-medium">
-                          {scan.findings_count ?? scan.findings?.length ?? 0}
+                          {getFindingsCount(scan)}
                         </span>
                         <span className="text-xs text-muted-foreground">findings</span>
                       </div>
@@ -358,7 +375,7 @@ export default function Dashboard() {
                       {new Date(scan.created_at).toLocaleString()}
                     </TableCell>
                     <TableCell className="text-right">
-                      <Link href={`/scan/${scan.id}`}>
+                      <Link href={`/security/scans/${scan.id}`}>
                         <Button variant="ghost" size="sm">View Details →</Button>
                       </Link>
                     </TableCell>

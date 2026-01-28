@@ -3,7 +3,41 @@
 // Complete API client matching all backend endpoints
 // ============================================================================
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+const DEFAULT_API_BASE = "http://localhost:8000";
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+function isLoopbackHost(hostname: string) {
+  return LOOPBACK_HOSTS.has(hostname);
+}
+
+export function getApiBase() {
+  const envBase = process.env.NEXT_PUBLIC_API_BASE?.trim();
+  if (envBase) {
+    if (typeof window !== "undefined") {
+      try {
+        const envUrl = new URL(envBase);
+        const browserHost = window.location.hostname;
+        if (isLoopbackHost(envUrl.hostname) && !isLoopbackHost(browserHost)) {
+          const protocol = window.location.protocol === "https:" ? "https:" : envUrl.protocol;
+          const port = envUrl.port || "8000";
+          return `${protocol}//${browserHost}:${port}`;
+        }
+      } catch {
+        // Ignore invalid env base and fall through to return envBase as-is.
+      }
+    }
+    return envBase;
+  }
+
+  if (typeof window !== "undefined") {
+    const protocol = window.location.protocol === "https:" ? "https:" : "http:";
+    return `${protocol}//${window.location.hostname}:8000`;
+  }
+
+  return DEFAULT_API_BASE;
+}
+
+const API_BASE = getApiBase();
 const COMPANY_STORAGE_KEY = "easm_company_id";
 
 export function getStoredCompanyId(): string | null {
@@ -42,17 +76,6 @@ async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
 // COMMON TYPES
 // ============================================================================
 
-export type ScanOptions = {
-  enumerate_subdomains?: boolean;
-  resolve_dns?: boolean;
-  reverse_dns?: boolean;
-  scan_common_ports?: boolean;
-  http_probe?: boolean;
-  tls_info?: boolean;
-  common_ports?: number[];
-  max_hosts?: number;
-};
-
 export type Company = {
   id: string;
   name: string;
@@ -67,29 +90,6 @@ export type CompanyWithRole = Company & {
 
 export type CompanyListResponse = {
   companies: CompanyWithRole[];
-};
-
-// ============================================================================
-// LEGACY SCAN TYPES
-// ============================================================================
-
-export type Finding = {
-  id: string;
-  scan_id: string;
-  finding_type: string;
-  data: Record<string, unknown>;
-  created_at: string;
-};
-
-export type Scan = {
-  id: string;
-  target: string;
-  note?: string | null;
-  status: string;
-  created_at: string;
-  updated_at: string;
-  findings_count?: number;
-  findings: Finding[];
 };
 
 // ============================================================================
@@ -142,6 +142,28 @@ export type AssetListResponse = {
   offset: number;
 };
 
+export type AssetRiskHistoryEntry = {
+  risk_score: number;
+  risk_level: string;
+  factors: Record<string, unknown>;
+  calculated_at: string;
+};
+
+export type AssetScanHistoryEntry = {
+  id: string;
+  scan_type: string;
+  status: string;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  result_summary: Record<string, unknown>;
+};
+
+export type AssetEvolutionResponse = {
+  risk_history: AssetRiskHistoryEntry[];
+  scan_history: AssetScanHistoryEntry[];
+};
+
 // ============================================================================
 // DISCOVERY TYPES
 // ============================================================================
@@ -188,7 +210,7 @@ export type DiscoveryConfig = {
   skip_recent?: boolean;
   /** Recent threshold in hours */
   recent_hours?: number;
-  // Legacy frontend fields (mapped by backend)
+  // Compatibility fields (mapped by backend)
   confidence_threshold?: number;
   include_scan?: boolean;
 };
@@ -369,73 +391,6 @@ export type UpdateUserRequest = {
 };
 
 // ============================================================================
-// DRIFT TYPES
-// ============================================================================
-
-export type DriftFinding = {
-  id: string;
-  scan_id: string;
-  asset_id: string;
-  previous_scan_id?: string;
-  port: number;
-  protocol: string;
-  state: "new" | "missing" | "changed";
-  previous_state?: string;
-  current_state: string;
-  detected_at: string;
-};
-
-// ============================================================================
-// FINDING FILTER TYPES
-// ============================================================================
-
-export type FindingFilterParams = {
-  finding_types?: string[];
-  scan_ids?: string[];
-  created_after?: string;
-  created_before?: string;
-  search_text?: string;
-  sort_by?: "created_at" | "finding_type";
-  sort_direction?: "asc" | "desc";
-  limit?: number;
-  offset?: number;
-};
-
-export type FindingListResponse = {
-  findings: Finding[];
-  total_count: number;
-  limit: number;
-  offset: number;
-};
-
-// ============================================================================
-// LEGACY SCAN API
-// ============================================================================
-
-export async function createScan(target: string, note?: string, options?: ScanOptions): Promise<Scan> {
-  const res = await apiFetch(`${API_BASE}/api/scans`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ target, note, options }),
-    credentials: "include",
-  });
-  if (!res.ok) throw new Error(`Failed to create scan: ${res.status}`);
-  return res.json();
-}
-
-export async function listScans(): Promise<Scan[]> {
-  const res = await apiFetch(`${API_BASE}/api/scans`, { cache: "no-store", credentials: "include" });
-  if (!res.ok) throw new Error(`Failed to list scans: ${res.status}`);
-  return res.json();
-}
-
-export async function getScan(id: string): Promise<Scan> {
-  const res = await apiFetch(`${API_BASE}/api/scans/${id}`, { cache: "no-store", credentials: "include" });
-  if (!res.ok) throw new Error(`Failed to get scan: ${res.status}`);
-  return res.json();
-}
-
-// ============================================================================
 // SEED API
 // ============================================================================
 
@@ -537,6 +492,14 @@ export async function getAsset(id: string): Promise<Asset> {
 export async function getAssetPath(assetId: string): Promise<Asset[]> {
   const res = await apiFetch(`${API_BASE}/api/assets/${assetId}/path`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get asset path: ${res.status}`);
+  return res.json();
+}
+
+export async function getAssetEvolution(assetId: string, limit = 50): Promise<AssetEvolutionResponse> {
+  const params = new URLSearchParams();
+  params.append("limit", limit.toString());
+  const res = await apiFetch(`${API_BASE}/api/assets/${assetId}/evolution?${params.toString()}`, { cache: "no-store", credentials: "include" });
+  if (!res.ok) throw new Error(`Failed to get asset evolution: ${res.status}`);
   return res.json();
 }
 
@@ -761,60 +724,6 @@ export async function getHighRiskAssets(limit = 20): Promise<Asset[]> {
   
   const res = await apiFetch(`${API_BASE}/api/risk/high-risk-assets?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get high risk assets: ${res.status}`);
-  return res.json();
-}
-
-// ============================================================================
-// DRIFT API
-// ============================================================================
-
-export async function detectDrift(scanId: string): Promise<{ drift_count: number; findings_created: number }> {
-  const res = await apiFetch(`${API_BASE}/api/scans/${scanId}/drift/detect`, {
-    method: "POST",
-    credentials: "include",
-  });
-  if (!res.ok) throw new Error(`Failed to detect drift: ${res.status}`);
-  return res.json();
-}
-
-export async function getDriftFindings(scanId: string): Promise<Finding[]> {
-  const res = await apiFetch(`${API_BASE}/api/scans/${scanId}/drift/findings`, { cache: "no-store", credentials: "include" });
-  if (!res.ok) throw new Error(`Failed to get drift findings: ${res.status}`);
-  return res.json();
-}
-
-// ============================================================================
-// FINDINGS FILTER API
-// ============================================================================
-
-export async function filterFindings(params: FindingFilterParams): Promise<FindingListResponse> {
-  const queryParams = new URLSearchParams();
-  
-  if (params.finding_types && params.finding_types.length > 0) {
-    queryParams.append("finding_types", params.finding_types.join(","));
-  }
-  if (params.scan_ids && params.scan_ids.length > 0) {
-    queryParams.append("scan_ids", params.scan_ids.join(","));
-  }
-  if (params.created_after) queryParams.append("created_after", params.created_after);
-  if (params.created_before) queryParams.append("created_before", params.created_before);
-  if (params.search_text) queryParams.append("search_text", params.search_text);
-  if (params.sort_by) queryParams.append("sort_by", params.sort_by);
-  if (params.sort_direction) queryParams.append("sort_direction", params.sort_direction);
-  if (params.limit !== undefined) queryParams.append("limit", params.limit.toString());
-  if (params.offset !== undefined) queryParams.append("offset", params.offset.toString());
-  
-  const res = await apiFetch(`${API_BASE}/api/findings/filter?${queryParams.toString()}`, {
-    cache: "no-store",
-    credentials: "include",
-  });
-  if (!res.ok) throw new Error(`Failed to filter findings: ${res.status}`);
-  return res.json();
-}
-
-export async function getFindingTypes(): Promise<string[]> {
-  const res = await apiFetch(`${API_BASE}/api/findings/types`, { cache: "no-store", credentials: "include" });
-  if (!res.ok) throw new Error(`Failed to get finding types: ${res.status}`);
   return res.json();
 }
 
@@ -1134,33 +1043,6 @@ export async function updateSettings(payload: SettingsUpdatePayload, revealSecre
   });
   if (!res.ok) throw new Error(`Failed to update settings: ${res.status}`);
   return res.json();
-}
-
-// ============================================================================
-// EVIDENCE API
-// ============================================================================
-
-export async function uploadEvidence(scanId: string, file: File): Promise<{ id: string; filename: string }> {
-  const formData = new FormData();
-  formData.append("file", file);
-  
-  const res = await apiFetch(`${API_BASE}/api/scans/${scanId}/evidence`, {
-    method: "POST",
-    body: formData,
-    credentials: "include",
-  });
-  if (!res.ok) throw new Error(`Failed to upload evidence: ${res.status}`);
-  return res.json();
-}
-
-export async function listEvidenceByScan(scanId: string): Promise<Array<{ id: string; filename: string; content_type: string; file_size: number }>> {
-  const res = await apiFetch(`${API_BASE}/api/scans/${scanId}/evidence`, { cache: "no-store", credentials: "include" });
-  if (!res.ok) throw new Error(`Failed to list evidence: ${res.status}`);
-  return res.json();
-}
-
-export function getEvidenceDownloadUrl(evidenceId: string): string {
-  return `${API_BASE}/api/evidence/${evidenceId}/download`;
 }
 
 // ============================================================================

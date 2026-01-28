@@ -70,6 +70,8 @@ pub struct TlsInfo {
     pub not_after: String,
     pub serial_number: String,
     pub signature_algorithm: String,
+    pub public_key_type: Option<String>,
+    pub public_key_bits: Option<u32>,
 }
 
 /// TLS certificate analysis result
@@ -379,6 +381,21 @@ impl HttpAnalyzer {
         let serial_number = format!("{:x}", cert.serial);
         let signature_algorithm = cert.signature_algorithm.algorithm.to_string();
 
+        let (public_key_type, public_key_bits) = {
+            let alg_oid = cert.public_key().algorithm.algorithm.to_id_string();
+            let key_type = match alg_oid.as_str() {
+                "1.2.840.113549.1.1.1" => Some("rsa".to_string()),
+                "1.2.840.10045.2.1" => Some("ecdsa".to_string()),
+                "1.3.101.112" => Some("ed25519".to_string()),
+                "1.3.101.113" => Some("ed448".to_string()),
+                _ => None,
+            };
+
+            let bit_len = cert.public_key().subject_public_key.data.len() as u32 * 8;
+            let key_bits = if bit_len > 0 { Some(bit_len) } else { None };
+            (key_type, key_bits)
+        };
+
         Ok(TlsInfo {
             subject,
             issuer,
@@ -389,6 +406,8 @@ impl HttpAnalyzer {
             not_after,
             serial_number,
             signature_algorithm,
+            public_key_type,
+            public_key_bits,
         })
     }
 

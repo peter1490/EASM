@@ -7,12 +7,10 @@ import {
   getSecurityFindingsSummary,
   updateSecurityFinding,
   resolveSecurityFinding,
-  filterFindings,
   type SecurityScan,
   type SecurityFinding,
   type SecurityFindingFilter,
   type FindingStatus,
-  type Finding,
 } from "@/app/api";
 import Header from "@/components/Header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
@@ -24,10 +22,9 @@ import Input from "@/components/ui/Input";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import EmptyState from "@/components/ui/EmptyState";
 import Modal from "@/components/ui/Modal";
-import FindingRenderer from "@/components/FindingRenderer";
 import Link from "next/link";
 
-type TabType = "findings" | "scans" | "legacy";
+type TabType = "findings" | "scans";
 
 const SEVERITY_COLORS: Record<string, "error" | "warning" | "info" | "secondary" | "success"> = {
   critical: "error",
@@ -58,7 +55,6 @@ export default function SecurityPage() {
   const [activeTab, setActiveTab] = useState<TabType>("findings");
   const [scans, setScans] = useState<SecurityScan[]>([]);
   const [findings, setFindings] = useState<SecurityFinding[]>([]);
-  const [legacyFindings, setLegacyFindings] = useState<Finding[]>([]);
   const [summary, setSummary] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -72,12 +68,10 @@ export default function SecurityPage() {
   // Pagination
   const [offset, setOffset] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
-  const [legacyTotalCount, setLegacyTotalCount] = useState(0);
   const limit = 25;
   
   // Finding detail modal
   const [selectedFinding, setSelectedFinding] = useState<SecurityFinding | null>(null);
-  const [selectedLegacyFinding, setSelectedLegacyFinding] = useState<Finding | null>(null);
   const [updating, setUpdating] = useState(false);
   
   // Track if initial load has happened (ref to avoid re-renders)
@@ -105,12 +99,7 @@ export default function SecurityPage() {
       const findingsData = await listSecurityFindings(filter);
       setFindings(findingsData.findings);
       setTotalCount(findingsData.total_count);
-      
-      // Load legacy findings
-      const legacyData = await filterFindings({ limit, offset: 0 });
-      setLegacyFindings(legacyData.findings);
-      setLegacyTotalCount(legacyData.total_count);
-      
+
       setError(null);
       hasInitialLoadRef.current = true;
     } catch (err) {
@@ -182,14 +171,9 @@ export default function SecurityPage() {
     total: Object.values(summary).reduce((a, b) => a + b, 0),
   };
 
-  const formatFindingType = (type: string) => {
-    return type.replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase());
-  };
-
   const tabs = [
     { id: "findings" as TabType, label: "Security Findings", icon: "🛡️", badge: totalCount },
     { id: "scans" as TabType, label: "Scans", icon: "🔍", badge: scans.length },
-    { id: "legacy" as TabType, label: "Scan Findings", icon: "📋", badge: legacyTotalCount },
   ];
 
   return (
@@ -547,62 +531,6 @@ export default function SecurityPage() {
         </Card>
       )}
 
-      {/* Legacy Findings Tab */}
-      {activeTab === "legacy" && (
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <div>
-                <CardTitle>Scan Findings</CardTitle>
-                <CardDescription>
-                  Legacy findings from direct scans ({legacyTotalCount} total)
-                </CardDescription>
-              </div>
-              <Button variant="outline" onClick={() => loadData(true)} disabled={refreshing}>
-                {refreshing ? "Refreshing..." : "Refresh"}
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {loading ? (
-              <div className="flex justify-center py-12">
-                <LoadingSpinner size="lg" />
-              </div>
-            ) : legacyFindings.length === 0 ? (
-              <EmptyState
-                icon="📋"
-                title="No scan findings"
-                description="Run a scan to generate findings"
-              />
-            ) : (
-              <div className="space-y-4">
-                {legacyFindings.map((finding) => (
-                  <div
-                    key={finding.id}
-                    className="border border-border rounded-lg p-4 hover:bg-muted/30 transition-colors cursor-pointer"
-                    onClick={() => setSelectedLegacyFinding(finding)}
-                  >
-                    <div className="flex items-start justify-between mb-2">
-                      <div>
-                        <Badge variant="info" className="mb-2">
-                          {formatFindingType(finding.finding_type)}
-                        </Badge>
-                        <p className="text-xs text-muted-foreground">
-                          Scan ID: {finding.scan_id.slice(0, 8)}... • {new Date(finding.created_at).toLocaleString()}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="mt-3">
-                      <FindingRenderer findingType={finding.finding_type} data={finding.data} />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
       {/* Security Finding Detail Modal */}
       <Modal
         isOpen={!!selectedFinding}
@@ -763,49 +691,6 @@ export default function SecurityPage() {
         )}
       </Modal>
 
-      {/* Legacy Finding Detail Modal */}
-      <Modal
-        isOpen={!!selectedLegacyFinding}
-        onClose={() => setSelectedLegacyFinding(null)}
-        title="Scan Finding Details"
-        size="lg"
-      >
-        {selectedLegacyFinding && (
-          <div className="space-y-6">
-            <div>
-              <Badge variant="info" className="mb-3">
-                {formatFindingType(selectedLegacyFinding.finding_type)}
-              </Badge>
-              <p className="text-sm text-muted-foreground">
-                Scan ID: <code className="bg-muted px-1.5 rounded font-mono text-xs">{selectedLegacyFinding.scan_id}</code>
-              </p>
-              <p className="text-sm text-muted-foreground mt-1">
-                Created: {new Date(selectedLegacyFinding.created_at).toLocaleString()}
-              </p>
-            </div>
-
-            <div>
-              <h4 className="font-medium mb-2">Finding Data</h4>
-              <div className="bg-muted rounded-lg p-4">
-                <FindingRenderer findingType={selectedLegacyFinding.finding_type} data={selectedLegacyFinding.data} />
-              </div>
-            </div>
-
-            <div>
-              <h4 className="font-medium mb-2">Raw Data</h4>
-              <pre className="bg-muted p-4 rounded-lg overflow-auto text-xs max-h-64 font-mono">
-                {JSON.stringify(selectedLegacyFinding.data, null, 2)}
-              </pre>
-            </div>
-
-            <div className="flex gap-3 pt-4 border-t">
-              <Button variant="outline" onClick={() => setSelectedLegacyFinding(null)}>
-                Close
-              </Button>
-            </div>
-          </div>
-        )}
-      </Modal>
     </div>
   );
 }

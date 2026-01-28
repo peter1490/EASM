@@ -3,12 +3,13 @@
 import React, { useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
+import { getApiBase } from '@/app/api';
 import Button from '@/components/ui/Button';
 import Input from '@/components/ui/Input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card';
 
 export default function LoginPage() {
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000';
+  const apiBase = getApiBase();
   const searchParams = useSearchParams();
   const errorParam = searchParams.get('error');
   const [email, setEmail] = useState('');

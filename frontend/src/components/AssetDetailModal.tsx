@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Modal from "@/components/ui/Modal";
-import { Asset, getAsset, createScan, Scan, listScans, getAssetTags, AssetTagDetail } from "@/app/api";
+import { Asset, getAsset, triggerAssetScan, listSecurityScans, SecurityScan, getAssetTags, AssetTagDetail } from "@/app/api";
 import Button from "@/components/ui/Button";
 import Badge from "@/components/ui/Badge";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
@@ -20,7 +20,7 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
   const [asset, setAsset] = useState<Asset | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [relatedScans, setRelatedScans] = useState<Scan[]>([]);
+  const [relatedScans, setRelatedScans] = useState<SecurityScan[]>([]);
   const [assetTags, setAssetTags] = useState<AssetTagDetail[]>([]);
   const [scanningNow, setScanningNow] = useState(false);
   const [scanSuccess, setScanSuccess] = useState(false);
@@ -39,10 +39,8 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
         setAsset(data);
         setAssetTags(tags);
 
-        // Fetch related scans
-        const scans = await listScans();
-        const filtered = scans.filter(s => s.target.toLowerCase().trim() === data.value.toLowerCase().trim());
-        setRelatedScans(filtered);
+        const scans = await listSecurityScans(20, 0, data.id);
+        setRelatedScans(scans);
       } catch (e) {
         setError((e as Error).message);
       } finally {
@@ -61,13 +59,12 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
     setError(null);
 
     try {
-      await createScan(asset.value, `Scan from asset ${asset.value}`);
+      await triggerAssetScan(asset.id, "full", `Scan from asset ${asset.value}`);
       setScanSuccess(true);
 
       // Refresh related scans
-      const scans = await listScans();
-      const filtered = scans.filter(s => s.target.toLowerCase().trim() === asset.value.toLowerCase().trim());
-      setRelatedScans(filtered);
+      const scans = await listSecurityScans(20, 0, asset.id);
+      setRelatedScans(scans);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -228,7 +225,7 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
                   disabled={scanningNow}
                   variant="primary"
                 >
-                  {scanningNow ? "Scanning..." : "Run Scan Now"}
+                  {scanningNow ? "Scanning..." : "Run Security Scan"}
                 </Button>
               </div>
             </CardHeader>
@@ -249,7 +246,7 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
                 <div className="flex items-center gap-2">
                   <span className="text-sm text-muted-foreground">Last Scan Status:</span>
                   {asset.last_scan_id ? (
-                    <Link href={`/scan/${asset.last_scan_id}`} className="hover:opacity-80 transition-opacity">
+                    <Link href={`/security/scans/${asset.last_scan_id}`} className="hover:opacity-80 transition-opacity">
                       <Badge
                         variant={
                           asset.last_scan_status === "completed" ? "success" :
@@ -277,15 +274,15 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
 
               {relatedScans.length > 0 && (
                 <div>
-                  <div className="text-sm font-medium mb-2">Related Scans ({relatedScans.length})</div>
+                  <div className="text-sm font-medium mb-2">Security Scans ({relatedScans.length})</div>
                   <div className="space-y-2 max-h-48 overflow-y-auto">
                     {relatedScans.map(scan => (
-                      <Link key={scan.id} href={`/scan/${scan.id}`}>
+                      <Link key={scan.id} href={`/security/scans/${scan.id}`}>
                         <div
                           className="flex items-center justify-between p-3 rounded-lg bg-muted hover:bg-muted/80 transition-colors cursor-pointer mb-2 last:mb-0"
                         >
                           <div className="space-y-1">
-                            <div className="text-sm font-medium">{scan.target}</div>
+                            <div className="text-sm font-medium">{scan.scan_type.replace(/_/g, " ")}</div>
                             <div className="text-xs text-muted-foreground">
                               {new Date(scan.created_at).toLocaleString()}
                             </div>
@@ -299,11 +296,6 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
                             }>
                               {scan.status}
                             </Badge>
-                            {scan.findings_count !== undefined && (
-                              <span className="text-xs text-muted-foreground">
-                                {scan.findings_count} findings
-                              </span>
-                            )}
                           </div>
                         </div>
                       </Link>
@@ -330,4 +322,3 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
     </Modal>
   );
 }
-

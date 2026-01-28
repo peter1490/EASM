@@ -2,7 +2,7 @@
 
 import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { listCompanies, type CompanyWithRole, getStoredCompanyId, setStoredCompanyId } from '@/app/api';
+import { listCompanies, type CompanyWithRole, getStoredCompanyId, setStoredCompanyId, getApiBase } from '@/app/api';
 
 interface User {
   user_id?: string;
@@ -31,7 +31,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [companies, setCompanies] = useState<CompanyWithRole[]>([]);
   const [companyId, setCompanyIdState] = useState<string | null>(null);
   const router = useRouter();
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000';
+  const apiBase = getApiBase();
 
   const checkAuth = useCallback(async () => {
     try {
@@ -138,6 +138,19 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const setCompanyId = (nextCompanyId: string) => {
     setCompanyIdState(nextCompanyId);
     setStoredCompanyId(nextCompanyId);
+
+    if (typeof window !== 'undefined') {
+      const { pathname } = window.location;
+      if (pathname.startsWith('/security/scans/')) {
+        window.location.assign('/security');
+        return;
+      }
+      if (pathname.startsWith('/asset/')) {
+        window.location.assign('/assets');
+        return;
+      }
+    }
+
     window.location.reload();
   };
 

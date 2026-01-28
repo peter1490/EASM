@@ -19,6 +19,35 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Result<Response, StatusCode> {
     let settings = state.config.load();
+
+    // Helper to resolve company
+    async fn resolve_company(
+        user_id: uuid::Uuid,
+        headers: &HeaderMap,
+        repo: &dyn crate::repositories::UserRepository,
+    ) -> Option<uuid::Uuid> {
+        let requested_id = headers
+            .get("X-Company-ID")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok());
+
+        // Get user companies
+        if let Ok(companies) = repo.get_user_companies(user_id).await {
+            if let Some(req_id) = requested_id {
+                // Check membership
+                if companies.iter().any(|c| c.company_id == req_id) {
+                    return Some(req_id);
+                }
+                // Requested company not found for user -> Return None (Unauthorized/Forbidden later)
+                return None;
+            } else {
+                // Default to first company
+                return companies.first().map(|c| c.company_id);
+            }
+        }
+        None
+    }
+
     // 1. Check for API Key first (service-to-service or CLI)
     if !settings.api_keys.is_empty() {
         let api_key = headers
@@ -28,8 +57,23 @@ pub async fn auth_middleware(
 
         if let Some(key) = api_key {
             if settings.api_keys.contains(&key) {
-                // API Key valid: Attach API Key Context
-                let context = UserContext::new_api_key();
+                // API Key valid
+                // For API keys, we check header for company, otherwise default to Default Company ID if possible,
+                // or just leave as None? UserContext.company_id is Option.
+                // But DB queries will need it.
+                // Let's parse header. If explicit header, trust it (Admin access).
+                let company_id = headers
+                    .get("X-Company-ID")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok());
+
+                // TODO: Verify company exists? For now assume API key is admin and knows what it's doing.
+                // Or maybe default to the "Default Company" ID known from migration?
+                // '00000000-0000-0000-0000-000000000000'
+
+                let mut context = UserContext::new_api_key();
+                context.company_id = company_id.or(Some(uuid::Uuid::nil())); // Default to nil UUID (Default Company)
+
                 request.extensions_mut().insert(context);
                 return Ok(next.run(request).await);
             }
@@ -40,8 +84,27 @@ pub async fn auth_middleware(
     if let Some(cookie) = jar.get("session") {
         if let Ok(session) = serde_json::from_str::<UserSession>(cookie.value()) {
             if !session.is_expired() {
+                // Resolve company
+                let company_id =
+                    resolve_company(session.user_id, &headers, state.user_repository.as_ref())
+                        .await;
+
+                if company_id.is_none() {
+                    // User has no companies or requested invalid company -> Forbidden
+                    tracing::warn!(
+                        "User {} requested invalid company or has no companies",
+                        session.user_id
+                    );
+                    return Err(StatusCode::FORBIDDEN);
+                }
+
                 // Session valid: Attach User Context
-                let context = UserContext::new_user(session.user_id, session.email, session.roles);
+                let context = UserContext::new_user(
+                    session.user_id,
+                    session.email,
+                    session.roles,
+                    company_id,
+                );
                 request.extensions_mut().insert(context);
                 return Ok(next.run(request).await);
             }
@@ -49,20 +112,9 @@ pub async fn auth_middleware(
     }
 
     // Allow access if no API keys configured (development mode only)
-    // But only if not in production?
-    // For safety, we should enforce auth if API keys are set OR if we want to force login.
-    // If API keys are empty, maybe we allow?
     if settings.api_keys.is_empty() {
-        // Warn about insecure config
-        // tracing::warn!("Authentication skipped (no API keys configured)");
-        // return Ok(next.run(request).await);
-
-        // CHANGE: Even if no API keys, enforce auth for protected routes if we want a real auth system
-        // But existing logic allowed it.
-        // The plan is to "guard /api/* routes... alongside existing API-key fallback".
-        // If I block here, I might break existing dev flow if they rely on empty keys.
-        // But empty keys = no auth.
-        // I'll keep it allowing for now but add warning.
+        // Dev mode: create a dummy context?
+        // Or if logic below continues...
         return Ok(next.run(request).await);
     }
 

@@ -8,6 +8,7 @@ pub fn create_cors_layer(allowed_origins: Vec<String>) -> CorsLayer {
         HeaderName::from_static("authorization"),
         HeaderName::from_static("x-api-key"),
         HeaderName::from_static("x-requested-with"),
+        HeaderName::from_static("x-company-id"),
     ];
 
     if allowed_origins.is_empty() || allowed_origins.contains(&"*".to_string()) {

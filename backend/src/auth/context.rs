@@ -7,15 +7,22 @@ pub struct UserContext {
     pub user_id: Option<Uuid>, // None for API Key (or service user)
     pub email: Option<String>,
     pub roles: Vec<Role>,
+    pub company_id: Option<Uuid>, // Current active company
     pub is_api_key: bool,
 }
 
 impl UserContext {
-    pub fn new_user(user_id: Uuid, email: String, roles: Vec<Role>) -> Self {
+    pub fn new_user(
+        user_id: Uuid,
+        email: String,
+        roles: Vec<Role>,
+        company_id: Option<Uuid>,
+    ) -> Self {
         Self {
             user_id: Some(user_id),
             email: Some(email),
             roles,
+            company_id,
             is_api_key: false,
         }
     }
@@ -26,6 +33,7 @@ impl UserContext {
             user_id: None,
             email: None,
             roles: vec![Role::Admin], // API keys have full access by default in this design
+            company_id: None,         // API keys are global or need a way to specify company
             is_api_key: true,
         }
     }

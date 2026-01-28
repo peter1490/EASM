@@ -18,26 +18,46 @@ use crate::{
 
 #[async_trait]
 pub trait DiscoveryRunRepository: Send + Sync {
-    async fn create(&self, run: &DiscoveryRunCreate) -> Result<DiscoveryRun, ApiError>;
-    async fn get_by_id(&self, id: &Uuid) -> Result<Option<DiscoveryRun>, ApiError>;
-    async fn get_running(&self) -> Result<Option<DiscoveryRun>, ApiError>;
-    async fn list(&self, limit: i64, offset: i64) -> Result<Vec<DiscoveryRun>, ApiError>;
+    async fn create(
+        &self,
+        run: &DiscoveryRunCreate,
+        company_id: Uuid,
+    ) -> Result<DiscoveryRun, ApiError>;
+    async fn get_by_id(
+        &self,
+        company_id: Uuid,
+        id: &Uuid,
+    ) -> Result<Option<DiscoveryRun>, ApiError>;
+    async fn get_running(&self, company_id: Uuid) -> Result<Option<DiscoveryRun>, ApiError>;
+    async fn list(
+        &self,
+        company_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<DiscoveryRun>, ApiError>;
     async fn update_status(
         &self,
+        company_id: Uuid,
         id: &Uuid,
         status: &str,
         error_message: Option<&str>,
     ) -> Result<DiscoveryRun, ApiError>;
     async fn update_progress(
         &self,
+        company_id: Uuid,
         id: &Uuid,
         seeds_processed: i32,
         assets_discovered: i32,
         assets_updated: i32,
     ) -> Result<DiscoveryRun, ApiError>;
-    async fn start(&self, id: &Uuid) -> Result<DiscoveryRun, ApiError>;
-    async fn complete(&self, id: &Uuid) -> Result<DiscoveryRun, ApiError>;
-    async fn fail(&self, id: &Uuid, error: &str) -> Result<DiscoveryRun, ApiError>;
+    async fn start(&self, company_id: Uuid, id: &Uuid) -> Result<DiscoveryRun, ApiError>;
+    async fn complete(&self, company_id: Uuid, id: &Uuid) -> Result<DiscoveryRun, ApiError>;
+    async fn fail(
+        &self,
+        company_id: Uuid,
+        id: &Uuid,
+        error: &str,
+    ) -> Result<DiscoveryRun, ApiError>;
 }
 
 pub struct SqlxDiscoveryRunRepository {
@@ -52,7 +72,11 @@ impl SqlxDiscoveryRunRepository {
 
 #[async_trait]
 impl DiscoveryRunRepository for SqlxDiscoveryRunRepository {
-    async fn create(&self, run: &DiscoveryRunCreate) -> Result<DiscoveryRun, ApiError> {
+    async fn create(
+        &self,
+        run: &DiscoveryRunCreate,
+        company_id: Uuid,
+    ) -> Result<DiscoveryRun, ApiError> {
         let id = Uuid::new_v4();
         let now = Utc::now();
         let trigger_type = run
@@ -64,8 +88,8 @@ impl DiscoveryRunRepository for SqlxDiscoveryRunRepository {
 
         let row = sqlx::query_as::<_, DiscoveryRun>(
             r#"
-            INSERT INTO discovery_runs (id, status, trigger_type, config, created_at, updated_at)
-            VALUES ($1, 'pending', $2, $3, $4, $4)
+            INSERT INTO discovery_runs (id, status, trigger_type, config, created_at, updated_at, company_id)
+            VALUES ($1, 'pending', $2, $3, $4, $4, $5)
             RETURNING *
             "#,
         )
@@ -73,35 +97,50 @@ impl DiscoveryRunRepository for SqlxDiscoveryRunRepository {
         .bind(&trigger_type)
         .bind(&config)
         .bind(now)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(row)
     }
 
-    async fn get_by_id(&self, id: &Uuid) -> Result<Option<DiscoveryRun>, ApiError> {
-        let row = sqlx::query_as::<_, DiscoveryRun>("SELECT * FROM discovery_runs WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
-
-        Ok(row)
-    }
-
-    async fn get_running(&self) -> Result<Option<DiscoveryRun>, ApiError> {
+    async fn get_by_id(
+        &self,
+        company_id: Uuid,
+        id: &Uuid,
+    ) -> Result<Option<DiscoveryRun>, ApiError> {
         let row = sqlx::query_as::<_, DiscoveryRun>(
-            "SELECT * FROM discovery_runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1"
+            "SELECT * FROM discovery_runs WHERE id = $1 AND company_id = $2",
         )
+        .bind(id)
+        .bind(company_id)
         .fetch_optional(&self.pool)
         .await?;
 
         Ok(row)
     }
 
-    async fn list(&self, limit: i64, offset: i64) -> Result<Vec<DiscoveryRun>, ApiError> {
-        let rows = sqlx::query_as::<_, DiscoveryRun>(
-            "SELECT * FROM discovery_runs ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+    async fn get_running(&self, company_id: Uuid) -> Result<Option<DiscoveryRun>, ApiError> {
+        let row = sqlx::query_as::<_, DiscoveryRun>(
+            "SELECT * FROM discovery_runs WHERE status = 'running' AND company_id = $1 ORDER BY started_at DESC LIMIT 1"
         )
+        .bind(company_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    async fn list(
+        &self,
+        company_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<DiscoveryRun>, ApiError> {
+        let rows = sqlx::query_as::<_, DiscoveryRun>(
+            "SELECT * FROM discovery_runs WHERE company_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+        )
+        .bind(company_id)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
@@ -112,6 +151,7 @@ impl DiscoveryRunRepository for SqlxDiscoveryRunRepository {
 
     async fn update_status(
         &self,
+        company_id: Uuid,
         id: &Uuid,
         status: &str,
         error_message: Option<&str>,
@@ -122,7 +162,7 @@ impl DiscoveryRunRepository for SqlxDiscoveryRunRepository {
             r#"
             UPDATE discovery_runs 
             SET status = $2, error_message = COALESCE($3, error_message), updated_at = $4
-            WHERE id = $1
+            WHERE id = $1 AND company_id = $5
             RETURNING *
             "#,
         )
@@ -130,6 +170,7 @@ impl DiscoveryRunRepository for SqlxDiscoveryRunRepository {
         .bind(status)
         .bind(error_message)
         .bind(now)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
@@ -138,6 +179,7 @@ impl DiscoveryRunRepository for SqlxDiscoveryRunRepository {
 
     async fn update_progress(
         &self,
+        company_id: Uuid,
         id: &Uuid,
         seeds_processed: i32,
         assets_discovered: i32,
@@ -149,7 +191,7 @@ impl DiscoveryRunRepository for SqlxDiscoveryRunRepository {
             r#"
             UPDATE discovery_runs 
             SET seeds_processed = $2, assets_discovered = $3, assets_updated = $4, updated_at = $5
-            WHERE id = $1
+            WHERE id = $1 AND company_id = $6
             RETURNING *
             "#,
         )
@@ -158,64 +200,73 @@ impl DiscoveryRunRepository for SqlxDiscoveryRunRepository {
         .bind(assets_discovered)
         .bind(assets_updated)
         .bind(now)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(row)
     }
 
-    async fn start(&self, id: &Uuid) -> Result<DiscoveryRun, ApiError> {
+    async fn start(&self, company_id: Uuid, id: &Uuid) -> Result<DiscoveryRun, ApiError> {
         let now = Utc::now();
 
         let row = sqlx::query_as::<_, DiscoveryRun>(
             r#"
             UPDATE discovery_runs 
             SET status = 'running', started_at = $2, updated_at = $2
-            WHERE id = $1
+            WHERE id = $1 AND company_id = $3
             RETURNING *
             "#,
         )
         .bind(id)
         .bind(now)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(row)
     }
 
-    async fn complete(&self, id: &Uuid) -> Result<DiscoveryRun, ApiError> {
+    async fn complete(&self, company_id: Uuid, id: &Uuid) -> Result<DiscoveryRun, ApiError> {
         let now = Utc::now();
 
         let row = sqlx::query_as::<_, DiscoveryRun>(
             r#"
             UPDATE discovery_runs 
             SET status = 'completed', completed_at = $2, updated_at = $2
-            WHERE id = $1
+            WHERE id = $1 AND company_id = $3
             RETURNING *
             "#,
         )
         .bind(id)
         .bind(now)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(row)
     }
 
-    async fn fail(&self, id: &Uuid, error: &str) -> Result<DiscoveryRun, ApiError> {
+    async fn fail(
+        &self,
+        company_id: Uuid,
+        id: &Uuid,
+        error: &str,
+    ) -> Result<DiscoveryRun, ApiError> {
         let now = Utc::now();
 
         let row = sqlx::query_as::<_, DiscoveryRun>(
             r#"
             UPDATE discovery_runs 
             SET status = 'failed', completed_at = $2, error_message = $3, updated_at = $2
-            WHERE id = $1
+            WHERE id = $1 AND company_id = $4
             RETURNING *
             "#,
         )
         .bind(id)
         .bind(now)
         .bind(error)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 

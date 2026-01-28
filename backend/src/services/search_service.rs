@@ -19,6 +19,7 @@ use crate::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexedAsset {
     pub id: String,
+    pub company_id: Uuid,
     pub asset_type: String,
     pub identifier: String,
     pub confidence: f64,
@@ -35,6 +36,7 @@ pub struct IndexedAsset {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexedFinding {
     pub id: String,
+    pub company_id: Uuid,
     pub scan_id: String,
     pub finding_type: String,
     pub data: Value,
@@ -65,10 +67,12 @@ pub trait SearchService {
     async fn bulk_index_findings(&self, findings: &[Finding]) -> Result<(), ApiError>;
     async fn search_assets(
         &self,
+        company_id: Uuid,
         query: &SearchQuery,
     ) -> Result<SearchResult<IndexedAsset>, ApiError>;
     async fn search_findings(
         &self,
+        company_id: Uuid,
         query: &SearchQuery,
     ) -> Result<SearchResult<IndexedFinding>, ApiError>;
     async fn delete_asset(&self, asset_id: &Uuid) -> Result<(), ApiError>;
@@ -113,6 +117,7 @@ impl ElasticsearchService {
             "mappings": {
                 "properties": {
                     "id": { "type": "keyword" },
+                    "company_id": { "type": "keyword" },
                     "asset_type": { "type": "keyword" },
                     "identifier": {
                         "type": "text",
@@ -168,6 +173,7 @@ impl ElasticsearchService {
             "mappings": {
                 "properties": {
                     "id": { "type": "keyword" },
+                    "company_id": { "type": "keyword" },
                     "scan_id": { "type": "keyword" },
                     "finding_type": { "type": "keyword" },
                     "data": { "type": "object" },
@@ -223,6 +229,7 @@ impl ElasticsearchService {
     fn asset_to_indexed(&self, asset: &Asset) -> IndexedAsset {
         IndexedAsset {
             id: asset.id.to_string(),
+            company_id: asset.company_id,
             asset_type: format!("{:?}", asset.asset_type).to_lowercase(),
             identifier: asset.identifier.clone(),
             confidence: asset.confidence,
@@ -240,6 +247,7 @@ impl ElasticsearchService {
     fn finding_to_indexed(&self, finding: &Finding) -> IndexedFinding {
         IndexedFinding {
             id: finding.id.to_string(),
+            company_id: finding.company_id,
             scan_id: finding.scan_id.to_string(),
             finding_type: finding.finding_type.clone(),
             data: finding.data.clone(),
@@ -351,6 +359,7 @@ impl SearchService for ElasticsearchService {
 
     async fn search_assets(
         &self,
+        company_id: Uuid,
         query: &SearchQuery,
     ) -> Result<SearchResult<IndexedAsset>, ApiError> {
         let mut search_body = json!({
@@ -368,16 +377,23 @@ impl SearchService for ElasticsearchService {
             }
         });
 
+        // Add company_id filter
+        let company_filter = json!({ "term": { "company_id": company_id.to_string() } });
+
         // Add filters
+        let mut filter_clauses = Vec::new();
+        filter_clauses.push(company_filter);
+
         if !query.filters.is_empty() {
-            let mut filter_clauses = Vec::new();
             for (field, value) in &query.filters {
                 filter_clauses.push(json!({
                     "term": { field: value }
                 }));
             }
-            search_body["query"]["bool"]["filter"] = json!(filter_clauses);
         }
+
+        // Ensure "filter" is an array
+        search_body["query"]["bool"]["filter"] = json!(filter_clauses);
 
         // Add pagination
         if let Some(size) = query.size {
@@ -427,6 +443,7 @@ impl SearchService for ElasticsearchService {
 
     async fn search_findings(
         &self,
+        company_id: Uuid,
         query: &SearchQuery,
     ) -> Result<SearchResult<IndexedFinding>, ApiError> {
         let mut search_body = json!({
@@ -444,16 +461,23 @@ impl SearchService for ElasticsearchService {
             }
         });
 
+        // Add company_id filter
+        let company_filter = json!({ "term": { "company_id": company_id.to_string() } });
+
         // Add filters
+        let mut filter_clauses = Vec::new();
+        filter_clauses.push(company_filter);
+
         if !query.filters.is_empty() {
-            let mut filter_clauses = Vec::new();
             for (field, value) in &query.filters {
                 filter_clauses.push(json!({
                     "term": { field: value }
                 }));
             }
-            search_body["query"]["bool"]["filter"] = json!(filter_clauses);
         }
+
+        // Ensure "filter" is an array
+        search_body["query"]["bool"]["filter"] = json!(filter_clauses);
 
         // Add pagination
         if let Some(size) = query.size {
@@ -631,6 +655,7 @@ mod tests {
             // Security scan tracking
             last_scan_id: None,
             last_scan_status: None,
+            company_id: Uuid::new_v4(),
             last_scanned_at: None,
         }
     }
@@ -642,6 +667,7 @@ mod tests {
             finding_type: "port_scan".to_string(),
             data: json!({"port": 80, "service": "http"}),
             created_at: Utc::now(),
+            company_id: Uuid::new_v4(),
         }
     }
 

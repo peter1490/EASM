@@ -32,9 +32,13 @@ pub trait DriftService {
         &self,
         current_scan_id: &Uuid,
         target: &str,
+        company_id: Uuid,
     ) -> Result<Vec<PortDrift>, ApiError>;
-    async fn generate_drift_findings(&self, drifts: &[PortDrift])
-        -> Result<Vec<Finding>, ApiError>;
+    async fn generate_drift_findings(
+        &self,
+        drifts: &[PortDrift],
+        company_id: Uuid,
+    ) -> Result<Vec<Finding>, ApiError>;
     async fn update_asset_metadata(
         &self,
         asset_identifier: &str,
@@ -62,8 +66,9 @@ impl DriftServiceImpl {
     async fn extract_port_states(
         &self,
         scan_id: &Uuid,
+        company_id: Uuid,
     ) -> Result<HashMap<String, AssetPortState>, ApiError> {
-        let findings = self.finding_repo.list_by_scan(scan_id).await?;
+        let findings = self.finding_repo.list_by_scan(scan_id, company_id).await?;
         let mut asset_ports: HashMap<String, HashSet<u16>> = HashMap::new();
 
         for finding in findings {
@@ -101,8 +106,9 @@ impl DriftServiceImpl {
         &self,
         current_scan_id: &Uuid,
         target: &str,
+        company_id: Uuid,
     ) -> Result<Option<Uuid>, ApiError> {
-        let scans = self.scan_repo.list().await?;
+        let scans = self.scan_repo.list(company_id).await?;
 
         // Find completed scans for the same target, excluding the current scan
         let mut previous_scans: Vec<_> = scans
@@ -167,16 +173,24 @@ impl DriftService for DriftServiceImpl {
         &self,
         current_scan_id: &Uuid,
         target: &str,
+        company_id: Uuid,
     ) -> Result<Vec<PortDrift>, ApiError> {
         // Find the previous scan for comparison
-        let previous_scan_id = match self.find_previous_scan(current_scan_id, target).await? {
+        let previous_scan_id = match self
+            .find_previous_scan(current_scan_id, target, company_id)
+            .await?
+        {
             Some(id) => id,
             None => return Ok(Vec::new()), // No previous scan to compare against
         };
 
         // Extract port states from both scans
-        let current_states = self.extract_port_states(current_scan_id).await?;
-        let previous_states = self.extract_port_states(&previous_scan_id).await?;
+        let current_states = self
+            .extract_port_states(current_scan_id, company_id)
+            .await?;
+        let previous_states = self
+            .extract_port_states(&previous_scan_id, company_id)
+            .await?;
 
         // Compare states to detect drift
         let drifts = self.compare_port_states(
@@ -192,6 +206,7 @@ impl DriftService for DriftServiceImpl {
     async fn generate_drift_findings(
         &self,
         drifts: &[PortDrift],
+        company_id: Uuid,
     ) -> Result<Vec<Finding>, ApiError> {
         let mut findings = Vec::new();
 
@@ -211,7 +226,10 @@ impl DriftService for DriftServiceImpl {
                 data: drift_data,
             };
 
-            let finding = self.finding_repo.create(&finding_create).await?;
+            let finding = self
+                .finding_repo
+                .create(&finding_create, company_id)
+                .await?;
             findings.push(finding);
         }
 
@@ -260,6 +278,7 @@ mod tests {
             let finding = Finding {
                 id: Uuid::new_v4(),
                 scan_id,
+                company_id: Uuid::nil(),
                 finding_type: "port_scan".to_string(),
                 data: json!({
                     "asset": asset,
@@ -278,33 +297,50 @@ mod tests {
 
     #[async_trait]
     impl FindingRepository for MockFindingRepository {
-        async fn create(&self, _finding: &FindingCreate) -> Result<Finding, ApiError> {
+        async fn create(
+            &self,
+            _finding: &FindingCreate,
+            _company_id: Uuid,
+        ) -> Result<Finding, ApiError> {
             Ok(Finding {
                 id: Uuid::new_v4(),
                 scan_id: Uuid::new_v4(),
+                company_id: Uuid::nil(),
                 finding_type: "test".to_string(),
                 data: json!({}),
                 created_at: Utc::now(),
             })
         }
 
-        async fn list_by_scan(&self, scan_id: &Uuid) -> Result<Vec<Finding>, ApiError> {
+        async fn list_by_scan(
+            &self,
+            scan_id: &Uuid,
+            _company_id: Uuid,
+        ) -> Result<Vec<Finding>, ApiError> {
             Ok(self.findings.get(scan_id).cloned().unwrap_or_default())
         }
 
-        async fn list_by_asset(&self, _asset_identifier: &str) -> Result<Vec<Finding>, ApiError> {
+        async fn list_by_asset(
+            &self,
+            _asset_identifier: &str,
+            _company_id: Uuid,
+        ) -> Result<Vec<Finding>, ApiError> {
             Ok(Vec::new())
         }
 
-        async fn list_by_type(&self, _finding_type: &str) -> Result<Vec<Finding>, ApiError> {
+        async fn list_by_type(
+            &self,
+            _finding_type: &str,
+            _company_id: Uuid,
+        ) -> Result<Vec<Finding>, ApiError> {
             Ok(Vec::new())
         }
 
-        async fn search(&self, _query: &str) -> Result<Vec<Finding>, ApiError> {
+        async fn search(&self, _query: &str, _company_id: Uuid) -> Result<Vec<Finding>, ApiError> {
             Ok(Vec::new())
         }
 
-        async fn count_by_scan(&self, scan_id: &Uuid) -> Result<i64, ApiError> {
+        async fn count_by_scan(&self, scan_id: &Uuid, _company_id: Uuid) -> Result<i64, ApiError> {
             Ok(self
                 .findings
                 .get(scan_id)
@@ -315,6 +351,7 @@ mod tests {
         async fn filter(
             &self,
             _filter: &crate::models::FindingFilter,
+            _company_id: Uuid,
         ) -> Result<crate::models::FindingListResponse, ApiError> {
             // Mock implementation returns empty results
             Ok(crate::models::FindingListResponse {
@@ -355,7 +392,7 @@ mod tests {
 
     #[async_trait]
     impl ScanRepository for MockScanRepository {
-        async fn create(&self, _scan: &ScanCreate) -> Result<Scan, ApiError> {
+        async fn create(&self, _scan: &ScanCreate, _company_id: Uuid) -> Result<Scan, ApiError> {
             Ok(Scan {
                 id: Uuid::new_v4(),
                 target: "test".to_string(),
@@ -366,19 +403,28 @@ mod tests {
             })
         }
 
-        async fn get_by_id(&self, id: &Uuid) -> Result<Option<Scan>, ApiError> {
+        async fn get_by_id(&self, _company_id: Uuid, id: &Uuid) -> Result<Option<Scan>, ApiError> {
             Ok(self.scans.iter().find(|s| s.id == *id).cloned())
         }
 
-        async fn list(&self) -> Result<Vec<Scan>, ApiError> {
+        async fn list(&self, _company_id: Uuid) -> Result<Vec<Scan>, ApiError> {
             Ok(self.scans.clone())
         }
 
-        async fn list_by_status(&self, _status: Option<ScanStatus>) -> Result<Vec<Scan>, ApiError> {
+        async fn list_by_status(
+            &self,
+            _company_id: Uuid,
+            _status: Option<ScanStatus>,
+        ) -> Result<Vec<Scan>, ApiError> {
             Ok(self.scans.clone())
         }
 
-        async fn update_status(&self, _id: &Uuid, _status: ScanStatus) -> Result<(), ApiError> {
+        async fn update_status(
+            &self,
+            _company_id: Uuid,
+            _id: &Uuid,
+            _status: ScanStatus,
+        ) -> Result<(), ApiError> {
             Ok(())
         }
     }

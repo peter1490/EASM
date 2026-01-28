@@ -110,6 +110,7 @@ pub struct Asset {
     pub updated_at: DateTime<Utc>,
     pub seed_id: Option<Uuid>,
     pub parent_id: Option<Uuid>,
+    pub company_id: Uuid,
 
     // Lifecycle tracking (new fields)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -153,6 +154,7 @@ pub struct AssetRow {
     pub seed_id: Option<Uuid>,
     #[sqlx(default)]
     pub parent_id: Option<Uuid>,
+    pub company_id: Uuid,
     // Lifecycle fields
     #[sqlx(default)]
     pub first_seen_at: Option<DateTime<Utc>>,
@@ -195,6 +197,7 @@ impl From<AssetRow> for Asset {
             updated_at: row.updated_at,
             seed_id: row.seed_id,
             parent_id: row.parent_id,
+            company_id: row.company_id,
             first_seen_at: row.first_seen_at,
             last_seen_at: row.last_seen_at,
             last_discovery_run_id: row.last_discovery_run_id,
@@ -218,6 +221,7 @@ pub struct Seed {
     pub value: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    pub company_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

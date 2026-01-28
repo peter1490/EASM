@@ -48,6 +48,7 @@ pub struct BlacklistEntry {
     pub id: Uuid,
     pub object_type: String,
     pub object_value: String,
+    pub company_id: Uuid,
     pub reason: Option<String>,
     pub created_by: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -87,4 +88,3 @@ pub struct BlacklistCheckResult {
     pub parent_blacklisted: bool,
     pub parent_entry: Option<BlacklistEntry>,
 }
-

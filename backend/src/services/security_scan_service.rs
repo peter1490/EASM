@@ -97,21 +97,23 @@ impl SecurityScanService {
     // ========================================================================
 
     /// Create a new security scan for an asset
+    /// Create a new security scan for an asset
     pub async fn create_scan(
         &self,
         scan_create: SecurityScanCreate,
+        company_id: Uuid,
     ) -> Result<SecurityScan, ApiError> {
         // Verify asset exists
         let asset = self
             .asset_repo
-            .get_by_id(&scan_create.asset_id)
+            .get_by_id(company_id, &scan_create.asset_id)
             .await?
             .ok_or_else(|| {
                 ApiError::NotFound(format!("Asset {} not found", scan_create.asset_id))
             })?;
 
         // Create the scan record
-        let scan = self.scan_repo.create(&scan_create).await?;
+        let scan = self.scan_repo.create(&scan_create, company_id).await?;
         let scan_id = scan.id;
         let asset_id = asset.id;
 
@@ -122,36 +124,46 @@ impl SecurityScanService {
             "asset_id": asset_id,
             "asset_identifier": asset.identifier,
             "scan_type": scan.scan_type,
+            "company_id": company_id,
         });
 
         self.task_manager
             .submit_task(TaskType::Scan, task_metadata, move |ctx| {
                 let scan_service = scan_service.clone();
-                Box::pin(async move { scan_service.execute_scan(ctx, scan_id, asset_id).await })
+                Box::pin(async move {
+                    scan_service
+                        .execute_scan(ctx, scan_id, asset_id, company_id)
+                        .await
+                })
             })
             .await?;
 
         tracing::info!(
-            "Created security scan {} for asset {}",
+            "Created security scan {} for asset {} (company {})",
             scan_id,
-            asset.identifier
+            asset.identifier,
+            company_id
         );
         Ok(scan)
     }
 
     /// Get a scan by ID
-    pub async fn get_scan(&self, id: &Uuid) -> Result<Option<SecurityScan>, ApiError> {
-        self.scan_repo.get_by_id(id).await
+    pub async fn get_scan(
+        &self,
+        id: &Uuid,
+        company_id: Uuid,
+    ) -> Result<Option<SecurityScan>, ApiError> {
+        self.scan_repo.get_by_id(id, company_id).await
     }
 
     /// Cancel a running scan
-    pub async fn cancel_scan(&self, id: &Uuid) -> Result<(), ApiError> {
+    pub async fn cancel_scan(&self, id: &Uuid, company_id: Uuid) -> Result<(), ApiError> {
         use crate::models::security::SecurityScanStatus;
 
         // Get the current scan status
         let scan = self
             .scan_repo
-            .get_by_id(id)
+            .get_by_id(id, company_id)
             .await?
             .ok_or_else(|| ApiError::NotFound(format!("Scan {} not found", id)))?;
 
@@ -166,7 +178,7 @@ impl SecurityScanService {
 
         // Update scan status to cancelled
         self.scan_repo
-            .update_status(id, SecurityScanStatus::Cancelled)
+            .update_status(id, SecurityScanStatus::Cancelled, company_id)
             .await?;
 
         // Cancel the task in the task manager
@@ -180,19 +192,20 @@ impl SecurityScanService {
     pub async fn get_scan_detail(
         &self,
         id: &Uuid,
+        company_id: Uuid,
     ) -> Result<Option<crate::models::SecurityScanDetailResponse>, ApiError> {
-        let scan = match self.scan_repo.get_by_id(id).await? {
+        let scan = match self.scan_repo.get_by_id(id, company_id).await? {
             Some(s) => s,
             None => return Ok(None),
         };
 
         let asset = self
             .asset_repo
-            .get_by_id(&scan.asset_id)
+            .get_by_id(company_id, &scan.asset_id)
             .await?
             .ok_or_else(|| ApiError::NotFound("Asset not found".to_string()))?;
 
-        let findings = self.finding_repo.list_by_scan(id).await?;
+        let findings = self.finding_repo.list_by_scan(id, company_id).await?;
         let findings_count = findings.len() as i64;
 
         Ok(Some(crate::models::SecurityScanDetailResponse {
@@ -207,18 +220,30 @@ impl SecurityScanService {
     pub async fn list_scans_for_asset(
         &self,
         asset_id: &Uuid,
+        company_id: Uuid,
     ) -> Result<Vec<SecurityScan>, ApiError> {
-        self.scan_repo.list_by_asset(asset_id, 100).await
+        self.scan_repo
+            .list_by_asset(asset_id, 100, company_id)
+            .await
     }
 
     /// List all scans
-    pub async fn list_scans(&self, limit: i64, offset: i64) -> Result<Vec<SecurityScan>, ApiError> {
-        self.scan_repo.list_all(limit, offset).await
+    pub async fn list_scans(
+        &self,
+        limit: i64,
+        offset: i64,
+        company_id: Uuid,
+    ) -> Result<Vec<SecurityScan>, ApiError> {
+        self.scan_repo.list_all(limit, offset, company_id).await
     }
 
     /// Get pending scans
-    pub async fn list_pending_scans(&self, limit: i64) -> Result<Vec<SecurityScan>, ApiError> {
-        self.scan_repo.list_pending(limit).await
+    pub async fn list_pending_scans(
+        &self,
+        limit: i64,
+        company_id: Uuid,
+    ) -> Result<Vec<SecurityScan>, ApiError> {
+        self.scan_repo.list_pending(limit, company_id).await
     }
 
     // ========================================================================
@@ -226,30 +251,32 @@ impl SecurityScanService {
     // ========================================================================
 
     /// Execute a security scan
+    /// Execute a security scan
     async fn execute_scan(
         &self,
         ctx: TaskContext,
         scan_id: Uuid,
         asset_id: Uuid,
+        company_id: Uuid,
     ) -> Result<(), ApiError> {
         tracing::info!("Starting security scan {}", scan_id);
 
         // Mark scan as running
-        self.scan_repo.start(&scan_id).await?;
+        self.scan_repo.start(&scan_id, company_id).await?;
         ctx.update_progress(0.05, Some("Scan started".to_string()))
             .await?;
 
         // Get asset details
         let asset = self
             .asset_repo
-            .get_by_id(&asset_id)
+            .get_by_id(company_id, &asset_id)
             .await?
             .ok_or_else(|| ApiError::NotFound("Asset not found".to_string()))?;
 
         // Get scan config
         let scan = self
             .scan_repo
-            .get_by_id(&scan_id)
+            .get_by_id(&scan_id, company_id)
             .await?
             .ok_or_else(|| ApiError::NotFound("Scan not found".to_string()))?;
 
@@ -257,18 +284,22 @@ impl SecurityScanService {
 
         // Execute appropriate scan based on asset type and scan type
         let result = self
-            .execute_scan_internal(&ctx, scan_id, &asset, scan_type)
+            .execute_scan_internal(&ctx, scan_id, &asset, scan_type, company_id)
             .await;
 
         // Finalize scan
         match result {
             Ok(summary) => {
                 let summary_json = serde_json::to_value(&summary).unwrap_or(json!({}));
-                self.scan_repo.complete(&scan_id, &summary_json).await?;
+                self.scan_repo
+                    .complete(&scan_id, &summary_json, company_id)
+                    .await?;
                 tracing::info!("Security scan {} completed successfully", scan_id);
             }
             Err(e) => {
-                self.scan_repo.fail(&scan_id, &e.to_string()).await?;
+                self.scan_repo
+                    .fail(&scan_id, &e.to_string(), company_id)
+                    .await?;
                 tracing::error!("Security scan {} failed: {}", scan_id, e);
                 return Err(e);
             }
@@ -283,6 +314,7 @@ impl SecurityScanService {
         scan_id: Uuid,
         asset: &Asset,
         scan_type: SecurityScanType,
+        company_id: Uuid,
     ) -> Result<ScanResultSummary, ApiError> {
         let mut summary = ScanResultSummary::default();
         let start_time = std::time::Instant::now();
@@ -297,6 +329,7 @@ impl SecurityScanService {
                     &scan_type,
                     &mut summary,
                     &mut risk_factors,
+                    company_id,
                 )
                 .await?;
             }
@@ -308,11 +341,12 @@ impl SecurityScanService {
                     &scan_type,
                     &mut summary,
                     &mut risk_factors,
+                    company_id,
                 )
                 .await?;
             }
             AssetType::Certificate => {
-                self.scan_certificate(ctx, scan_id, asset, &mut summary)
+                self.scan_certificate(ctx, scan_id, asset, &mut summary, company_id)
                     .await?;
             }
             _ => {
@@ -328,7 +362,7 @@ impl SecurityScanService {
         };
 
         // Count findings by severity
-        let findings = self.finding_repo.list_by_scan(&scan_id).await?;
+        let findings = self.finding_repo.list_by_scan(&scan_id, company_id).await?;
         let mut by_severity: std::collections::HashMap<String, i32> =
             std::collections::HashMap::new();
         for finding in &findings {
@@ -351,6 +385,7 @@ impl SecurityScanService {
         scan_type: &SecurityScanType,
         summary: &mut ScanResultSummary,
         risk_factors: &mut Vec<RiskFactor>,
+        company_id: Uuid,
     ) -> Result<(), ApiError> {
         let domain = &asset.identifier;
 
@@ -358,7 +393,9 @@ impl SecurityScanService {
         ctx.update_progress(0.1, Some("Checking DNS security".to_string()))
             .await?;
         if matches!(scan_type, SecurityScanType::Full) {
-            let dns_result = self.check_dns_security(scan_id, asset, domain).await?;
+            let dns_result = self
+                .check_dns_security(scan_id, asset, domain, company_id)
+                .await?;
             summary.dns_security = Some(dns_result);
         }
 
@@ -379,7 +416,13 @@ impl SecurityScanService {
                         )
                         .await?;
                         let (open_ports, services, vulns) = self
-                            .scan_ports_with_service_detection(scan_id, asset, *ip, risk_factors)
+                            .scan_ports_with_service_detection(
+                                scan_id,
+                                asset,
+                                *ip,
+                                risk_factors,
+                                company_id,
+                            )
                             .await?;
                         summary.open_ports = Some(open_ports);
                         summary.services_detected = Some(services);
@@ -396,7 +439,7 @@ impl SecurityScanService {
                         ctx.update_progress(0.5, Some("Analyzing HTTP security".to_string()))
                             .await?;
                         let (http_result, proxy_result) = self
-                            .analyze_http_security(scan_id, asset, domain, risk_factors)
+                            .analyze_http_security(scan_id, asset, domain, risk_factors, company_id)
                             .await?;
                         summary.security_headers = Some(http_result);
                         summary.proxy_detection = Some(proxy_result);
@@ -415,6 +458,7 @@ impl SecurityScanService {
                     "DNS Resolution Failed",
                     Some(&format!("Could not resolve domain {}: {}", domain, e)),
                     json!({ "domain": domain, "error": e.to_string() }),
+                    company_id,
                 )
                 .await?;
                 risk_factors.push(RiskFactor {
@@ -436,7 +480,7 @@ impl SecurityScanService {
             ctx.update_progress(0.7, Some("Analyzing TLS".to_string()))
                 .await?;
             summary.tls_version = self
-                .analyze_tls_with_findings(scan_id, asset, domain, 443, risk_factors)
+                .analyze_tls_with_findings(scan_id, asset, domain, 443, risk_factors, company_id)
                 .await?;
         }
 
@@ -447,7 +491,7 @@ impl SecurityScanService {
         ) {
             ctx.update_progress(0.85, Some("Checking threat intel".to_string()))
                 .await?;
-            self.check_threat_intel(scan_id, asset, domain, risk_factors)
+            self.check_threat_intel(scan_id, asset, domain, risk_factors, company_id)
                 .await?;
         }
 
@@ -469,6 +513,7 @@ impl SecurityScanService {
         scan_type: &SecurityScanType,
         summary: &mut ScanResultSummary,
         risk_factors: &mut Vec<RiskFactor>,
+        company_id: Uuid,
     ) -> Result<(), ApiError> {
         let ip: IpAddr = asset
             .identifier
@@ -486,7 +531,7 @@ impl SecurityScanService {
             )
             .await?;
             let (open_ports, services, vulns) = self
-                .scan_ports_with_service_detection(scan_id, asset, ip, risk_factors)
+                .scan_ports_with_service_detection(scan_id, asset, ip, risk_factors, company_id)
                 .await?;
             summary.open_ports = Some(open_ports.clone());
             summary.services_detected = Some(services);
@@ -505,7 +550,13 @@ impl SecurityScanService {
                     if matches!(port, 80 | 443 | 8080 | 8443 | 8000 | 8888 | 9000) {
                         let target = format!("{}:{}", ip, port);
                         let (http_result, proxy_result) = self
-                            .analyze_http_security(scan_id, asset, &target, risk_factors)
+                            .analyze_http_security(
+                                scan_id,
+                                asset,
+                                &target,
+                                risk_factors,
+                                company_id,
+                            )
                             .await?;
                         summary.security_headers = Some(http_result);
                         summary.proxy_detection = Some(proxy_result);
@@ -532,6 +583,7 @@ impl SecurityScanService {
                             &ip.to_string(),
                             *port,
                             risk_factors,
+                            company_id,
                         )
                         .await?;
                     break;
@@ -546,7 +598,7 @@ impl SecurityScanService {
         ) {
             ctx.update_progress(0.85, Some("Checking threat intel".to_string()))
                 .await?;
-            self.check_threat_intel(scan_id, asset, &ip.to_string(), risk_factors)
+            self.check_threat_intel(scan_id, asset, &ip.to_string(), risk_factors, company_id)
                 .await?;
         }
 
@@ -563,6 +615,7 @@ impl SecurityScanService {
         scan_id: Uuid,
         asset: &Asset,
         _summary: &mut ScanResultSummary,
+        company_id: Uuid,
     ) -> Result<(), ApiError> {
         // Check certificate metadata for issues
         if let Some(metadata) = asset.metadata.as_object() {
@@ -605,6 +658,7 @@ impl SecurityScanService {
                                 -days_until_expiry
                             )),
                             data,
+                            company_id,
                         )
                         .await?;
                     } else if days_until_expiry < 30 {
@@ -624,6 +678,7 @@ impl SecurityScanService {
                                 days_until_expiry
                             )),
                             data,
+                            company_id,
                         )
                         .await?;
                     } else if days_until_expiry < 90 {
@@ -643,6 +698,7 @@ impl SecurityScanService {
                                 days_until_expiry
                             )),
                             data,
+                            company_id,
                         )
                         .await?;
                     }
@@ -668,6 +724,7 @@ impl SecurityScanService {
                         "Self-Signed Certificate",
                         Some("Certificate is self-signed and may not be trusted by browsers"),
                         data,
+                        company_id,
                     )
                     .await?;
                 }
@@ -687,6 +744,7 @@ impl SecurityScanService {
         asset: &Asset,
         ip: IpAddr,
         risk_factors: &mut Vec<RiskFactor>,
+        company_id: Uuid,
     ) -> Result<(Vec<u16>, Vec<DetectedService>, Vec<VulnerabilityResult>), ApiError> {
         let settings = self.current_settings();
         let timeout = Duration::from_secs_f64(settings.tcp_scan_timeout.max(1.0));
@@ -753,6 +811,7 @@ impl SecurityScanService {
                     "source_url": shodan_url,
                     "source_name": "Shodan",
                 }),
+                company_id,
             )
             .await?;
 
@@ -807,6 +866,7 @@ impl SecurityScanService {
                         }),
                         vuln.cvss_score, // Pass CVSS score to the finding
                         Some(vec![vuln.cve_id.clone()]), // Pass CVE ID
+                        company_id,
                     )
                     .await?;
 
@@ -959,6 +1019,7 @@ impl SecurityScanService {
         asset: &Asset,
         target: &str,
         risk_factors: &mut Vec<RiskFactor>,
+        company_id: Uuid,
     ) -> Result<(SecurityHeadersResult, ProxyDetectionResult), ApiError> {
         let mut security_result = SecurityHeadersResult::default();
         let mut proxy_result = ProxyDetectionResult::default();
@@ -1081,6 +1142,7 @@ impl SecurityScanService {
                         "recommendation": rec,
                         "url": url,
                     }),
+                    company_id,
                 )
                 .await?;
             }
@@ -1111,6 +1173,7 @@ impl SecurityScanService {
                         "value": server,
                         "url": url,
                     }),
+                    company_id,
                 )
                 .await?;
 
@@ -1140,6 +1203,7 @@ impl SecurityScanService {
                     "url": url,
                     "recommendation": "Consider implementing a WAF for additional protection",
                 }),
+                company_id,
             )
             .await?;
 
@@ -1173,6 +1237,7 @@ impl SecurityScanService {
                     "url": url,
                     "recommendation": "Enforce HTTPS and implement HSTS",
                 }),
+                company_id,
             )
             .await?;
 
@@ -1277,6 +1342,7 @@ impl SecurityScanService {
         scan_id: Uuid,
         asset: &Asset,
         domain: &str,
+        company_id: Uuid,
     ) -> Result<DnsSecurityResult, ApiError> {
         let mut result = DnsSecurityResult {
             domain: domain.to_string(),
@@ -1338,6 +1404,7 @@ impl SecurityScanService {
                     "domain": domain,
                     "recommendation": "Add an SPF record to specify authorized mail servers",
                 }),
+                company_id,
             )
             .await?;
 
@@ -1386,6 +1453,7 @@ impl SecurityScanService {
                                         "policy": "none",
                                         "recommendation": "Consider upgrading to p=quarantine or p=reject",
                                     }),
+                                    company_id,
                                 )
                                 .await?;
                             }
@@ -1409,6 +1477,7 @@ impl SecurityScanService {
                     "domain": domain,
                     "recommendation": "Add a DMARC record at _dmarc.{domain}",
                 }),
+                company_id,
             )
             .await?;
 
@@ -1444,6 +1513,7 @@ impl SecurityScanService {
                     "domain": domain,
                     "recommendation": "Add CAA records to specify authorized Certificate Authorities",
                 }),
+                company_id,
             )
             .await?;
         }
@@ -1470,6 +1540,7 @@ impl SecurityScanService {
         host: &str,
         port: u16,
         risk_factors: &mut Vec<RiskFactor>,
+        company_id: Uuid,
     ) -> Result<Option<String>, ApiError> {
         match get_tls_certificate_info(host, port).await {
             Ok(cert_info) => {
@@ -1506,6 +1577,7 @@ impl SecurityScanService {
                                 -days_until_expiry
                             )),
                             data,
+                            company_id,
                         )
                         .await?;
 
@@ -1537,6 +1609,7 @@ impl SecurityScanService {
                                 days_until_expiry
                             )),
                             data,
+                            company_id,
                         )
                         .await?;
 
@@ -1568,6 +1641,7 @@ impl SecurityScanService {
                                 days_until_expiry
                             )),
                             data,
+                            company_id,
                         )
                         .await?;
                     }
@@ -1588,6 +1662,7 @@ impl SecurityScanService {
                         "Self-Signed Certificate",
                         Some("Certificate is self-signed and may not be trusted by browsers"),
                         data,
+                        company_id,
                     )
                     .await?;
 
@@ -1621,6 +1696,7 @@ impl SecurityScanService {
         asset: &Asset,
         target: &str,
         risk_factors: &mut Vec<RiskFactor>,
+        company_id: Uuid,
     ) -> Result<(), ApiError> {
         // Check threat intelligence for the target
         let threat_result = if target.parse::<IpAddr>().is_ok() {
@@ -1656,6 +1732,7 @@ impl SecurityScanService {
                         "source_url": source_url,
                         "source_name": "VirusTotal",
                     }),
+                    company_id,
                 )
                 .await?;
 
@@ -1696,6 +1773,7 @@ impl SecurityScanService {
                         "source_url": source_url,
                         "source_name": "VirusTotal",
                     }),
+                    company_id,
                 )
                 .await?;
 
@@ -1958,6 +2036,7 @@ impl SecurityScanService {
         title: &str,
         description: Option<&str>,
         data: Value,
+        company_id: Uuid,
     ) -> Result<SecurityFinding, ApiError> {
         self.create_finding_with_cvss(
             scan_id,
@@ -1969,6 +2048,7 @@ impl SecurityScanService {
             data,
             None,
             None,
+            company_id,
         )
         .await
     }
@@ -1984,6 +2064,7 @@ impl SecurityScanService {
         data: Value,
         cvss_score: Option<f64>,
         cve_ids: Option<Vec<String>>,
+        company_id: Uuid,
     ) -> Result<SecurityFinding, ApiError> {
         let finding = SecurityFindingCreate {
             security_scan_id: Some(scan_id),
@@ -1999,7 +2080,9 @@ impl SecurityScanService {
             tags: None,
         };
 
-        self.finding_repo.create_or_update(&finding).await
+        self.finding_repo
+            .create_or_update(&finding, company_id)
+            .await
     }
 
     // ========================================================================
@@ -2009,18 +2092,26 @@ impl SecurityScanService {
     pub async fn list_findings_for_asset(
         &self,
         asset_id: &Uuid,
+        company_id: Uuid,
     ) -> Result<Vec<SecurityFinding>, ApiError> {
-        self.finding_repo.list_by_asset(asset_id, 1000).await
+        self.finding_repo
+            .list_by_asset(asset_id, 1000, company_id)
+            .await
     }
 
-    pub async fn get_finding(&self, id: &Uuid) -> Result<Option<SecurityFinding>, ApiError> {
-        self.finding_repo.get_by_id(id).await
+    pub async fn get_finding(
+        &self,
+        id: &Uuid,
+        company_id: Uuid,
+    ) -> Result<Option<SecurityFinding>, ApiError> {
+        self.finding_repo.get_by_id(id, company_id).await
     }
 
     pub async fn get_findings_summary(
         &self,
+        company_id: Uuid,
     ) -> Result<std::collections::HashMap<String, i64>, ApiError> {
-        self.finding_repo.count_by_severity().await
+        self.finding_repo.count_by_severity(company_id).await
     }
 }
 

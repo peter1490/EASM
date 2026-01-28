@@ -104,6 +104,7 @@ pub struct SecurityScan {
     pub note: Option<String>,
     pub config: Value,
     pub result_summary: Value,
+    pub company_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -360,6 +361,7 @@ pub struct SecurityFinding {
     pub cvss_score: Option<f64>,
     pub cve_ids: Option<Vec<String>>,
     pub tags: Option<Vec<String>>,
+    pub company_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

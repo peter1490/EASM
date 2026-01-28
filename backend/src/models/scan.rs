@@ -15,6 +15,7 @@ pub enum ScanStatus {
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Scan {
     pub id: Uuid,
+    pub company_id: Uuid,
     pub target: String,
     pub note: Option<String>,
     pub status: ScanStatus,

@@ -54,6 +54,7 @@ pub struct DiscoveryRun {
     pub config: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub company_id: Uuid,
 }
 
 #[derive(Debug, Clone, Deserialize)]

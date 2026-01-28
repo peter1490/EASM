@@ -4,6 +4,39 @@
 // ============================================================================
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+const COMPANY_STORAGE_KEY = "easm_company_id";
+
+export function getStoredCompanyId(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(COMPANY_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredCompanyId(companyId: string | null) {
+  if (typeof window === "undefined") return;
+  try {
+    if (companyId) {
+      window.localStorage.setItem(COMPANY_STORAGE_KEY, companyId);
+    } else {
+      window.localStorage.removeItem(COMPANY_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage errors (private mode, etc.)
+  }
+}
+
+async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
+  const headers = new Headers(init.headers || {});
+  const companyId = getStoredCompanyId();
+  if (companyId) {
+    headers.set("X-Company-ID", companyId);
+  }
+  const credentials = init.credentials ?? "include";
+  return fetch(input, { ...init, headers, credentials });
+}
 
 // ============================================================================
 // COMMON TYPES
@@ -18,6 +51,22 @@ export type ScanOptions = {
   tls_info?: boolean;
   common_ports?: number[];
   max_hosts?: number;
+};
+
+export type Company = {
+  id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CompanyWithRole = Company & {
+  role: string;
+  assigned_at: string;
+};
+
+export type CompanyListResponse = {
+  companies: CompanyWithRole[];
 };
 
 // ============================================================================
@@ -364,7 +413,7 @@ export type FindingListResponse = {
 // ============================================================================
 
 export async function createScan(target: string, note?: string, options?: ScanOptions): Promise<Scan> {
-  const res = await fetch(`${API_BASE}/api/scans`, {
+  const res = await apiFetch(`${API_BASE}/api/scans`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ target, note, options }),
@@ -375,13 +424,13 @@ export async function createScan(target: string, note?: string, options?: ScanOp
 }
 
 export async function listScans(): Promise<Scan[]> {
-  const res = await fetch(`${API_BASE}/api/scans`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/scans`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list scans: ${res.status}`);
   return res.json();
 }
 
 export async function getScan(id: string): Promise<Scan> {
-  const res = await fetch(`${API_BASE}/api/scans/${id}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/scans/${id}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get scan: ${res.status}`);
   return res.json();
 }
@@ -391,7 +440,7 @@ export async function getScan(id: string): Promise<Scan> {
 // ============================================================================
 
 export async function listSeeds(): Promise<Seed[]> {
-  const res = await fetch(`${API_BASE}/api/seeds`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/seeds`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list seeds: ${res.status}`);
   return res.json();
 }
@@ -402,7 +451,7 @@ export async function createSeed(seed: { seed_type: SeedType | string; value: st
     ? "domain" 
     : seed.seed_type;
   
-  const res = await fetch(`${API_BASE}/api/seeds`, {
+  const res = await apiFetch(`${API_BASE}/api/seeds`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...seed, seed_type: backendSeedType }),
@@ -413,7 +462,7 @@ export async function createSeed(seed: { seed_type: SeedType | string; value: st
 }
 
 export async function deleteSeed(seedId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/seeds/${seedId}`, { method: "DELETE", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/seeds/${seedId}`, { method: "DELETE", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to delete seed: ${res.status}`);
 }
 
@@ -427,7 +476,7 @@ export async function listAssets(min_confidence = 0, limit?: number, offset?: nu
   if (limit !== undefined) params.append("limit", limit.toString());
   if (offset !== undefined) params.append("offset", offset.toString());
   
-  const res = await fetch(`${API_BASE}/api/assets?${params.toString()}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/assets?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list assets: ${res.status}`);
   return res.json();
 }
@@ -471,7 +520,7 @@ export async function searchAssetsAdvanced(params: AssetSearchParams): Promise<A
   if (params.limit !== undefined) queryParams.append("limit", params.limit.toString());
   if (params.offset !== undefined) queryParams.append("offset", params.offset.toString());
 
-  const res = await fetch(`${API_BASE}/api/assets/search?${queryParams.toString()}`, { 
+  const res = await apiFetch(`${API_BASE}/api/assets/search?${queryParams.toString()}`, { 
     cache: "no-store", 
     credentials: "include" 
   });
@@ -480,19 +529,19 @@ export async function searchAssetsAdvanced(params: AssetSearchParams): Promise<A
 }
 
 export async function getAsset(id: string): Promise<Asset> {
-  const res = await fetch(`${API_BASE}/api/assets/${id}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/assets/${id}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get asset: ${res.status}`);
   return res.json();
 }
 
 export async function getAssetPath(assetId: string): Promise<Asset[]> {
-  const res = await fetch(`${API_BASE}/api/assets/${assetId}/path`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/assets/${assetId}/path`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get asset path: ${res.status}`);
   return res.json();
 }
 
 export async function updateAssetImportance(assetId: string, importance: number): Promise<Asset> {
-  const res = await fetch(`${API_BASE}/api/assets/${assetId}/importance`, {
+  const res = await apiFetch(`${API_BASE}/api/assets/${assetId}/importance`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ importance }),
@@ -511,7 +560,7 @@ export function getAssetPathUrl(assetId: string): string {
 // ============================================================================
 
 export async function runDiscovery(config?: DiscoveryConfig): Promise<DiscoveryRun> {
-  const res = await fetch(`${API_BASE}/api/discovery/run`, {
+  const res = await apiFetch(`${API_BASE}/api/discovery/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config || {}),
@@ -525,7 +574,7 @@ export async function runDiscovery(config?: DiscoveryConfig): Promise<DiscoveryR
 }
 
 export async function stopDiscovery(): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/discovery/stop`, {
+  const res = await apiFetch(`${API_BASE}/api/discovery/stop`, {
     method: "POST",
     credentials: "include",
   });
@@ -533,7 +582,7 @@ export async function stopDiscovery(): Promise<void> {
 }
 
 export async function getDiscoveryStatus(): Promise<DiscoveryStatus> {
-  const res = await fetch(`${API_BASE}/api/discovery/status`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/discovery/status`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get discovery status: ${res.status}`);
   return res.json();
 }
@@ -543,13 +592,13 @@ export async function listDiscoveryRuns(limit = 50, offset = 0): Promise<Discove
   params.append("limit", limit.toString());
   params.append("offset", offset.toString());
   
-  const res = await fetch(`${API_BASE}/api/discovery/runs?${params.toString()}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/discovery/runs?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list discovery runs: ${res.status}`);
   return res.json();
 }
 
 export async function getDiscoveryRun(id: string): Promise<DiscoveryRun> {
-  const res = await fetch(`${API_BASE}/api/discovery/runs/${id}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/discovery/runs/${id}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get discovery run: ${res.status}`);
   return res.json();
 }
@@ -559,7 +608,7 @@ export async function getDiscoveryRun(id: string): Promise<DiscoveryRun> {
 // ============================================================================
 
 export async function createSecurityScan(assetId: string, scanType?: string, note?: string): Promise<SecurityScan> {
-  const res = await fetch(`${API_BASE}/api/security/scans`, {
+  const res = await apiFetch(`${API_BASE}/api/security/scans`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ asset_id: assetId, scan_type: scanType, note }),
@@ -575,19 +624,19 @@ export async function listSecurityScans(limit = 50, offset = 0, assetId?: string
   params.append("offset", offset.toString());
   if (assetId) params.append("asset_id", assetId);
   
-  const res = await fetch(`${API_BASE}/api/security/scans?${params.toString()}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/security/scans?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list security scans: ${res.status}`);
   return res.json();
 }
 
 export async function getSecurityScan(id: string): Promise<SecurityScanDetail> {
-  const res = await fetch(`${API_BASE}/api/security/scans/${id}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/security/scans/${id}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get security scan: ${res.status}`);
   return res.json();
 }
 
 export async function cancelSecurityScan(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/security/scans/${id}/cancel`, {
+  const res = await apiFetch(`${API_BASE}/api/security/scans/${id}/cancel`, {
     method: "POST",
     credentials: "include",
   });
@@ -603,19 +652,19 @@ export async function listSecurityFindings(filter?: SecurityFindingFilter): Prom
   if (filter?.limit) params.append("limit", filter.limit.toString());
   if (filter?.offset) params.append("offset", filter.offset.toString());
   
-  const res = await fetch(`${API_BASE}/api/security/findings?${params.toString()}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/security/findings?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list security findings: ${res.status}`);
   return res.json();
 }
 
 export async function getSecurityFinding(id: string): Promise<SecurityFinding> {
-  const res = await fetch(`${API_BASE}/api/security/findings/${id}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/security/findings/${id}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get security finding: ${res.status}`);
   return res.json();
 }
 
 export async function updateSecurityFinding(id: string, update: SecurityFindingUpdate): Promise<SecurityFinding> {
-  const res = await fetch(`${API_BASE}/api/security/findings/${id}`, {
+  const res = await apiFetch(`${API_BASE}/api/security/findings/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(update),
@@ -626,7 +675,7 @@ export async function updateSecurityFinding(id: string, update: SecurityFindingU
 }
 
 export async function resolveSecurityFinding(id: string): Promise<SecurityFinding> {
-  const res = await fetch(`${API_BASE}/api/security/findings/${id}/resolve`, {
+  const res = await apiFetch(`${API_BASE}/api/security/findings/${id}/resolve`, {
     method: "POST",
     credentials: "include",
   });
@@ -635,13 +684,13 @@ export async function resolveSecurityFinding(id: string): Promise<SecurityFindin
 }
 
 export async function getSecurityFindingsSummary(): Promise<{ by_severity: Record<string, number> }> {
-  const res = await fetch(`${API_BASE}/api/security/findings/summary`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/security/findings/summary`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get findings summary: ${res.status}`);
   return res.json();
 }
 
 export async function triggerAssetScan(assetId: string, scanType?: string, note?: string): Promise<SecurityScan> {
-  const res = await fetch(`${API_BASE}/api/assets/${assetId}/scan`, {
+  const res = await apiFetch(`${API_BASE}/api/assets/${assetId}/scan`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ scan_type: scanType, note }),
@@ -652,7 +701,7 @@ export async function triggerAssetScan(assetId: string, scanType?: string, note?
 }
 
 export async function getAssetFindings(assetId: string): Promise<SecurityFinding[]> {
-  const res = await fetch(`${API_BASE}/api/assets/${assetId}/findings`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/assets/${assetId}/findings`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get asset findings: ${res.status}`);
   return res.json();
 }
@@ -661,7 +710,7 @@ export async function listPendingSecurityScans(limit = 50): Promise<SecurityScan
   const params = new URLSearchParams();
   params.append("limit", limit.toString());
   
-  const res = await fetch(`${API_BASE}/api/security/scans/pending?${params.toString()}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/security/scans/pending?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list pending scans: ${res.status}`);
   return res.json();
 }
@@ -671,13 +720,13 @@ export async function listPendingSecurityScans(limit = 50): Promise<SecurityScan
 // ============================================================================
 
 export async function getAssetRisk(assetId: string): Promise<Asset> {
-  const res = await fetch(`${API_BASE}/api/risk/assets/${assetId}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/risk/assets/${assetId}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get asset risk: ${res.status}`);
   return res.json();
 }
 
 export async function recalculateAssetRisk(assetId: string): Promise<Asset> {
-  const res = await fetch(`${API_BASE}/api/risk/assets/${assetId}/recalculate`, {
+  const res = await apiFetch(`${API_BASE}/api/risk/assets/${assetId}/recalculate`, {
     method: "POST",
     credentials: "include",
   });
@@ -686,7 +735,7 @@ export async function recalculateAssetRisk(assetId: string): Promise<Asset> {
 }
 
 export async function getRiskOverview(): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_BASE}/api/risk/overview`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/risk/overview`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get risk overview: ${res.status}`);
   return res.json();
 }
@@ -698,7 +747,7 @@ export type RiskRecalculationResult = {
 };
 
 export async function recalculateAllRisks(): Promise<RiskRecalculationResult> {
-  const res = await fetch(`${API_BASE}/api/risk/recalculate-all`, {
+  const res = await apiFetch(`${API_BASE}/api/risk/recalculate-all`, {
     method: "POST",
     credentials: "include",
   });
@@ -710,7 +759,7 @@ export async function getHighRiskAssets(limit = 20): Promise<Asset[]> {
   const params = new URLSearchParams();
   params.append("limit", limit.toString());
   
-  const res = await fetch(`${API_BASE}/api/risk/high-risk-assets?${params.toString()}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/risk/high-risk-assets?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get high risk assets: ${res.status}`);
   return res.json();
 }
@@ -720,7 +769,7 @@ export async function getHighRiskAssets(limit = 20): Promise<Asset[]> {
 // ============================================================================
 
 export async function detectDrift(scanId: string): Promise<{ drift_count: number; findings_created: number }> {
-  const res = await fetch(`${API_BASE}/api/scans/${scanId}/drift/detect`, {
+  const res = await apiFetch(`${API_BASE}/api/scans/${scanId}/drift/detect`, {
     method: "POST",
     credentials: "include",
   });
@@ -729,7 +778,7 @@ export async function detectDrift(scanId: string): Promise<{ drift_count: number
 }
 
 export async function getDriftFindings(scanId: string): Promise<Finding[]> {
-  const res = await fetch(`${API_BASE}/api/scans/${scanId}/drift/findings`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/scans/${scanId}/drift/findings`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get drift findings: ${res.status}`);
   return res.json();
 }
@@ -755,7 +804,7 @@ export async function filterFindings(params: FindingFilterParams): Promise<Findi
   if (params.limit !== undefined) queryParams.append("limit", params.limit.toString());
   if (params.offset !== undefined) queryParams.append("offset", params.offset.toString());
   
-  const res = await fetch(`${API_BASE}/api/findings/filter?${queryParams.toString()}`, {
+  const res = await apiFetch(`${API_BASE}/api/findings/filter?${queryParams.toString()}`, {
     cache: "no-store",
     credentials: "include",
   });
@@ -764,7 +813,7 @@ export async function filterFindings(params: FindingFilterParams): Promise<Findi
 }
 
 export async function getFindingTypes(): Promise<string[]> {
-  const res = await fetch(`${API_BASE}/api/findings/types`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/findings/types`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get finding types: ${res.status}`);
   return res.json();
 }
@@ -779,7 +828,7 @@ export async function searchAssets(query: string, size = 20, from = 0): Promise<
   params.append("size", size.toString());
   params.append("from", from.toString());
   
-  const res = await fetch(`${API_BASE}/api/search/assets?${params.toString()}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/search/assets?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to search assets: ${res.status}`);
   return res.json();
 }
@@ -790,13 +839,13 @@ export async function searchFindings(query: string, size = 20, from = 0): Promis
   params.append("size", size.toString());
   params.append("from", from.toString());
   
-  const res = await fetch(`${API_BASE}/api/search/findings?${params.toString()}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/search/findings?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to search findings: ${res.status}`);
   return res.json();
 }
 
 export async function reindexSearch(): Promise<{ assets_indexed: number; findings_indexed: number }> {
-  const res = await fetch(`${API_BASE}/api/search/reindex`, {
+  const res = await apiFetch(`${API_BASE}/api/search/reindex`, {
     method: "POST",
     credentials: "include",
   });
@@ -805,7 +854,7 @@ export async function reindexSearch(): Promise<{ assets_indexed: number; finding
 }
 
 export async function getSearchStatus(): Promise<{ status: string; search_available: boolean; message: string }> {
-  const res = await fetch(`${API_BASE}/api/search/status`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/search/status`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get search status: ${res.status}`);
   return res.json();
 }
@@ -815,25 +864,25 @@ export async function getSearchStatus(): Promise<{ status: string; search_availa
 // ============================================================================
 
 export async function getMetrics(): Promise<SystemMetrics> {
-  const res = await fetch(`${API_BASE}/api/metrics`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/metrics`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get metrics: ${res.status}`);
   return res.json();
 }
 
 export async function getPerformanceReport(): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_BASE}/api/metrics/report`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/metrics/report`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get performance report: ${res.status}`);
   return res.json();
 }
 
 export async function getHealthMetrics(): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_BASE}/api/metrics/health`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/metrics/health`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get health metrics: ${res.status}`);
   return res.json();
 }
 
 export async function clearMetrics(): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/metrics/clear`, {
+  const res = await apiFetch(`${API_BASE}/api/metrics/clear`, {
     method: "POST",
     credentials: "include",
   });
@@ -845,8 +894,47 @@ export async function clearMetrics(): Promise<void> {
 // ============================================================================
 
 export async function getHealth(): Promise<{ status: string; timestamp: string; version: string }> {
-  const res = await fetch(`${API_BASE}/api/health`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/health`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get health: ${res.status}`);
+  return res.json();
+}
+
+// ============================================================================
+// COMPANY API
+// ============================================================================
+
+export async function listCompanies(): Promise<CompanyWithRole[]> {
+  const res = await apiFetch(`${API_BASE}/api/companies`, { cache: "no-store", credentials: "include" });
+  if (!res.ok) throw new Error(`Failed to list companies: ${res.status}`);
+  const data: CompanyListResponse = await res.json();
+  return data.companies || [];
+}
+
+export async function createCompany(name: string): Promise<Company> {
+  const res = await apiFetch(`${API_BASE}/api/companies`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to create company: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateCompany(id: string, name: string): Promise<Company> {
+  const res = await apiFetch(`${API_BASE}/api/companies/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to update company: ${res.status}`);
+  }
   return res.json();
 }
 
@@ -855,19 +943,19 @@ export async function getHealth(): Promise<{ status: string; timestamp: string; 
 // ============================================================================
 
 export async function listUsers(): Promise<UserWithRoles[]> {
-  const res = await fetch(`${API_BASE}/api/admin/users`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/admin/users`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list users: ${res.status}`);
   return res.json();
 }
 
 export async function getUser(userId: string): Promise<UserWithRoles> {
-  const res = await fetch(`${API_BASE}/api/admin/users/${userId}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/admin/users/${userId}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get user: ${res.status}`);
   return res.json();
 }
 
 export async function createUser(userData: CreateUserRequest): Promise<UserWithRoles> {
-  const res = await fetch(`${API_BASE}/api/admin/users`, {
+  const res = await apiFetch(`${API_BASE}/api/admin/users`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(userData),
@@ -881,7 +969,7 @@ export async function createUser(userData: CreateUserRequest): Promise<UserWithR
 }
 
 export async function updateUser(userId: string, userData: UpdateUserRequest): Promise<UserWithRoles> {
-  const res = await fetch(`${API_BASE}/api/admin/users/${userId}`, {
+  const res = await apiFetch(`${API_BASE}/api/admin/users/${userId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(userData),
@@ -895,7 +983,7 @@ export async function updateUser(userId: string, userData: UpdateUserRequest): P
 }
 
 export async function deleteUser(userId: string): Promise<string> {
-  const res = await fetch(`${API_BASE}/api/admin/users/${userId}`, {
+  const res = await apiFetch(`${API_BASE}/api/admin/users/${userId}`, {
     method: "DELETE",
     credentials: "include",
   });
@@ -907,7 +995,7 @@ export async function deleteUser(userId: string): Promise<string> {
 }
 
 export async function updateUserRole(userId: string, role: string, action: "add" | "remove"): Promise<string> {
-  const res = await fetch(`${API_BASE}/api/admin/users/${userId}/roles`, {
+  const res = await apiFetch(`${API_BASE}/api/admin/users/${userId}/roles`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ role, action }),
@@ -1029,7 +1117,7 @@ export type SettingsUpdatePayload = {
 };
 
 export async function getSettings(revealSecrets = false): Promise<SettingsResponse> {
-  const res = await fetch(`${API_BASE}/api/admin/settings?reveal_secrets=${revealSecrets}`, {
+  const res = await apiFetch(`${API_BASE}/api/admin/settings?reveal_secrets=${revealSecrets}`, {
     cache: "no-store",
     credentials: "include",
   });
@@ -1038,7 +1126,7 @@ export async function getSettings(revealSecrets = false): Promise<SettingsRespon
 }
 
 export async function updateSettings(payload: SettingsUpdatePayload, revealSecrets = false): Promise<SettingsResponse> {
-  const res = await fetch(`${API_BASE}/api/admin/settings?reveal_secrets=${revealSecrets}`, {
+  const res = await apiFetch(`${API_BASE}/api/admin/settings?reveal_secrets=${revealSecrets}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -1056,7 +1144,7 @@ export async function uploadEvidence(scanId: string, file: File): Promise<{ id: 
   const formData = new FormData();
   formData.append("file", file);
   
-  const res = await fetch(`${API_BASE}/api/scans/${scanId}/evidence`, {
+  const res = await apiFetch(`${API_BASE}/api/scans/${scanId}/evidence`, {
     method: "POST",
     body: formData,
     credentials: "include",
@@ -1066,7 +1154,7 @@ export async function uploadEvidence(scanId: string, file: File): Promise<{ id: 
 }
 
 export async function listEvidenceByScan(scanId: string): Promise<Array<{ id: string; filename: string; content_type: string; file_size: number }>> {
-  const res = await fetch(`${API_BASE}/api/scans/${scanId}/evidence`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/scans/${scanId}/evidence`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list evidence: ${res.status}`);
   return res.json();
 }
@@ -1087,6 +1175,7 @@ export type Tag = {
   rule_type: "regex" | "ip_range" | null;
   rule_value: string | null;
   color: string | null;
+  company_id: string;
   created_at: string;
   updated_at: string;
 };
@@ -1099,6 +1188,7 @@ export type TagWithCount = {
   rule_type: "regex" | "ip_range" | null;
   rule_value: string | null;
   color: string | null;
+  company_id: string;
   created_at: string;
   updated_at: string;
   asset_count: number;
@@ -1152,19 +1242,19 @@ export async function listTags(limit = 100, offset = 0): Promise<TagListResponse
   params.append("limit", limit.toString());
   params.append("offset", offset.toString());
   
-  const res = await fetch(`${API_BASE}/api/tags?${params.toString()}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/tags?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list tags: ${res.status}`);
   return res.json();
 }
 
 export async function getTag(id: string): Promise<Tag> {
-  const res = await fetch(`${API_BASE}/api/tags/${id}`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/tags/${id}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get tag: ${res.status}`);
   return res.json();
 }
 
 export async function createTag(tag: TagCreate): Promise<Tag> {
-  const res = await fetch(`${API_BASE}/api/tags`, {
+  const res = await apiFetch(`${API_BASE}/api/tags`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(tag),
@@ -1178,7 +1268,7 @@ export async function createTag(tag: TagCreate): Promise<Tag> {
 }
 
 export async function updateTag(id: string, update: TagUpdate): Promise<Tag> {
-  const res = await fetch(`${API_BASE}/api/tags/${id}`, {
+  const res = await apiFetch(`${API_BASE}/api/tags/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(update),
@@ -1192,7 +1282,7 @@ export async function updateTag(id: string, update: TagUpdate): Promise<Tag> {
 }
 
 export async function deleteTag(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/tags/${id}`, {
+  const res = await apiFetch(`${API_BASE}/api/tags/${id}`, {
     method: "DELETE",
     credentials: "include",
   });
@@ -1200,13 +1290,13 @@ export async function deleteTag(id: string): Promise<void> {
 }
 
 export async function getAssetTags(assetId: string): Promise<AssetTagDetail[]> {
-  const res = await fetch(`${API_BASE}/api/assets/${assetId}/tags`, { cache: "no-store", credentials: "include" });
+  const res = await apiFetch(`${API_BASE}/api/assets/${assetId}/tags`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get asset tags: ${res.status}`);
   return res.json();
 }
 
 export async function tagAsset(assetId: string, tagId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/assets/${assetId}/tags`, {
+  const res = await apiFetch(`${API_BASE}/api/assets/${assetId}/tags`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ tag_id: tagId }),
@@ -1216,7 +1306,7 @@ export async function tagAsset(assetId: string, tagId: string): Promise<void> {
 }
 
 export async function untagAsset(assetId: string, tagId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/assets/${assetId}/tags/${tagId}`, {
+  const res = await apiFetch(`${API_BASE}/api/assets/${assetId}/tags/${tagId}`, {
     method: "DELETE",
     credentials: "include",
   });
@@ -1224,7 +1314,7 @@ export async function untagAsset(assetId: string, tagId: string): Promise<void> 
 }
 
 export async function runAutoTagForTag(tagId: string): Promise<AutoTagResult> {
-  const res = await fetch(`${API_BASE}/api/tags/${tagId}/run-auto-tag`, {
+  const res = await apiFetch(`${API_BASE}/api/tags/${tagId}/run-auto-tag`, {
     method: "POST",
     credentials: "include",
   });
@@ -1233,7 +1323,7 @@ export async function runAutoTagForTag(tagId: string): Promise<AutoTagResult> {
 }
 
 export async function runAutoTagAll(): Promise<AutoTagResult> {
-  const res = await fetch(`${API_BASE}/api/tags/run-auto-tag-all`, {
+  const res = await apiFetch(`${API_BASE}/api/tags/run-auto-tag-all`, {
     method: "POST",
     credentials: "include",
   });
@@ -1251,6 +1341,7 @@ export type BlacklistEntry = {
   id: string;
   object_type: string;
   object_value: string;
+  company_id: string;
   reason: string | null;
   created_by: string | null;
   created_at: string;
@@ -1304,7 +1395,7 @@ export async function listBlacklist(
   if (objectType) params.append("object_type", objectType);
   if (q) params.append("q", q);
 
-  const res = await fetch(`${API_BASE}/api/blacklist?${params.toString()}`, {
+  const res = await apiFetch(`${API_BASE}/api/blacklist?${params.toString()}`, {
     cache: "no-store",
     credentials: "include",
   });
@@ -1313,7 +1404,7 @@ export async function listBlacklist(
 }
 
 export async function createBlacklistEntry(entry: BlacklistCreate): Promise<BlacklistResult> {
-  const res = await fetch(`${API_BASE}/api/blacklist`, {
+  const res = await apiFetch(`${API_BASE}/api/blacklist`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(entry),
@@ -1327,7 +1418,7 @@ export async function createBlacklistEntry(entry: BlacklistCreate): Promise<Blac
 }
 
 export async function getBlacklistEntry(id: string): Promise<BlacklistEntry> {
-  const res = await fetch(`${API_BASE}/api/blacklist/${id}`, {
+  const res = await apiFetch(`${API_BASE}/api/blacklist/${id}`, {
     cache: "no-store",
     credentials: "include",
   });
@@ -1336,7 +1427,7 @@ export async function getBlacklistEntry(id: string): Promise<BlacklistEntry> {
 }
 
 export async function updateBlacklistEntry(id: string, reason: string): Promise<BlacklistEntry> {
-  const res = await fetch(`${API_BASE}/api/blacklist/${id}`, {
+  const res = await apiFetch(`${API_BASE}/api/blacklist/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ reason }),
@@ -1347,7 +1438,7 @@ export async function updateBlacklistEntry(id: string, reason: string): Promise<
 }
 
 export async function deleteBlacklistEntry(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/blacklist/${id}`, {
+  const res = await apiFetch(`${API_BASE}/api/blacklist/${id}`, {
     method: "DELETE",
     credentials: "include",
   });
@@ -1358,7 +1449,7 @@ export async function checkBlacklist(
   objectType: BlacklistObjectType,
   objectValue: string
 ): Promise<BlacklistCheckResult> {
-  const res = await fetch(`${API_BASE}/api/blacklist/check`, {
+  const res = await apiFetch(`${API_BASE}/api/blacklist/check`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ object_type: objectType, object_value: objectValue }),
@@ -1373,7 +1464,7 @@ export async function blacklistFromAsset(
   reason?: string,
   deleteDescendants = true
 ): Promise<BlacklistResult> {
-  const res = await fetch(`${API_BASE}/api/blacklist/from-asset/${assetId}`, {
+  const res = await apiFetch(`${API_BASE}/api/blacklist/from-asset/${assetId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ reason, delete_descendants: deleteDescendants }),
@@ -1387,7 +1478,7 @@ export async function blacklistFromAsset(
 }
 
 export async function getBlacklistStats(): Promise<BlacklistStats> {
-  const res = await fetch(`${API_BASE}/api/blacklist/stats`, {
+  const res = await apiFetch(`${API_BASE}/api/blacklist/stats`, {
     cache: "no-store",
     credentials: "include",
   });
@@ -1448,7 +1539,7 @@ export type FindingTypeConfigBulkUpdateResult = {
 // ============================================================================
 
 export async function listFindingTypeConfigs(): Promise<FindingTypeConfigListResponse> {
-  const res = await fetch(`${API_BASE}/api/admin/finding-type-config`, {
+  const res = await apiFetch(`${API_BASE}/api/admin/finding-type-config`, {
     cache: "no-store",
     credentials: "include",
   });
@@ -1457,7 +1548,7 @@ export async function listFindingTypeConfigs(): Promise<FindingTypeConfigListRes
 }
 
 export async function getFindingTypeConfig(findingType: string): Promise<FindingTypeConfig> {
-  const res = await fetch(`${API_BASE}/api/admin/finding-type-config/${encodeURIComponent(findingType)}`, {
+  const res = await apiFetch(`${API_BASE}/api/admin/finding-type-config/${encodeURIComponent(findingType)}`, {
     cache: "no-store",
     credentials: "include",
   });
@@ -1469,7 +1560,7 @@ export async function updateFindingTypeConfig(
   findingType: string,
   update: FindingTypeConfigUpdate
 ): Promise<FindingTypeConfig> {
-  const res = await fetch(`${API_BASE}/api/admin/finding-type-config/${encodeURIComponent(findingType)}`, {
+  const res = await apiFetch(`${API_BASE}/api/admin/finding-type-config/${encodeURIComponent(findingType)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(update),
@@ -1485,7 +1576,7 @@ export async function updateFindingTypeConfig(
 export async function bulkUpdateFindingTypeConfigs(
   configs: FindingTypeConfigBulkUpdateItem[]
 ): Promise<FindingTypeConfigBulkUpdateResult> {
-  const res = await fetch(`${API_BASE}/api/admin/finding-type-config/bulk`, {
+  const res = await apiFetch(`${API_BASE}/api/admin/finding-type-config/bulk`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ configs }),

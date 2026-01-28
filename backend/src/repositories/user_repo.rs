@@ -1,5 +1,6 @@
 use crate::auth::rbac::Role;
 use crate::error::ApiError;
+use crate::models::UserCompany;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -86,6 +87,9 @@ pub trait UserRepository: Send + Sync {
         password_hash: Option<String>,
         display_name: Option<&str>,
     ) -> Result<User, ApiError>;
+
+    async fn get_user_companies(&self, user_id: Uuid) -> Result<Vec<UserCompany>, ApiError>;
+    async fn is_user_in_company(&self, user_id: Uuid, company_id: Uuid) -> Result<bool, ApiError>;
 }
 
 pub struct SqlxUserRepository {
@@ -95,6 +99,20 @@ pub struct SqlxUserRepository {
 impl SqlxUserRepository {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    async fn assign_to_default_company(&self, user_id: Uuid) -> Result<(), ApiError> {
+        let default_company_id = Uuid::nil();
+        sqlx::query!(
+            "INSERT INTO user_companies (user_id, company_id, role) VALUES ($1, $2, 'admin') ON CONFLICT DO NOTHING",
+            user_id,
+            default_company_id
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ApiError::Database(e))?;
+
+        Ok(())
     }
 }
 
@@ -146,6 +164,8 @@ impl UserRepository for SqlxUserRepository {
         .fetch_one(&self.pool)
         .await
         .map_err(|e| ApiError::Database(e))?;
+
+        self.assign_to_default_company(user.id).await?;
 
         Ok(user)
     }
@@ -335,6 +355,36 @@ impl UserRepository for SqlxUserRepository {
         .await
         .map_err(|e| ApiError::Database(e))?;
 
+        self.assign_to_default_company(user.id).await?;
+
         Ok(user)
+    }
+
+    async fn get_user_companies(&self, user_id: Uuid) -> Result<Vec<UserCompany>, ApiError> {
+        let companies = sqlx::query_as!(
+            UserCompany,
+            r#"SELECT user_id, company_id, role, assigned_at 
+               FROM user_companies 
+               WHERE user_id = $1"#,
+            user_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ApiError::Database(e))?;
+
+        Ok(companies)
+    }
+
+    async fn is_user_in_company(&self, user_id: Uuid, company_id: Uuid) -> Result<bool, ApiError> {
+        let result = sqlx::query!(
+            r#"SELECT 1 as "exists!" FROM user_companies WHERE user_id = $1 AND company_id = $2"#,
+            user_id,
+            company_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ApiError::Database(e))?;
+
+        Ok(result.is_some())
     }
 }

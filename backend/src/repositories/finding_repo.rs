@@ -8,13 +8,29 @@ use uuid::Uuid;
 
 #[async_trait]
 pub trait FindingRepository {
-    async fn create(&self, finding: &FindingCreate) -> Result<Finding, ApiError>;
-    async fn list_by_scan(&self, scan_id: &Uuid) -> Result<Vec<Finding>, ApiError>;
-    async fn list_by_type(&self, finding_type: &str) -> Result<Vec<Finding>, ApiError>;
-    async fn list_by_asset(&self, asset_identifier: &str) -> Result<Vec<Finding>, ApiError>; // Added
-    async fn search(&self, query: &str) -> Result<Vec<Finding>, ApiError>;
-    async fn count_by_scan(&self, scan_id: &Uuid) -> Result<i64, ApiError>;
-    async fn filter(&self, filter: &FindingFilter) -> Result<FindingListResponse, ApiError>;
+    async fn create(&self, finding: &FindingCreate, company_id: Uuid) -> Result<Finding, ApiError>;
+    async fn list_by_scan(
+        &self,
+        scan_id: &Uuid,
+        company_id: Uuid,
+    ) -> Result<Vec<Finding>, ApiError>;
+    async fn list_by_type(
+        &self,
+        finding_type: &str,
+        company_id: Uuid,
+    ) -> Result<Vec<Finding>, ApiError>;
+    async fn list_by_asset(
+        &self,
+        asset_identifier: &str,
+        company_id: Uuid,
+    ) -> Result<Vec<Finding>, ApiError>;
+    async fn search(&self, query: &str, company_id: Uuid) -> Result<Vec<Finding>, ApiError>;
+    async fn count_by_scan(&self, scan_id: &Uuid, company_id: Uuid) -> Result<i64, ApiError>;
+    async fn filter(
+        &self,
+        filter: &FindingFilter,
+        company_id: Uuid,
+    ) -> Result<FindingListResponse, ApiError>;
 }
 
 pub struct SqlxFindingRepository {
@@ -29,15 +45,15 @@ impl SqlxFindingRepository {
 
 #[async_trait]
 impl FindingRepository for SqlxFindingRepository {
-    async fn create(&self, finding: &FindingCreate) -> Result<Finding, ApiError> {
+    async fn create(&self, finding: &FindingCreate, company_id: Uuid) -> Result<Finding, ApiError> {
         let id = Uuid::new_v4();
         let now = chrono::Utc::now();
 
         let result = sqlx::query_as::<_, Finding>(
             r#"
-            INSERT INTO findings (id, scan_id, finding_type, data, created_at)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id, scan_id, finding_type, data, created_at
+            INSERT INTO findings (id, scan_id, finding_type, data, created_at, company_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id, scan_id, finding_type, data, created_at, company_id
             "#,
         )
         .bind(id)
@@ -45,111 +61,138 @@ impl FindingRepository for SqlxFindingRepository {
         .bind(&finding.finding_type)
         .bind(&finding.data)
         .bind(now)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(result)
     }
 
-    async fn list_by_scan(&self, scan_id: &Uuid) -> Result<Vec<Finding>, ApiError> {
+    async fn list_by_scan(
+        &self,
+        scan_id: &Uuid,
+        company_id: Uuid,
+    ) -> Result<Vec<Finding>, ApiError> {
         let results = sqlx::query_as::<_, Finding>(
             r#"
-            SELECT id, scan_id, finding_type, data, created_at
+            SELECT id, scan_id, finding_type, data, created_at, company_id
             FROM findings
-            WHERE scan_id = $1
+            WHERE scan_id = $1 AND company_id = $2
             ORDER BY created_at DESC
             "#,
         )
         .bind(scan_id)
+        .bind(company_id)
         .fetch_all(&self.pool)
         .await?;
 
         Ok(results)
     }
 
-    async fn list_by_type(&self, finding_type: &str) -> Result<Vec<Finding>, ApiError> {
+    async fn list_by_type(
+        &self,
+        finding_type: &str,
+        company_id: Uuid,
+    ) -> Result<Vec<Finding>, ApiError> {
         let results = sqlx::query_as::<_, Finding>(
             r#"
-            SELECT id, scan_id, finding_type, data, created_at
+            SELECT id, scan_id, finding_type, data, created_at, company_id
             FROM findings
-            WHERE finding_type = $1
+            WHERE finding_type = $1 AND company_id = $2
             ORDER BY created_at DESC
             "#,
         )
         .bind(finding_type)
+        .bind(company_id)
         .fetch_all(&self.pool)
         .await?;
 
         Ok(results)
     }
 
-    async fn list_by_asset(&self, asset_identifier: &str) -> Result<Vec<Finding>, ApiError> {
+    async fn list_by_asset(
+        &self,
+        asset_identifier: &str,
+        company_id: Uuid,
+    ) -> Result<Vec<Finding>, ApiError> {
         let results = sqlx::query_as::<_, Finding>(
             r#"
-            SELECT f.id, f.scan_id, f.finding_type, f.data, f.created_at
+            SELECT f.id, f.scan_id, f.finding_type, f.data, f.created_at, f.company_id
             FROM findings f
             JOIN scans s ON f.scan_id = s.id
-            WHERE LOWER(TRIM(s.target)) = LOWER(TRIM($1))
+            WHERE LOWER(TRIM(s.target)) = LOWER(TRIM($1)) AND f.company_id = $2
             ORDER BY f.created_at DESC
             "#,
         )
         .bind(asset_identifier)
+        .bind(company_id)
         .fetch_all(&self.pool)
         .await?;
 
         Ok(results)
     }
 
-    async fn search(&self, query: &str) -> Result<Vec<Finding>, ApiError> {
+    async fn search(&self, query: &str, company_id: Uuid) -> Result<Vec<Finding>, ApiError> {
         let search_pattern = format!("%{}%", query);
 
         #[cfg(test)]
         let results = sqlx::query_as::<_, Finding>(
             r#"
-            SELECT id, scan_id, finding_type, data, created_at
+            SELECT id, scan_id, finding_type, data, created_at, company_id
             FROM findings
-            WHERE finding_type LIKE $1 OR json_extract(data, '$') LIKE $1
+            WHERE (finding_type LIKE $1 OR json_extract(data, '$') LIKE $1) AND company_id = $2
             ORDER BY created_at DESC
             "#,
         )
         .bind(&search_pattern)
+        .bind(company_id)
         .fetch_all(&self.pool)
         .await?;
 
         #[cfg(not(test))]
         let results = sqlx::query_as::<_, Finding>(
             r#"
-            SELECT id, scan_id, finding_type, data, created_at
+            SELECT id, scan_id, finding_type, data, created_at, company_id
             FROM findings
-            WHERE finding_type ILIKE $1 OR data::text ILIKE $1
+            WHERE (finding_type ILIKE $1 OR data::text ILIKE $1) AND company_id = $2
             ORDER BY created_at DESC
             "#,
         )
         .bind(&search_pattern)
+        .bind(company_id)
         .fetch_all(&self.pool)
         .await?;
 
         Ok(results)
     }
 
-    async fn count_by_scan(&self, scan_id: &Uuid) -> Result<i64, ApiError> {
+    async fn count_by_scan(&self, scan_id: &Uuid, company_id: Uuid) -> Result<i64, ApiError> {
         let result = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT COUNT(*)
             FROM findings
-            WHERE scan_id = $1
+            WHERE scan_id = $1 AND company_id = $2
             "#,
         )
         .bind(scan_id)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(result)
     }
 
-    async fn filter(&self, filter: &FindingFilter) -> Result<FindingListResponse, ApiError> {
+    async fn filter(
+        &self,
+        filter: &FindingFilter,
+        company_id: Uuid,
+    ) -> Result<FindingListResponse, ApiError> {
         let mut where_clauses = Vec::new();
         let mut param_index = 1;
+
+        // Add company_id filter
+        where_clauses.push(format!("company_id = ${}", param_index));
+        param_index += 1;
 
         if let Some(ref types) = filter.finding_types {
             if !types.is_empty() {
@@ -217,7 +260,7 @@ impl FindingRepository for SqlxFindingRepository {
         let count_sql = format!("SELECT COUNT(*) FROM findings {}", where_sql);
 
         let main_sql = format!(
-            "SELECT id, scan_id, finding_type, data, created_at FROM findings {} {} LIMIT ${} OFFSET ${}",
+            "SELECT id, scan_id, finding_type, data, created_at, company_id FROM findings {} {} LIMIT ${} OFFSET ${}",
             where_sql, order_sql, param_index, param_index + 1
         );
 
@@ -228,6 +271,9 @@ impl FindingRepository for SqlxFindingRepository {
             .map(|s| format!("%{}%", s));
 
         let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
+
+        // Bind company_id
+        count_query = count_query.bind(company_id);
 
         if let Some(ref types) = filter.finding_types {
             if !types.is_empty() {
@@ -256,6 +302,9 @@ impl FindingRepository for SqlxFindingRepository {
         let total_count = count_query.fetch_one(&self.pool).await?;
 
         let mut main_query = sqlx::query_as::<_, Finding>(&main_sql);
+
+        // Bind company_id
+        main_query = main_query.bind(company_id);
 
         if let Some(ref types) = filter.finding_types {
             if !types.is_empty() {

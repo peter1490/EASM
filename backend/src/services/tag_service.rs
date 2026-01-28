@@ -40,7 +40,11 @@ impl TagService {
     // TAG CRUD OPERATIONS
     // ========================================================================
 
-    pub async fn create_tag(&self, tag_create: TagCreate) -> Result<Tag, ApiError> {
+    pub async fn create_tag(
+        &self,
+        company_id: Uuid,
+        tag_create: TagCreate,
+    ) -> Result<Tag, ApiError> {
         // Validate tag name
         if tag_create.name.trim().is_empty() {
             return Err(ApiError::Validation("Tag name cannot be empty".to_string()));
@@ -60,7 +64,11 @@ impl TagService {
         }
 
         // Check for duplicate name
-        if let Some(_) = self.tag_repo.get_by_name(&tag_create.name).await? {
+        if let Some(_) = self
+            .tag_repo
+            .get_by_name(company_id, &tag_create.name)
+            .await?
+        {
             return Err(ApiError::Validation(format!(
                 "Tag with name '{}' already exists",
                 tag_create.name
@@ -74,16 +82,21 @@ impl TagService {
             self.validate_rule(rule_type, rule_value)?;
         }
 
-        self.tag_repo.create(&tag_create).await
+        self.tag_repo.create(company_id, &tag_create).await
     }
 
-    pub async fn get_tag(&self, id: &Uuid) -> Result<Option<Tag>, ApiError> {
-        self.tag_repo.get_by_id(id).await
+    pub async fn get_tag(&self, company_id: Uuid, id: &Uuid) -> Result<Option<Tag>, ApiError> {
+        self.tag_repo.get_by_id(company_id, id).await
     }
 
-    pub async fn list_tags(&self, limit: i64, offset: i64) -> Result<TagListResponse, ApiError> {
-        let tags = self.tag_repo.list(limit, offset).await?;
-        let total_count = self.tag_repo.count().await?;
+    pub async fn list_tags(
+        &self,
+        company_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<TagListResponse, ApiError> {
+        let tags = self.tag_repo.list(company_id, limit, offset).await?;
+        let total_count = self.tag_repo.count(company_id).await?;
 
         Ok(TagListResponse {
             tags,
@@ -93,7 +106,12 @@ impl TagService {
         })
     }
 
-    pub async fn update_tag(&self, id: &Uuid, update: TagUpdate) -> Result<Tag, ApiError> {
+    pub async fn update_tag(
+        &self,
+        company_id: Uuid,
+        id: &Uuid,
+        update: TagUpdate,
+    ) -> Result<Tag, ApiError> {
         // Validate importance if provided
         if let Some(importance) = update.importance {
             if importance < 1 || importance > 5 {
@@ -115,7 +133,7 @@ impl TagService {
             }
 
             // Check for duplicate name (excluding current tag)
-            if let Some(existing) = self.tag_repo.get_by_name(name).await? {
+            if let Some(existing) = self.tag_repo.get_by_name(company_id, name).await? {
                 if existing.id != *id {
                     return Err(ApiError::Validation(format!(
                         "Tag with name '{}' already exists",
@@ -132,30 +150,45 @@ impl TagService {
             }
         }
 
-        self.tag_repo.update(id, &update).await
+        self.tag_repo.update(company_id, id, &update).await
     }
 
-    pub async fn delete_tag(&self, id: &Uuid) -> Result<(), ApiError> {
+    pub async fn delete_tag(&self, company_id: Uuid, id: &Uuid) -> Result<(), ApiError> {
         // Check if tag exists
-        if self.tag_repo.get_by_id(id).await?.is_none() {
+        if self.tag_repo.get_by_id(company_id, id).await?.is_none() {
             return Err(ApiError::NotFound(format!("Tag {} not found", id)));
         }
 
-        self.tag_repo.delete(id).await
+        self.tag_repo.delete(company_id, id).await
     }
 
     // ========================================================================
     // ASSET TAGGING OPERATIONS
     // ========================================================================
 
-    pub async fn tag_asset(&self, asset_id: &Uuid, tag_id: &Uuid) -> Result<AssetTag, ApiError> {
+    pub async fn tag_asset(
+        &self,
+        company_id: Uuid,
+        asset_id: &Uuid,
+        tag_id: &Uuid,
+    ) -> Result<AssetTag, ApiError> {
         // Verify asset exists
-        if self.asset_repo.get_by_id(asset_id).await?.is_none() {
+        if self
+            .asset_repo
+            .get_by_id(company_id, asset_id)
+            .await?
+            .is_none()
+        {
             return Err(ApiError::NotFound(format!("Asset {} not found", asset_id)));
         }
 
         // Verify tag exists
-        if self.tag_repo.get_by_id(tag_id).await?.is_none() {
+        if self
+            .tag_repo
+            .get_by_id(company_id, tag_id)
+            .await?
+            .is_none()
+        {
             return Err(ApiError::NotFound(format!("Tag {} not found", tag_id)));
         }
 
@@ -165,15 +198,46 @@ impl TagService {
             matched_rule: None,
         };
 
-        self.tag_repo.tag_asset(asset_id, &tag_create).await
+        self.tag_repo
+            .tag_asset(company_id, asset_id, &tag_create)
+            .await
     }
 
-    pub async fn untag_asset(&self, asset_id: &Uuid, tag_id: &Uuid) -> Result<(), ApiError> {
-        self.tag_repo.untag_asset(asset_id, tag_id).await
+    pub async fn untag_asset(
+        &self,
+        company_id: Uuid,
+        asset_id: &Uuid,
+        tag_id: &Uuid,
+    ) -> Result<(), ApiError> {
+        if self
+            .asset_repo
+            .get_by_id(company_id, asset_id)
+            .await?
+            .is_none()
+        {
+            return Err(ApiError::NotFound(format!("Asset {} not found", asset_id)));
+        }
+
+        self.tag_repo
+            .untag_asset(company_id, asset_id, tag_id)
+            .await
     }
 
-    pub async fn get_asset_tags(&self, asset_id: &Uuid) -> Result<Vec<AssetTagDetail>, ApiError> {
-        self.tag_repo.get_asset_tags(asset_id).await
+    pub async fn get_asset_tags(
+        &self,
+        company_id: Uuid,
+        asset_id: &Uuid,
+    ) -> Result<Vec<AssetTagDetail>, ApiError> {
+        if self
+            .asset_repo
+            .get_by_id(company_id, asset_id)
+            .await?
+            .is_none()
+        {
+            return Err(ApiError::NotFound(format!("Asset {} not found", asset_id)));
+        }
+
+        self.tag_repo.get_asset_tags(company_id, asset_id).await
     }
 
     // ========================================================================
@@ -181,10 +245,14 @@ impl TagService {
     // ========================================================================
 
     /// Run auto-tagging for a specific tag on all applicable assets
-    pub async fn run_auto_tag_for_tag(&self, tag_id: &Uuid) -> Result<AutoTagResult, ApiError> {
+    pub async fn run_auto_tag_for_tag(
+        &self,
+        company_id: Uuid,
+        tag_id: &Uuid,
+    ) -> Result<AutoTagResult, ApiError> {
         let tag = self
             .tag_repo
-            .get_by_id(tag_id)
+            .get_by_id(company_id, tag_id)
             .await?
             .ok_or_else(|| ApiError::NotFound(format!("Tag {} not found", tag_id)))?;
 
@@ -197,12 +265,13 @@ impl TagService {
             }
         };
 
-        self.apply_tag_rule(&tag.id, &rule_type, &rule_value).await
+        self.apply_tag_rule(company_id, &tag.id, &rule_type, &rule_value)
+            .await
     }
 
     /// Run all auto-tagging rules against all assets
-    pub async fn run_auto_tag_all(&self) -> Result<AutoTagResult, ApiError> {
-        let tags_with_rules = self.tag_repo.list_with_rules().await?;
+    pub async fn run_auto_tag_all(&self, company_id: Uuid) -> Result<AutoTagResult, ApiError> {
+        let tags_with_rules = self.tag_repo.list_with_rules(company_id).await?;
 
         let mut total_tags_applied: i64 = 0;
         let mut total_assets_tagged: i64 = 0;
@@ -210,7 +279,10 @@ impl TagService {
 
         for tag in tags_with_rules {
             if let (Some(rule_type), Some(rule_value)) = (&tag.rule_type, &tag.rule_value) {
-                match self.apply_tag_rule(&tag.id, rule_type, rule_value).await {
+                match self
+                    .apply_tag_rule(company_id, &tag.id, rule_type, rule_value)
+                    .await
+                {
                     Ok(result) => {
                         total_tags_applied += result.tags_applied;
                         total_assets_tagged += result.assets_tagged;
@@ -233,6 +305,7 @@ impl TagService {
     /// Apply a specific tag rule to matching assets
     async fn apply_tag_rule(
         &self,
+        company_id: Uuid,
         tag_id: &Uuid,
         rule_type: &str,
         rule_value: &str,
@@ -247,7 +320,7 @@ impl TagService {
         loop {
             let assets = self
                 .asset_repo
-                .list(None, Some(batch_size), Some(offset))
+                .list(company_id, None, Some(batch_size), Some(offset))
                 .await?;
 
             if assets.is_empty() {
@@ -267,7 +340,11 @@ impl TagService {
                 match matches {
                     Ok(true) => {
                         // Check if already tagged
-                        if !self.tag_repo.is_asset_tagged(&asset.id, tag_id).await? {
+                        if !self
+                            .tag_repo
+                            .is_asset_tagged(company_id, &asset.id, tag_id)
+                            .await?
+                        {
                             matching_asset_ids.push(asset.id);
                         }
                     }
@@ -287,7 +364,7 @@ impl TagService {
         // Bulk tag matching assets
         let assets_tagged = if !matching_asset_ids.is_empty() {
             self.tag_repo
-                .bulk_tag_assets(&matching_asset_ids, tag_id, rule_value)
+                .bulk_tag_assets(company_id, &matching_asset_ids, tag_id, rule_value)
                 .await?
         } else {
             0
@@ -301,14 +378,18 @@ impl TagService {
     }
 
     /// Apply auto-tagging rules to a single asset (called during discovery)
-    pub async fn auto_tag_asset(&self, asset_id: &Uuid) -> Result<Vec<Tag>, ApiError> {
+    pub async fn auto_tag_asset(
+        &self,
+        company_id: Uuid,
+        asset_id: &Uuid,
+    ) -> Result<Vec<Tag>, ApiError> {
         let asset = self
             .asset_repo
-            .get_by_id(asset_id)
+            .get_by_id(company_id, asset_id)
             .await?
             .ok_or_else(|| ApiError::NotFound(format!("Asset {} not found", asset_id)))?;
 
-        let tags_with_rules = self.tag_repo.list_with_rules().await?;
+        let tags_with_rules = self.tag_repo.list_with_rules(company_id).await?;
         let mut applied_tags: Vec<Tag> = Vec::new();
 
         for tag in tags_with_rules {
@@ -325,13 +406,19 @@ impl TagService {
 
                 if matches.unwrap_or(false) {
                     // Check if not already tagged
-                    if !self.tag_repo.is_asset_tagged(asset_id, &tag.id).await? {
+                    if !self
+                        .tag_repo
+                        .is_asset_tagged(company_id, asset_id, &tag.id)
+                        .await?
+                    {
                         let tag_create = AssetTagCreate {
                             tag_id: tag.id,
                             applied_by: "auto_rule".to_string(),
                             matched_rule: Some(rule_value.clone()),
                         };
-                        self.tag_repo.tag_asset(asset_id, &tag_create).await?;
+                        self.tag_repo
+                            .tag_asset(company_id, asset_id, &tag_create)
+                            .await?;
                         applied_tags.push(tag);
                     }
                 }
@@ -431,4 +518,3 @@ impl TagService {
         Ok(false)
     }
 }
-

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     response::Json,
 };
 use serde::Deserialize;
@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
+    auth::context::UserContext,
     error::ApiError,
     models::{DiscoveryConfig, DiscoveryRun},
     AppState,
@@ -49,24 +50,43 @@ fn default_limit() -> i64 {
 /// POST /api/discovery/run - Start a new discovery run
 pub async fn run_discovery(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     payload: Option<Json<RunDiscoveryRequest>>,
 ) -> Result<Json<DiscoveryRun>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let config = payload.map(|p| p.0.into());
-    let run = app_state.discovery_service.run_discovery(config).await?;
+    let run = app_state
+        .discovery_service
+        .run_discovery(company_id, config)
+        .await?;
     Ok(Json(run))
 }
 
 /// POST /api/discovery/stop - Stop the running discovery
-pub async fn stop_discovery(State(app_state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    app_state.discovery_service.stop_discovery().await?;
+pub async fn stop_discovery(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
+) -> Result<Json<Value>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
+    app_state
+        .discovery_service
+        .stop_discovery(company_id)
+        .await?;
     Ok(Json(json!({
         "message": "Discovery stopped successfully"
     })))
 }
 
 /// GET /api/discovery/status - Get current discovery status
-pub async fn discovery_status(State(app_state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let status = app_state.discovery_service.get_discovery_status().await;
+pub async fn discovery_status(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
+) -> Result<Json<Value>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
+    let status = app_state
+        .discovery_service
+        .get_discovery_status(company_id)
+        .await;
     Ok(Json(json!({
         "running": status.is_running,
         "run_id": status.run_id,
@@ -86,11 +106,13 @@ pub async fn discovery_status(State(app_state): State<AppState>) -> Result<Json<
 /// GET /api/discovery/runs - List discovery runs
 pub async fn list_discovery_runs(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Query(query): Query<ListDiscoveryRunsQuery>,
 ) -> Result<Json<Vec<DiscoveryRun>>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let runs = app_state
         .discovery_service
-        .list_discovery_runs(query.limit, query.offset)
+        .list_discovery_runs(company_id, query.limit, query.offset)
         .await?;
     Ok(Json(runs))
 }
@@ -98,11 +120,13 @@ pub async fn list_discovery_runs(
 /// GET /api/discovery/runs/:id - Get a specific discovery run
 pub async fn get_discovery_run(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<DiscoveryRun>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let run = app_state
         .discovery_service
-        .get_discovery_run(&id)
+        .get_discovery_run(company_id, &id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("Discovery run {} not found", id)))?;
     Ok(Json(run))

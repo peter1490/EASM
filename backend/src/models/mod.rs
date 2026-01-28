@@ -1,5 +1,6 @@
 pub mod asset;
 pub mod blacklist;
+pub mod company;
 pub mod discovery;
 pub mod evidence;
 pub mod finding;
@@ -11,6 +12,7 @@ pub mod tag;
 // Re-export commonly used types
 pub use asset::*;
 pub use blacklist::*;
+pub use company::*;
 pub use discovery::*;
 pub use evidence::*;
 pub use finding::*;

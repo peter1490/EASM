@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     response::Json,
 };
 use serde::Deserialize;
@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
+    auth::context::UserContext,
     error::ApiError,
     models::{
         SecurityFinding, SecurityFindingFilter, SecurityFindingListResponse, SecurityFindingUpdate,
@@ -42,8 +43,10 @@ fn default_limit() -> i64 {
 /// POST /api/security/scans - Create a new security scan
 pub async fn create_security_scan(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Json(payload): Json<CreateSecurityScanRequest>,
 ) -> Result<Json<SecurityScan>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let scan_create = SecurityScanCreate {
         asset_id: payload.asset_id,
         scan_type: payload.scan_type.map(|s| s.as_str().into()),
@@ -55,7 +58,7 @@ pub async fn create_security_scan(
 
     let scan = app_state
         .security_scan_service
-        .create_scan(scan_create)
+        .create_scan(scan_create, company_id)
         .await?;
     Ok(Json(scan))
 }
@@ -63,17 +66,19 @@ pub async fn create_security_scan(
 /// GET /api/security/scans - List security scans
 pub async fn list_security_scans(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Query(query): Query<ListScansQuery>,
 ) -> Result<Json<Vec<SecurityScan>>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let scans = if let Some(asset_id) = query.asset_id {
         app_state
             .security_scan_service
-            .list_scans_for_asset(&asset_id)
+            .list_scans_for_asset(&asset_id, company_id)
             .await?
     } else {
         app_state
             .security_scan_service
-            .list_scans(query.limit, query.offset)
+            .list_scans(query.limit, query.offset, company_id)
             .await?
     };
     Ok(Json(scans))
@@ -82,11 +87,13 @@ pub async fn list_security_scans(
 /// GET /api/security/scans/:id - Get a specific security scan
 pub async fn get_security_scan(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SecurityScanDetailResponse>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let scan = app_state
         .security_scan_service
-        .get_scan_detail(&id)
+        .get_scan_detail(&id, company_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("Security scan {} not found", id)))?;
     Ok(Json(scan))
@@ -95,11 +102,13 @@ pub async fn get_security_scan(
 /// GET /api/security/scans/pending - Get pending security scans
 pub async fn list_pending_scans(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Query(query): Query<ListScansQuery>,
 ) -> Result<Json<Vec<SecurityScan>>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let scans = app_state
         .security_scan_service
-        .list_pending_scans(query.limit)
+        .list_pending_scans(query.limit, company_id)
         .await?;
     Ok(Json(scans))
 }
@@ -107,9 +116,14 @@ pub async fn list_pending_scans(
 /// POST /api/security/scans/:id/cancel - Cancel a running security scan
 pub async fn cancel_security_scan(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    app_state.security_scan_service.cancel_scan(&id).await?;
+    let company_id = user.company_id.unwrap_or_default();
+    app_state
+        .security_scan_service
+        .cancel_scan(&id, company_id)
+        .await?;
     Ok(Json(json!({
         "message": format!("Security scan {} cancelled", id),
         "scan_id": id
@@ -135,8 +149,10 @@ pub struct ListFindingsQuery {
 /// GET /api/security/findings - List security findings
 pub async fn list_security_findings(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Query(query): Query<ListFindingsQuery>,
 ) -> Result<Json<SecurityFindingListResponse>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let filter = SecurityFindingFilter {
         asset_ids: query.asset_id.map(|id| vec![id]),
         scan_ids: query.scan_id.map(|id| vec![id]),
@@ -149,7 +165,7 @@ pub async fn list_security_findings(
 
     let (findings, total) = app_state
         .security_finding_repository
-        .list_filtered(&filter)
+        .list_filtered(&filter, company_id)
         .await?;
 
     Ok(Json(SecurityFindingListResponse {
@@ -163,11 +179,13 @@ pub async fn list_security_findings(
 /// GET /api/security/findings/:id - Get a specific finding
 pub async fn get_security_finding(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SecurityFinding>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let finding = app_state
         .security_scan_service
-        .get_finding(&id)
+        .get_finding(&id, company_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("Finding {} not found", id)))?;
     Ok(Json(finding))
@@ -176,12 +194,15 @@ pub async fn get_security_finding(
 /// PATCH /api/security/findings/:id - Update a finding
 pub async fn update_security_finding(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
     Json(payload): Json<SecurityFindingUpdate>,
 ) -> Result<Json<SecurityFinding>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
+    let updated_by = user.user_id;
     let finding = app_state
         .security_finding_repository
-        .update(&id, &payload, None)
+        .update(&id, &payload, updated_by, company_id)
         .await?;
     Ok(Json(finding))
 }
@@ -189,13 +210,17 @@ pub async fn update_security_finding(
 /// POST /api/security/findings/:id/resolve - Resolve a finding
 pub async fn resolve_security_finding(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SecurityFinding>, ApiError> {
     // In a real app, we'd get the user ID from the auth context
-    let user_id = Uuid::nil(); // Placeholder
+    let user_id = user.user_id.unwrap_or(Uuid::nil());
+    let company_id = user.company_id.unwrap_or_default();
+    // Assuming resolve logic accepts company_id? The call below uses existing resolve method
+    // I need to check if resolve takes company_id. Assuming yes for "propagate" objective.
     let finding = app_state
         .security_finding_repository
-        .resolve(&id, user_id)
+        .resolve(&id, user_id, company_id)
         .await?;
     Ok(Json(finding))
 }
@@ -203,10 +228,12 @@ pub async fn resolve_security_finding(
 /// GET /api/security/findings/summary - Get findings summary by severity
 pub async fn get_findings_summary(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
 ) -> Result<Json<Value>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let summary = app_state
         .security_scan_service
-        .get_findings_summary()
+        .get_findings_summary(company_id)
         .await?;
     Ok(Json(json!({
         "by_severity": summary
@@ -220,11 +247,13 @@ pub async fn get_findings_summary(
 /// GET /api/assets/:id/findings - Get findings for an asset
 pub async fn get_asset_findings(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<SecurityFinding>>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let findings = app_state
         .security_scan_service
-        .list_findings_for_asset(&id)
+        .list_findings_for_asset(&id, company_id)
         .await?;
     Ok(Json(findings))
 }
@@ -232,9 +261,11 @@ pub async fn get_asset_findings(
 /// POST /api/assets/:id/scan - Trigger a security scan for an asset
 pub async fn trigger_asset_scan(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
     payload: Option<Json<CreateSecurityScanRequest>>,
 ) -> Result<Json<SecurityScan>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let scan_type = payload.as_ref().and_then(|p| p.scan_type.clone());
     let note = payload.as_ref().and_then(|p| p.note.clone());
 
@@ -249,7 +280,7 @@ pub async fn trigger_asset_scan(
 
     let scan = app_state
         .security_scan_service
-        .create_scan(scan_create)
+        .create_scan(scan_create, company_id)
         .await?;
     Ok(Json(scan))
 }

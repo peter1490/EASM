@@ -8,11 +8,20 @@ use uuid::Uuid;
 
 #[async_trait]
 pub trait ScanRepository {
-    async fn create(&self, scan: &ScanCreate) -> Result<Scan, ApiError>;
-    async fn get_by_id(&self, id: &Uuid) -> Result<Option<Scan>, ApiError>;
-    async fn list(&self) -> Result<Vec<Scan>, ApiError>;
-    async fn list_by_status(&self, status: Option<ScanStatus>) -> Result<Vec<Scan>, ApiError>;
-    async fn update_status(&self, id: &Uuid, status: ScanStatus) -> Result<(), ApiError>;
+    async fn create(&self, scan: &ScanCreate, company_id: Uuid) -> Result<Scan, ApiError>;
+    async fn get_by_id(&self, company_id: Uuid, id: &Uuid) -> Result<Option<Scan>, ApiError>;
+    async fn list(&self, company_id: Uuid) -> Result<Vec<Scan>, ApiError>;
+    async fn list_by_status(
+        &self,
+        company_id: Uuid,
+        status: Option<ScanStatus>,
+    ) -> Result<Vec<Scan>, ApiError>;
+    async fn update_status(
+        &self,
+        company_id: Uuid,
+        id: &Uuid,
+        status: ScanStatus,
+    ) -> Result<(), ApiError>;
 }
 
 pub struct SqlxScanRepository {
@@ -27,15 +36,15 @@ impl SqlxScanRepository {
 
 #[async_trait]
 impl ScanRepository for SqlxScanRepository {
-    async fn create(&self, scan: &ScanCreate) -> Result<Scan, ApiError> {
+    async fn create(&self, scan: &ScanCreate, company_id: Uuid) -> Result<Scan, ApiError> {
         let id = Uuid::new_v4();
         let now = chrono::Utc::now();
 
         let result = sqlx::query_as::<_, Scan>(
             r#"
-            INSERT INTO scans (id, target, note, status, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id, target, note, status, created_at, updated_at
+            INSERT INTO scans (id, target, note, status, created_at, updated_at, company_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id, target, note, status, created_at, updated_at, company_id
             "#,
         )
         .bind(id)
@@ -44,54 +53,64 @@ impl ScanRepository for SqlxScanRepository {
         .bind(ScanStatus::Queued)
         .bind(now)
         .bind(now)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(result)
     }
 
-    async fn get_by_id(&self, id: &Uuid) -> Result<Option<Scan>, ApiError> {
+    async fn get_by_id(&self, company_id: Uuid, id: &Uuid) -> Result<Option<Scan>, ApiError> {
         let result = sqlx::query_as::<_, Scan>(
             r#"
-            SELECT id, target, note, status, created_at, updated_at
+            SELECT id, target, note, status, created_at, updated_at, company_id
             FROM scans
-            WHERE id = $1
+            WHERE id = $1 AND company_id = $2
             "#,
         )
         .bind(id)
+        .bind(company_id)
         .fetch_optional(&self.pool)
         .await?;
 
         Ok(result)
     }
 
-    async fn list(&self) -> Result<Vec<Scan>, ApiError> {
+    async fn list(&self, company_id: Uuid) -> Result<Vec<Scan>, ApiError> {
         let results = sqlx::query_as::<_, Scan>(
             r#"
-            SELECT id, target, note, status, created_at, updated_at
+            SELECT id, target, note, status, created_at, updated_at, company_id
             FROM scans
+            WHERE company_id = $1
             ORDER BY created_at DESC
             "#,
         )
+        .bind(company_id)
         .fetch_all(&self.pool)
         .await?;
 
         Ok(results)
     }
 
-    async fn update_status(&self, id: &Uuid, status: ScanStatus) -> Result<(), ApiError> {
+    async fn update_status(
+        &self,
+        company_id: Uuid,
+        id: &Uuid,
+        status: ScanStatus,
+    ) -> Result<(), ApiError> {
         let now = chrono::Utc::now();
 
         let result = sqlx::query(
             r#"
             UPDATE scans
             SET status = $1, updated_at = $2
-            WHERE id = $3
+            WHERE id = $3 AND company_id = $4
             "#,
         )
         .bind(status)
         .bind(now)
         .bind(id)
+        .bind(company_id)
         .execute(&self.pool)
         .await?;
 
@@ -102,29 +121,36 @@ impl ScanRepository for SqlxScanRepository {
         Ok(())
     }
 
-    async fn list_by_status(&self, status: Option<ScanStatus>) -> Result<Vec<Scan>, ApiError> {
+    async fn list_by_status(
+        &self,
+        company_id: Uuid,
+        status: Option<ScanStatus>,
+    ) -> Result<Vec<Scan>, ApiError> {
         let results = match status {
             Some(status) => {
                 sqlx::query_as::<_, Scan>(
                     r#"
-                    SELECT id, target, note, status, created_at, updated_at
+                    SELECT id, target, note, status, created_at, updated_at, company_id
                     FROM scans
-                    WHERE status = $1
+                    WHERE status = $1 AND company_id = $2
                     ORDER BY created_at DESC
                     "#,
                 )
                 .bind(status)
+                .bind(company_id)
                 .fetch_all(&self.pool)
                 .await?
             }
             None => {
                 sqlx::query_as::<_, Scan>(
                     r#"
-                    SELECT id, target, note, status, created_at, updated_at
+                    SELECT id, target, note, status, created_at, updated_at, company_id
                     FROM scans
+                    WHERE company_id = $1
                     ORDER BY created_at DESC
                     "#,
                 )
+                .bind(company_id)
                 .fetch_all(&self.pool)
                 .await?
             }
@@ -159,7 +185,8 @@ mod tests {
             note: Some("Test scan".to_string()),
         };
 
-        let result = repo.create(&scan_create).await;
+        let company_id = Uuid::new_v4();
+        let result = repo.create(&scan_create, company_id).await;
         assert!(result.is_ok());
 
         let scan = result.unwrap();
@@ -178,8 +205,9 @@ mod tests {
             note: None,
         };
 
-        let created_scan = repo.create(&scan_create).await.unwrap();
-        let retrieved_scan = repo.get_by_id(&created_scan.id).await.unwrap();
+        let company_id = Uuid::new_v4();
+        let created_scan = repo.create(&scan_create, company_id).await.unwrap();
+        let retrieved_scan = repo.get_by_id(company_id, &created_scan.id).await.unwrap();
 
         assert!(retrieved_scan.is_some());
         let scan = retrieved_scan.unwrap();
@@ -193,7 +221,8 @@ mod tests {
         let repo = SqlxScanRepository::new(pool);
 
         let nonexistent_id = Uuid::new_v4();
-        let result = repo.get_by_id(&nonexistent_id).await.unwrap();
+        let company_id = Uuid::new_v4();
+        let result = repo.get_by_id(company_id, &nonexistent_id).await.unwrap();
         assert!(result.is_none());
     }
 
@@ -212,10 +241,11 @@ mod tests {
             note: Some("Test".to_string()),
         };
 
-        repo.create(&scan1).await.unwrap();
-        repo.create(&scan2).await.unwrap();
+        let company_id = Uuid::new_v4();
+        repo.create(&scan1, company_id).await.unwrap();
+        repo.create(&scan2, company_id).await.unwrap();
 
-        let scans = repo.list().await.unwrap();
+        let scans = repo.list(company_id).await.unwrap();
         assert_eq!(scans.len(), 2);
     }
 
@@ -229,15 +259,20 @@ mod tests {
             note: None,
         };
 
-        let created_scan = repo.create(&scan_create).await.unwrap();
+        let company_id = Uuid::new_v4();
+        let created_scan = repo.create(&scan_create, company_id).await.unwrap();
         assert_eq!(created_scan.status, ScanStatus::Queued);
 
         // Update status to running
-        repo.update_status(&created_scan.id, ScanStatus::Running)
+        repo.update_status(company_id, &created_scan.id, ScanStatus::Running)
             .await
             .unwrap();
 
-        let updated_scan = repo.get_by_id(&created_scan.id).await.unwrap().unwrap();
+        let updated_scan = repo
+            .get_by_id(company_id, &created_scan.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(updated_scan.status, ScanStatus::Running);
         assert!(updated_scan.updated_at > created_scan.updated_at);
     }
@@ -248,8 +283,9 @@ mod tests {
         let repo = SqlxScanRepository::new(pool);
 
         let nonexistent_id = Uuid::new_v4();
+        let company_id = Uuid::new_v4();
         let result = repo
-            .update_status(&nonexistent_id, ScanStatus::Running)
+            .update_status(company_id, &nonexistent_id, ScanStatus::Running)
             .await;
 
         assert!(result.is_err());
@@ -264,42 +300,52 @@ mod tests {
         let pool = setup_test_db().await;
         let repo = SqlxScanRepository::new(pool);
 
+        let company_id = Uuid::new_v4();
         // Create scans with different statuses
         let scan1 = repo
-            .create(&ScanCreate {
-                target: "example1.com".to_string(),
-                note: None,
-            })
+            .create(
+                &ScanCreate {
+                    target: "example1.com".to_string(),
+                    note: None,
+                },
+                company_id,
+            )
             .await
             .unwrap();
 
         let scan2 = repo
-            .create(&ScanCreate {
-                target: "example2.com".to_string(),
-                note: None,
-            })
+            .create(
+                &ScanCreate {
+                    target: "example2.com".to_string(),
+                    note: None,
+                },
+                company_id,
+            )
             .await
             .unwrap();
 
         // Update one scan to running
-        repo.update_status(&scan2.id, ScanStatus::Running)
+        repo.update_status(company_id, &scan2.id, ScanStatus::Running)
             .await
             .unwrap();
 
         // Test filtering by status
-        let queued_scans = repo.list_by_status(Some(ScanStatus::Queued)).await.unwrap();
+        let queued_scans = repo
+            .list_by_status(company_id, Some(ScanStatus::Queued))
+            .await
+            .unwrap();
         assert_eq!(queued_scans.len(), 1);
         assert_eq!(queued_scans[0].id, scan1.id);
 
         let running_scans = repo
-            .list_by_status(Some(ScanStatus::Running))
+            .list_by_status(company_id, Some(ScanStatus::Running))
             .await
             .unwrap();
         assert_eq!(running_scans.len(), 1);
         assert_eq!(running_scans[0].id, scan2.id);
 
         // Test listing all scans
-        let all_scans = repo.list_by_status(None).await.unwrap();
+        let all_scans = repo.list_by_status(company_id, None).await.unwrap();
         assert_eq!(all_scans.len(), 2);
     }
 }

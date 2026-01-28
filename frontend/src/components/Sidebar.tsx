@@ -16,7 +16,7 @@ const navItems = [
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const { user, logout } = useAuth();
+  const { user, logout, companies, companyId, setCompanyId } = useAuth();
   
   const isActive = (href: string) => {
     if (href === "/") return pathname === "/";
@@ -47,6 +47,26 @@ export default function Sidebar() {
             </div>
           </Link>
         </div>
+
+        {/* Company Switcher */}
+        {companies.length > 0 && (
+          <div className="border-b border-sidebar-border px-5 py-4">
+            <div className="text-[10px] font-semibold text-sidebar-foreground/40 uppercase tracking-widest mb-2">
+              Company
+            </div>
+            <select
+              className="w-full rounded-lg border border-sidebar-border bg-sidebar px-3 py-2 text-sm text-sidebar-foreground outline-none transition focus:border-primary"
+              value={companyId || ""}
+              onChange={(event) => setCompanyId(event.target.value)}
+            >
+              {companies.map((company) => (
+                <option key={company.id} value={company.id}>
+                  {company.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         
         {/* Navigation */}
         <nav className="flex-1 space-y-1 px-3 py-5 overflow-y-auto">

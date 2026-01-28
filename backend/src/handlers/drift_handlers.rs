@@ -1,11 +1,11 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     response::Json,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{error::ApiError, AppState};
+use crate::{auth::context::UserContext, error::ApiError, AppState};
 
 #[derive(Debug, Serialize)]
 pub struct DriftDetectionResponse {
@@ -23,12 +23,14 @@ pub struct DriftDetectionRequest {
 /// Detect port drift for a completed scan
 pub async fn detect_port_drift(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(scan_id): Path<Uuid>,
 ) -> Result<Json<DriftDetectionResponse>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     // Get the scan to verify it exists and get the target
     let scan = app_state
         .scan_repo
-        .get_by_id(&scan_id)
+        .get_by_id(company_id, &scan_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("Scan with id {} not found", scan_id)))?;
 
@@ -42,19 +44,22 @@ pub async fn detect_port_drift(
     // Detect port drift
     let drifts = app_state
         .drift_service
-        .detect_port_drift(&scan_id, &scan.target)
+        .detect_port_drift(&scan_id, &scan.target, company_id)
         .await?;
 
     // Generate drift findings
     let findings = app_state
         .drift_service
-        .generate_drift_findings(&drifts)
+        .generate_drift_findings(&drifts, company_id)
         .await?;
 
     // Update asset metadata for each drift
     for drift in &drifts {
         // Extract current port state from findings
-        let current_findings = app_state.finding_repo.list_by_scan(&scan_id).await?;
+        let current_findings = app_state
+            .finding_repo
+            .list_by_scan(&scan_id, company_id)
+            .await?;
 
         let mut current_ports = std::collections::HashSet::new();
         for finding in current_findings {
@@ -88,9 +93,14 @@ pub async fn detect_port_drift(
 /// Get drift findings for a specific scan
 pub async fn get_drift_findings(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(scan_id): Path<Uuid>,
 ) -> Result<Json<Vec<crate::models::Finding>>, ApiError> {
-    let findings = app_state.finding_repo.list_by_type("port_drift").await?;
+    let company_id = user.company_id.unwrap_or_default();
+    let findings = app_state
+        .finding_repo
+        .list_by_type("port_drift", company_id)
+        .await?;
 
     // Filter findings for the specific scan
     let scan_findings: Vec<_> = findings

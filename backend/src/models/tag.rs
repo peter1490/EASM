@@ -42,6 +42,7 @@ pub struct Tag {
     pub rule_type: Option<String>,
     pub rule_value: Option<String>,
     pub color: Option<String>,
+    pub company_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -56,6 +57,7 @@ pub struct TagRow {
     pub rule_type: Option<String>,
     pub rule_value: Option<String>,
     pub color: Option<String>,
+    pub company_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -70,6 +72,7 @@ impl From<TagRow> for Tag {
             rule_type: row.rule_type,
             rule_value: row.rule_value,
             color: row.color,
+            company_id: row.company_id,
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
@@ -137,6 +140,7 @@ impl From<&str> for TagAppliedBy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetTag {
     pub id: Uuid,
+    pub company_id: Uuid,
     pub asset_id: Uuid,
     pub tag_id: Uuid,
     pub applied_by: String,
@@ -148,6 +152,7 @@ pub struct AssetTag {
 #[derive(Debug, Clone, FromRow)]
 pub struct AssetTagRow {
     pub id: Uuid,
+    pub company_id: Uuid,
     pub asset_id: Uuid,
     pub tag_id: Uuid,
     pub applied_by: String,
@@ -159,6 +164,7 @@ impl From<AssetTagRow> for AssetTag {
     fn from(row: AssetTagRow) -> Self {
         Self {
             id: row.id,
+            company_id: row.company_id,
             asset_id: row.asset_id,
             tag_id: row.tag_id,
             applied_by: row.applied_by,
@@ -231,4 +237,3 @@ pub struct TagListResponse {
     pub limit: i64,
     pub offset: i64,
 }
-

@@ -56,6 +56,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protected_routes = Router::new()
         // Me endpoint
         .route("/api/auth/me", get(handlers::auth_handlers::get_me))
+        // Company endpoints
+        .route(
+            "/api/companies",
+            get(handlers::company_handlers::list_companies)
+                .post(handlers::company_handlers::create_company),
+        )
+        .route(
+            "/api/companies/:id",
+            patch(handlers::company_handlers::update_company),
+        )
         // Admin endpoints
         .route(
             "/api/admin/users",

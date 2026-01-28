@@ -9,7 +9,10 @@ use uuid::Uuid;
 use crate::{
     auth::{context::UserContext, rbac::Role},
     error::ApiError,
-    models::{BlacklistCheckResult, BlacklistCreate, BlacklistEntry, BlacklistObjectType, BlacklistResult, BlacklistUpdate},
+    models::{
+        BlacklistCheckResult, BlacklistCreate, BlacklistEntry, BlacklistObjectType,
+        BlacklistResult, BlacklistUpdate,
+    },
     AppState,
 };
 
@@ -44,7 +47,9 @@ pub async fn create_blacklist_entry(
     Json(payload): Json<BlacklistCreate>,
 ) -> Result<Json<BlacklistResult>, ApiError> {
     // Require at least Analyst role
-    if !user.has_role(Role::Analyst) && !user.has_role(Role::Operator) && !user.has_role(Role::Admin)
+    if !user.has_role(Role::Analyst)
+        && !user.has_role(Role::Operator)
+        && !user.has_role(Role::Admin)
     {
         return Err(ApiError::Authorization(
             "Analyst role or higher required to manage blacklist".to_string(),
@@ -58,10 +63,12 @@ pub async fn create_blacklist_entry(
         ));
     }
 
+    let company_id = user.company_id.unwrap_or_default();
+
     // Create the blacklist entry
     let entry = app_state
         .blacklist_repository
-        .create(&payload, user.email.as_deref())
+        .create(&payload, user.email.as_deref(), company_id)
         .await?;
 
     // If delete_descendants is true, find the asset and delete all descendants
@@ -70,12 +77,12 @@ pub async fn create_blacklist_entry(
         // Find the asset by type and value
         if let Some(asset_id) = app_state
             .blacklist_repository
-            .find_asset_id(&payload.object_type, &payload.object_value)
+            .find_asset_id(&payload.object_type, &payload.object_value, company_id)
             .await?
         {
             descendants_deleted = app_state
                 .blacklist_repository
-                .delete_descendant_assets(&asset_id)
+                .delete_descendant_assets(company_id, &asset_id)
                 .await?;
 
             tracing::info!(
@@ -96,13 +103,24 @@ pub async fn create_blacklist_entry(
 /// GET /api/blacklist - List all blacklist entries
 pub async fn list_blacklist(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Query(query): Query<BlacklistQuery>,
 ) -> Result<Json<BlacklistListResponse>, ApiError> {
-    let object_type = query.object_type.as_ref().map(|t| BlacklistObjectType::from(t.as_str()));
+    let company_id = user.company_id.unwrap_or_default();
+    let object_type = query
+        .object_type
+        .as_ref()
+        .map(|t| BlacklistObjectType::from(t.as_str()));
 
     let (entries, total_count) = app_state
         .blacklist_repository
-        .search(query.q.as_deref(), object_type.as_ref(), query.limit, query.offset)
+        .search(
+            query.q.as_deref(),
+            object_type.as_ref(),
+            company_id,
+            query.limit,
+            query.offset,
+        )
         .await?;
 
     Ok(Json(BlacklistListResponse {
@@ -116,11 +134,13 @@ pub async fn list_blacklist(
 /// GET /api/blacklist/:id - Get a specific blacklist entry
 pub async fn get_blacklist_entry(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<BlacklistEntry>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let entry = app_state
         .blacklist_repository
-        .get_by_id(&id)
+        .get_by_id(company_id, &id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("Blacklist entry {} not found", id)))?;
 
@@ -135,16 +155,19 @@ pub async fn update_blacklist_entry(
     Json(payload): Json<BlacklistUpdate>,
 ) -> Result<Json<BlacklistEntry>, ApiError> {
     // Require at least Analyst role
-    if !user.has_role(Role::Analyst) && !user.has_role(Role::Operator) && !user.has_role(Role::Admin)
+    if !user.has_role(Role::Analyst)
+        && !user.has_role(Role::Operator)
+        && !user.has_role(Role::Admin)
     {
         return Err(ApiError::Authorization(
             "Analyst role or higher required to manage blacklist".to_string(),
         ));
     }
 
+    let company_id = user.company_id.unwrap_or_default();
     let entry = app_state
         .blacklist_repository
-        .update(&id, &payload)
+        .update(company_id, &id, &payload)
         .await?;
 
     Ok(Json(entry))
@@ -157,14 +180,17 @@ pub async fn delete_blacklist_entry(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     // Require at least Analyst role
-    if !user.has_role(Role::Analyst) && !user.has_role(Role::Operator) && !user.has_role(Role::Admin)
+    if !user.has_role(Role::Analyst)
+        && !user.has_role(Role::Operator)
+        && !user.has_role(Role::Admin)
     {
         return Err(ApiError::Authorization(
             "Analyst role or higher required to manage blacklist".to_string(),
         ));
     }
 
-    app_state.blacklist_repository.delete(&id).await?;
+    let company_id = user.company_id.unwrap_or_default();
+    app_state.blacklist_repository.delete(company_id, &id).await?;
 
     Ok(Json(json!({
         "message": "Blacklist entry deleted successfully"
@@ -181,8 +207,10 @@ pub struct BlacklistCheckRequest {
 /// POST /api/blacklist/check - Check if an object is blacklisted
 pub async fn check_blacklist(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Json(payload): Json<BlacklistCheckRequest>,
 ) -> Result<Json<BlacklistCheckResult>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let object_value = payload.object_value.trim();
 
     match payload.object_type {
@@ -190,7 +218,7 @@ pub async fn check_blacklist(
             // Check domain and parent domains
             let entry = app_state
                 .blacklist_repository
-                .is_domain_or_parent_blacklisted(object_value)
+                .is_domain_or_parent_blacklisted(object_value, company_id)
                 .await?;
 
             let is_blacklisted = entry.is_some();
@@ -216,7 +244,7 @@ pub async fn check_blacklist(
         BlacklistObjectType::Ip => {
             let entry = app_state
                 .blacklist_repository
-                .is_ip_blacklisted(object_value)
+                .is_ip_blacklisted(object_value, company_id)
                 .await?;
 
             Ok(Json(BlacklistCheckResult {
@@ -229,13 +257,13 @@ pub async fn check_blacklist(
         _ => {
             let is_blacklisted = app_state
                 .blacklist_repository
-                .is_blacklisted(&payload.object_type, object_value)
+                .is_blacklisted(&payload.object_type, object_value, company_id)
                 .await?;
 
             let entry = if is_blacklisted {
                 app_state
                     .blacklist_repository
-                    .get_by_type_value(&payload.object_type, object_value)
+                    .get_by_type_value(&payload.object_type, object_value, company_id)
                     .await?
             } else {
                 None
@@ -266,7 +294,9 @@ pub async fn blacklist_from_asset(
     Json(payload): Json<BlacklistFromAssetRequest>,
 ) -> Result<Json<BlacklistResult>, ApiError> {
     // Require at least Analyst role
-    if !user.has_role(Role::Analyst) && !user.has_role(Role::Operator) && !user.has_role(Role::Admin)
+    if !user.has_role(Role::Analyst)
+        && !user.has_role(Role::Operator)
+        && !user.has_role(Role::Admin)
     {
         return Err(ApiError::Authorization(
             "Analyst role or higher required to manage blacklist".to_string(),
@@ -274,9 +304,10 @@ pub async fn blacklist_from_asset(
     }
 
     // Get the asset
+    let company_id = user.company_id.unwrap_or_default();
     let asset = app_state
         .asset_repository
-        .get_by_id(&asset_id)
+        .get_by_id(company_id, &asset_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("Asset {} not found", asset_id)))?;
 
@@ -305,14 +336,14 @@ pub async fn blacklist_from_asset(
 
     let entry = app_state
         .blacklist_repository
-        .create(&blacklist_create, user.email.as_deref())
+        .create(&blacklist_create, user.email.as_deref(), company_id)
         .await?;
 
     // Delete descendants if requested
     let descendants_deleted = if payload.delete_descendants {
         app_state
             .blacklist_repository
-            .delete_descendant_assets(&asset_id)
+            .delete_descendant_assets(company_id, &asset_id)
             .await?
     } else {
         0
@@ -342,8 +373,10 @@ pub struct BlacklistStats {
 
 pub async fn get_blacklist_stats(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
 ) -> Result<Json<BlacklistStats>, ApiError> {
-    let total_entries = app_state.blacklist_repository.count().await?;
+    let company_id = user.company_id.unwrap_or_default();
+    let total_entries = app_state.blacklist_repository.count(company_id).await?;
 
     // Get counts by type
     let mut by_type = std::collections::HashMap::new();
@@ -357,12 +390,12 @@ pub async fn get_blacklist_stats(
     ] {
         let entries = app_state
             .blacklist_repository
-            .list_by_type(&obj_type, 0, 0)
+            .list_by_type(&obj_type, company_id, 0, 0)
             .await?;
         // This is not efficient but works for now - ideally we'd have a count_by_type method
         let count = app_state
             .blacklist_repository
-            .search(None, Some(&obj_type), 1, 0)
+            .search(None, Some(&obj_type), company_id, 1, 0)
             .await?
             .1;
         by_type.insert(obj_type.to_string(), count);
@@ -373,4 +406,3 @@ pub async fn get_blacklist_stats(
         by_type,
     }))
 }
-

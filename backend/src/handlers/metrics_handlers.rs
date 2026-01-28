@@ -1,11 +1,12 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     response::Json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
+    auth::context::UserContext,
     error::ApiError,
     models::{FindingFilter, ScanStatus},
     AppState,
@@ -32,7 +33,9 @@ pub struct MemoryUsage {
 /// Get overall dashboard metrics
 pub async fn get_metrics(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
 ) -> Result<Json<DashboardMetrics>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     // Get system performance metrics
     let report = app_state.metrics_service.generate_report();
     let system = report.system;
@@ -41,16 +44,20 @@ pub async fn get_metrics(
     // Get counts from repositories
     let active_scans = app_state
         .scan_repository
-        .list_by_status(Some(ScanStatus::Running))
+        .list_by_status(company_id, Some(ScanStatus::Running))
         .await
         .map(|scans| scans.len() as i64)
         .unwrap_or(0);
 
-    let total_assets = app_state.asset_repository.count(None).await.unwrap_or(0);
+    let total_assets = app_state
+        .asset_repository
+        .count(company_id, None)
+        .await
+        .unwrap_or(0);
 
     let total_findings = app_state
         .finding_repository
-        .filter(&FindingFilter::default())
+        .filter(&FindingFilter::default(), company_id)
         .await
         .map(|response| response.total_count)
         .unwrap_or(0);

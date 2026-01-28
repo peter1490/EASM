@@ -4,6 +4,7 @@ use crate::{
     repositories::{
         asset_repo::SqlxAssetRepository,
         blacklist_repo::SqlxBlacklistRepository,
+        company_repo::SqlxCompanyRepository,
         discovery_repo::{
             SqlxAssetRelationshipRepository, SqlxAssetSourceRepository,
             SqlxDiscoveryQueueRepository, SqlxDiscoveryRunRepository,
@@ -17,9 +18,10 @@ use crate::{
         tag_repo::SqlxTagRepository,
         user_repo::SqlxUserRepository,
         AssetRelationshipRepository, AssetRepository, AssetSourceRepository, BlacklistRepository,
-        DiscoveryQueueRepository, DiscoveryRunRepository, EvidenceRepository, FindingRepository,
-        FindingTypeConfigRepository, ScanRepository, SecurityFindingRepository,
-        SecurityScanRepository, SeedRepository, TagRepository, UserRepository,
+        CompanyRepository, DiscoveryQueueRepository, DiscoveryRunRepository, EvidenceRepository,
+        FindingRepository, FindingTypeConfigRepository, ScanRepository,
+        SecurityFindingRepository, SecurityScanRepository, SeedRepository, TagRepository,
+        UserRepository,
     },
     services::external::{DnsResolver, ExternalServicesManager, HttpAnalyzer},
     services::{
@@ -74,6 +76,7 @@ pub struct AppState {
     pub tag_repository: Arc<dyn TagRepository + Send + Sync>,
     pub blacklist_repository: Arc<dyn BlacklistRepository + Send + Sync>,
     pub finding_type_config_repo: Arc<dyn FindingTypeConfigRepository + Send + Sync>,
+    pub company_repository: Arc<dyn CompanyRepository + Send + Sync>,
     // Convenience accessors for handlers
     pub scan_repo: Arc<dyn ScanRepository + Send + Sync>,
     pub finding_repo: Arc<dyn FindingRepository + Send + Sync>,
@@ -120,6 +123,8 @@ impl AppState {
             Arc::new(SqlxSeedRepository::new(db_pool.clone()));
         let user_repository: Arc<dyn UserRepository + Send + Sync> =
             Arc::new(SqlxUserRepository::new(db_pool.clone()));
+        let company_repository: Arc<dyn CompanyRepository + Send + Sync> =
+            Arc::new(SqlxCompanyRepository::new(db_pool.clone()));
 
         // Create new discovery repositories
         let discovery_run_repository: Arc<dyn DiscoveryRunRepository + Send + Sync> =
@@ -299,6 +304,7 @@ impl AppState {
             tag_repository,
             blacklist_repository,
             finding_type_config_repo,
+            company_repository,
             // Convenience accessors for handlers
             scan_repo: scan_repository,
             finding_repo: finding_repository,

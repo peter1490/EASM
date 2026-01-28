@@ -71,40 +71,61 @@ pub struct UpdateImportanceRequest {
 
 pub async fn create_seed(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Json(payload): Json<SeedCreate>,
 ) -> Result<Json<Seed>, ApiError> {
-    let seed = app_state.discovery_service.create_seed(payload).await?;
+    let company_id = user.company_id.unwrap_or_default();
+    let seed = app_state
+        .discovery_service
+        .create_seed(payload, company_id)
+        .await?;
     Ok(Json(seed))
 }
 
-pub async fn list_seeds(State(app_state): State<AppState>) -> Result<Json<Vec<Seed>>, ApiError> {
-    let seeds = app_state.discovery_service.list_seeds().await?;
+pub async fn list_seeds(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
+) -> Result<Json<Vec<Seed>>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
+    let seeds = app_state.discovery_service.list_seeds(company_id).await?;
     Ok(Json(seeds))
 }
 
 pub async fn delete_seed(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<()>, ApiError> {
-    app_state.discovery_service.delete_seed(&id).await?;
+    let company_id = user.company_id.unwrap_or_default();
+    app_state
+        .discovery_service
+        .delete_seed(company_id, &id)
+        .await?;
     Ok(Json(()))
 }
 
 pub async fn list_assets(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Query(params): Query<AssetQuery>,
 ) -> Result<Json<AssetListResponse>, ApiError> {
     let limit = params.limit.unwrap_or(25);
     let offset = params.offset.unwrap_or(0);
+    let company_id = user.company_id.unwrap_or_default(); // Fallback for API keys/Global or handle error
 
     let assets = app_state
         .discovery_service
-        .list_assets(params.confidence_threshold, Some(limit), Some(offset))
+        .list_assets(
+            company_id,
+            params.confidence_threshold,
+            Some(limit),
+            Some(offset),
+        )
         .await?;
 
     let total_count = app_state
         .discovery_service
-        .count_assets(params.confidence_threshold)
+        .count_assets(company_id, params.confidence_threshold)
         .await?;
 
     Ok(Json(AssetListResponse {
@@ -117,11 +138,13 @@ pub async fn list_assets(
 
 pub async fn get_asset(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Asset>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let asset = app_state
         .discovery_service
-        .get_asset(&id)
+        .get_asset(company_id, &id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("Asset {} not found", id)))?;
     Ok(Json(asset))
@@ -129,9 +152,14 @@ pub async fn get_asset(
 
 pub async fn get_asset_path(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<Asset>>, ApiError> {
-    let path = app_state.discovery_service.get_asset_path(&id).await?;
+    let company_id = user.company_id.unwrap_or_default();
+    let path = app_state
+        .discovery_service
+        .get_asset_path(company_id, &id)
+        .await?;
     Ok(Json(path))
 }
 
@@ -156,9 +184,10 @@ pub async fn update_asset_importance(
         ));
     }
 
+    let company_id = user.company_id.unwrap_or_default();
     let asset = app_state
         .asset_repository
-        .update_importance(&id, payload.importance)
+        .update_importance(company_id, &id, payload.importance)
         .await?;
     Ok(Json(asset))
 }
@@ -176,19 +205,22 @@ pub struct AssetSearchResponse {
 /// Advanced asset search endpoint with full-text search and filtering
 pub async fn search_assets(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Query(params): Query<AssetSearchQuery>,
 ) -> Result<Json<AssetSearchResponse>, ApiError> {
     let limit = params.limit.unwrap_or(25).min(500);
     let offset = params.offset.unwrap_or(0);
+    let company_id = user.company_id.unwrap_or_default();
 
     // Parse asset type if provided
-    let asset_type = params.asset_type.as_ref().and_then(|t| {
-        match t.to_lowercase().as_str() {
+    let asset_type = params
+        .asset_type
+        .as_ref()
+        .and_then(|t| match t.to_lowercase().as_str() {
             "domain" => Some(AssetType::Domain),
             "ip" => Some(AssetType::Ip),
             _ => None,
-        }
-    });
+        });
 
     // Parse sort options
     let sort_by = params.sort_by.as_deref().unwrap_or("created_at");
@@ -198,6 +230,7 @@ pub async fn search_assets(
     let (assets, total_count, sources) = app_state
         .asset_repository
         .search(
+            company_id,
             params.q.as_deref(),
             asset_type,
             params.min_confidence,

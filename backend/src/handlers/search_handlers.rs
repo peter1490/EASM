@@ -1,11 +1,13 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Extension, Query, State},
     response::Json,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 use crate::{
+    auth::context::UserContext,
     error::ApiError,
     services::{IndexedAsset, IndexedFinding, SearchQuery},
     AppState,
@@ -31,8 +33,10 @@ pub struct SearchResponse<T> {
 /// Search assets using Elasticsearch
 pub async fn search_assets(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<SearchResponse<IndexedAsset>>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let search_service = app_state
         .search_service
         .as_ref()
@@ -45,7 +49,7 @@ pub async fn search_assets(
         from: params.from,
     };
 
-    let result = search_service.search_assets(&query).await?;
+    let result = search_service.search_assets(company_id, &query).await?;
 
     Ok(Json(SearchResponse {
         results: result.hits,
@@ -58,8 +62,10 @@ pub async fn search_assets(
 /// Search findings using Elasticsearch
 pub async fn search_findings(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<SearchResponse<IndexedFinding>>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let search_service = app_state
         .search_service
         .as_ref()
@@ -72,7 +78,7 @@ pub async fn search_findings(
         from: params.from,
     };
 
-    let result = search_service.search_findings(&query).await?;
+    let result = search_service.search_findings(company_id, &query).await?;
 
     Ok(Json(SearchResponse {
         results: result.hits,
@@ -85,7 +91,9 @@ pub async fn search_findings(
 /// Reindex all assets and findings
 pub async fn reindex_all(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let search_service = app_state
         .search_service
         .as_ref()
@@ -94,12 +102,15 @@ pub async fn reindex_all(
     // Recreate indices
     search_service.recreate_indices().await?;
 
-    // Get all assets and findings from database (no limit for reindexing)
+    // Get all assets and findings from database for this company (no limit for reindexing)
     let assets = app_state
         .asset_repository
-        .list(None, Some(100000), None)
+        .list(company_id, None, Some(100000), None)
         .await?;
-    let findings = app_state.finding_repository.list_by_type("").await?; // Get all findings
+    let findings = app_state
+        .finding_repository
+        .list_by_type("", company_id)
+        .await?; // Get all findings
 
     // Bulk index them
     if !assets.is_empty() {

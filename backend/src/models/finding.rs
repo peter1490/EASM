@@ -11,6 +11,7 @@ pub struct Finding {
     pub finding_type: String,
     pub data: Value,
     pub created_at: DateTime<Utc>,
+    pub company_id: Uuid,
 }
 
 #[derive(Debug, Clone, Deserialize)]

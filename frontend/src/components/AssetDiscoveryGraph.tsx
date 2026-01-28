@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { getAssetPath } from '@/app/api';
 import {
     ReactFlow,
     MiniMap,
@@ -183,13 +184,7 @@ export default function AssetDiscoveryGraph({ assetId }: AssetDiscoveryGraphProp
             setLoading(true);
             setError(null);
             try {
-                const response = await fetch(`http://localhost:8000/api/assets/${assetId}/path`, {
-                    credentials: 'include',
-                });
-                if (!response.ok) {
-                    throw new Error('Failed to fetch asset path');
-                }
-                const assets: Asset[] = await response.json();
+                const assets: Asset[] = await getAssetPath(assetId);
 
                 if (assets.length === 0) {
                     setNodes([]);

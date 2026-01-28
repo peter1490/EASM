@@ -7,9 +7,8 @@ use uuid::Uuid;
 use crate::{
     error::ApiError,
     models::{
-        FindingSeverity, FindingStatus, ScanTriggerType, SecurityFinding, SecurityFindingCreate,
-        SecurityFindingFilter, SecurityFindingUpdate, SecurityScan, SecurityScanCreate,
-        SecurityScanStatus, SecurityScanType,
+        SecurityFinding, SecurityFindingCreate, SecurityFindingFilter, SecurityFindingUpdate,
+        SecurityScan, SecurityScanCreate, SecurityScanStatus,
     },
 };
 
@@ -19,26 +18,61 @@ use crate::{
 
 #[async_trait]
 pub trait SecurityScanRepository: Send + Sync {
-    async fn create(&self, scan: &SecurityScanCreate) -> Result<SecurityScan, ApiError>;
-    async fn get_by_id(&self, id: &Uuid) -> Result<Option<SecurityScan>, ApiError>;
+    async fn create(
+        &self,
+        scan: &SecurityScanCreate,
+        company_id: Uuid,
+    ) -> Result<SecurityScan, ApiError>;
+    async fn get_by_id(
+        &self,
+        id: &Uuid,
+        company_id: Uuid,
+    ) -> Result<Option<SecurityScan>, ApiError>;
     async fn list_by_asset(
         &self,
         asset_id: &Uuid,
         limit: i64,
+        company_id: Uuid,
     ) -> Result<Vec<SecurityScan>, ApiError>;
-    async fn list_pending(&self, limit: i64) -> Result<Vec<SecurityScan>, ApiError>;
-    async fn list_all(&self, limit: i64, offset: i64) -> Result<Vec<SecurityScan>, ApiError>;
+    async fn list_pending(
+        &self,
+        limit: i64,
+        company_id: Uuid,
+    ) -> Result<Vec<SecurityScan>, ApiError>;
+    async fn list_all(
+        &self,
+        limit: i64,
+        offset: i64,
+        company_id: Uuid,
+    ) -> Result<Vec<SecurityScan>, ApiError>;
     async fn update_status(
         &self,
         id: &Uuid,
         status: SecurityScanStatus,
+        company_id: Uuid,
     ) -> Result<SecurityScan, ApiError>;
-    async fn start(&self, id: &Uuid) -> Result<SecurityScan, ApiError>;
-    async fn complete(&self, id: &Uuid, result_summary: &Value) -> Result<SecurityScan, ApiError>;
-    async fn fail(&self, id: &Uuid, error: &str) -> Result<SecurityScan, ApiError>;
-    async fn get_latest_for_asset(&self, asset_id: &Uuid)
-        -> Result<Option<SecurityScan>, ApiError>;
-    async fn count_by_status(&self) -> Result<std::collections::HashMap<String, i64>, ApiError>;
+    async fn start(&self, id: &Uuid, company_id: Uuid) -> Result<SecurityScan, ApiError>;
+    async fn complete(
+        &self,
+        id: &Uuid,
+        result_summary: &Value,
+        company_id: Uuid,
+    ) -> Result<SecurityScan, ApiError>;
+    async fn fail(
+        &self,
+        id: &Uuid,
+        error: &str,
+        company_id: Uuid,
+    ) -> Result<SecurityScan, ApiError>;
+    async fn get_latest_for_asset(
+        &self,
+        asset_id: &Uuid,
+        company_id: Uuid,
+    ) -> Result<Option<SecurityScan>, ApiError>;
+    async fn count_by_status(
+        &self,
+        company_id: Uuid,
+    ) -> Result<std::collections::HashMap<String, i64>, ApiError>;
 }
 
 pub struct SqlxSecurityScanRepository {
@@ -53,7 +87,11 @@ impl SqlxSecurityScanRepository {
 
 #[async_trait]
 impl SecurityScanRepository for SqlxSecurityScanRepository {
-    async fn create(&self, scan: &SecurityScanCreate) -> Result<SecurityScan, ApiError> {
+    async fn create(
+        &self,
+        scan: &SecurityScanCreate,
+        company_id: Uuid,
+    ) -> Result<SecurityScan, ApiError> {
         let id = Uuid::new_v4();
         let now = Utc::now();
         let scan_type = scan
@@ -72,8 +110,8 @@ impl SecurityScanRepository for SqlxSecurityScanRepository {
         let row = sqlx::query_as::<_, SecurityScan>(
             r#"
             INSERT INTO security_scans 
-                (id, asset_id, scan_type, status, trigger_type, priority, note, config, result_summary, created_at, updated_at)
-            VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, '{}', $8, $8)
+                (id, asset_id, scan_type, status, trigger_type, priority, note, config, result_summary, created_at, updated_at, company_id)
+            VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, '{}', $8, $8, $9)
             RETURNING *
             "#
         )
@@ -85,17 +123,25 @@ impl SecurityScanRepository for SqlxSecurityScanRepository {
         .bind(&scan.note)
         .bind(&config)
         .bind(now)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(row)
     }
 
-    async fn get_by_id(&self, id: &Uuid) -> Result<Option<SecurityScan>, ApiError> {
-        let row = sqlx::query_as::<_, SecurityScan>("SELECT * FROM security_scans WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+    async fn get_by_id(
+        &self,
+        id: &Uuid,
+        company_id: Uuid,
+    ) -> Result<Option<SecurityScan>, ApiError> {
+        let row = sqlx::query_as::<_, SecurityScan>(
+            "SELECT * FROM security_scans WHERE id = $1 AND company_id = $2",
+        )
+        .bind(id)
+        .bind(company_id)
+        .fetch_optional(&self.pool)
+        .await?;
 
         Ok(row)
     }
@@ -104,11 +150,13 @@ impl SecurityScanRepository for SqlxSecurityScanRepository {
         &self,
         asset_id: &Uuid,
         limit: i64,
+        company_id: Uuid,
     ) -> Result<Vec<SecurityScan>, ApiError> {
         let rows = sqlx::query_as::<_, SecurityScan>(
-            "SELECT * FROM security_scans WHERE asset_id = $1 ORDER BY created_at DESC LIMIT $2",
+            "SELECT * FROM security_scans WHERE asset_id = $1 AND company_id = $2 ORDER BY created_at DESC LIMIT $3",
         )
         .bind(asset_id)
+        .bind(company_id)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -116,23 +164,34 @@ impl SecurityScanRepository for SqlxSecurityScanRepository {
         Ok(rows)
     }
 
-    async fn list_pending(&self, limit: i64) -> Result<Vec<SecurityScan>, ApiError> {
+    async fn list_pending(
+        &self,
+        limit: i64,
+        company_id: Uuid,
+    ) -> Result<Vec<SecurityScan>, ApiError> {
         let rows = sqlx::query_as::<_, SecurityScan>(
-            "SELECT * FROM security_scans WHERE status = 'pending' ORDER BY priority DESC, created_at ASC LIMIT $1"
+            "SELECT * FROM security_scans WHERE status = 'pending' AND company_id = $2 ORDER BY priority DESC, created_at ASC LIMIT $1"
         )
         .bind(limit)
+        .bind(company_id)
         .fetch_all(&self.pool)
         .await?;
 
         Ok(rows)
     }
 
-    async fn list_all(&self, limit: i64, offset: i64) -> Result<Vec<SecurityScan>, ApiError> {
+    async fn list_all(
+        &self,
+        limit: i64,
+        offset: i64,
+        company_id: Uuid,
+    ) -> Result<Vec<SecurityScan>, ApiError> {
         let rows = sqlx::query_as::<_, SecurityScan>(
-            "SELECT * FROM security_scans ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+            "SELECT * FROM security_scans WHERE company_id = $3 ORDER BY created_at DESC LIMIT $1 OFFSET $2",
         )
         .bind(limit)
         .bind(offset)
+        .bind(company_id)
         .fetch_all(&self.pool)
         .await?;
 
@@ -143,57 +202,71 @@ impl SecurityScanRepository for SqlxSecurityScanRepository {
         &self,
         id: &Uuid,
         status: SecurityScanStatus,
+        company_id: Uuid,
     ) -> Result<SecurityScan, ApiError> {
         let now = Utc::now();
         let status_str = status.to_string();
 
         let row = sqlx::query_as::<_, SecurityScan>(
-            "UPDATE security_scans SET status = $2, updated_at = $3 WHERE id = $1 RETURNING *",
+            "UPDATE security_scans SET status = $2, updated_at = $3 WHERE id = $1 AND company_id = $4 RETURNING *",
         )
         .bind(id)
         .bind(&status_str)
         .bind(now)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(row)
     }
 
-    async fn start(&self, id: &Uuid) -> Result<SecurityScan, ApiError> {
+    async fn start(&self, id: &Uuid, company_id: Uuid) -> Result<SecurityScan, ApiError> {
         let now = Utc::now();
 
         let row = sqlx::query_as::<_, SecurityScan>(
-            "UPDATE security_scans SET status = 'running', started_at = $2, updated_at = $2 WHERE id = $1 RETURNING *"
+            "UPDATE security_scans SET status = 'running', started_at = $2, updated_at = $2 WHERE id = $1 AND company_id = $3 RETURNING *"
         )
         .bind(id)
         .bind(now)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(row)
     }
 
-    async fn complete(&self, id: &Uuid, result_summary: &Value) -> Result<SecurityScan, ApiError> {
+    async fn complete(
+        &self,
+        id: &Uuid,
+        result_summary: &Value,
+        company_id: Uuid,
+    ) -> Result<SecurityScan, ApiError> {
         let now = Utc::now();
 
         let row = sqlx::query_as::<_, SecurityScan>(
             r#"
             UPDATE security_scans 
             SET status = 'completed', completed_at = $2, result_summary = $3, updated_at = $2 
-            WHERE id = $1 
+            WHERE id = $1 AND company_id = $4
             RETURNING *
             "#,
         )
         .bind(id)
         .bind(now)
         .bind(result_summary)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(row)
     }
 
-    async fn fail(&self, id: &Uuid, error: &str) -> Result<SecurityScan, ApiError> {
+    async fn fail(
+        &self,
+        id: &Uuid,
+        error: &str,
+        company_id: Uuid,
+    ) -> Result<SecurityScan, ApiError> {
         let now = Utc::now();
         let result_summary = json!({ "error": error });
 
@@ -201,13 +274,14 @@ impl SecurityScanRepository for SqlxSecurityScanRepository {
             r#"
             UPDATE security_scans 
             SET status = 'failed', completed_at = $2, result_summary = $3, updated_at = $2 
-            WHERE id = $1 
+            WHERE id = $1 AND company_id = $4
             RETURNING *
             "#,
         )
         .bind(id)
         .bind(now)
         .bind(&result_summary)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
@@ -217,21 +291,27 @@ impl SecurityScanRepository for SqlxSecurityScanRepository {
     async fn get_latest_for_asset(
         &self,
         asset_id: &Uuid,
+        company_id: Uuid,
     ) -> Result<Option<SecurityScan>, ApiError> {
         let row = sqlx::query_as::<_, SecurityScan>(
-            "SELECT * FROM security_scans WHERE asset_id = $1 ORDER BY created_at DESC LIMIT 1",
+            "SELECT * FROM security_scans WHERE asset_id = $1 AND company_id = $2 ORDER BY created_at DESC LIMIT 1",
         )
         .bind(asset_id)
+        .bind(company_id)
         .fetch_optional(&self.pool)
         .await?;
 
         Ok(row)
     }
 
-    async fn count_by_status(&self) -> Result<std::collections::HashMap<String, i64>, ApiError> {
+    async fn count_by_status(
+        &self,
+        company_id: Uuid,
+    ) -> Result<std::collections::HashMap<String, i64>, ApiError> {
         let rows = sqlx::query_as::<_, (String, i64)>(
-            "SELECT status, COUNT(*) FROM security_scans GROUP BY status",
+            "SELECT status, COUNT(*) FROM security_scans WHERE company_id = $1 GROUP BY status",
         )
+        .bind(company_id)
         .fetch_all(&self.pool)
         .await?;
 
@@ -245,32 +325,59 @@ impl SecurityScanRepository for SqlxSecurityScanRepository {
 
 #[async_trait]
 pub trait SecurityFindingRepository: Send + Sync {
-    async fn create(&self, finding: &SecurityFindingCreate) -> Result<SecurityFinding, ApiError>;
+    async fn create(
+        &self,
+        finding: &SecurityFindingCreate,
+        company_id: Uuid,
+    ) -> Result<SecurityFinding, ApiError>;
     async fn create_or_update(
         &self,
         finding: &SecurityFindingCreate,
+        company_id: Uuid,
     ) -> Result<SecurityFinding, ApiError>;
-    async fn get_by_id(&self, id: &Uuid) -> Result<Option<SecurityFinding>, ApiError>;
+    async fn get_by_id(
+        &self,
+        id: &Uuid,
+        company_id: Uuid,
+    ) -> Result<Option<SecurityFinding>, ApiError>;
     async fn list_by_asset(
         &self,
         asset_id: &Uuid,
         limit: i64,
+        company_id: Uuid,
     ) -> Result<Vec<SecurityFinding>, ApiError>;
-    async fn list_by_scan(&self, scan_id: &Uuid) -> Result<Vec<SecurityFinding>, ApiError>;
+    async fn list_by_scan(
+        &self,
+        scan_id: &Uuid,
+        company_id: Uuid,
+    ) -> Result<Vec<SecurityFinding>, ApiError>;
     async fn list_filtered(
         &self,
         filter: &SecurityFindingFilter,
+        company_id: Uuid,
     ) -> Result<(Vec<SecurityFinding>, i64), ApiError>;
     async fn update(
         &self,
         id: &Uuid,
         update: &SecurityFindingUpdate,
         updated_by: Option<Uuid>,
+        company_id: Uuid,
     ) -> Result<SecurityFinding, ApiError>;
-    async fn resolve(&self, id: &Uuid, resolved_by: Uuid) -> Result<SecurityFinding, ApiError>;
-    async fn count_by_severity(&self) -> Result<std::collections::HashMap<String, i64>, ApiError>;
-    async fn count_by_status(&self) -> Result<std::collections::HashMap<String, i64>, ApiError>;
-    async fn count_by_asset(&self, asset_id: &Uuid) -> Result<i64, ApiError>;
+    async fn resolve(
+        &self,
+        id: &Uuid,
+        resolved_by: Uuid,
+        company_id: Uuid,
+    ) -> Result<SecurityFinding, ApiError>;
+    async fn count_by_severity(
+        &self,
+        company_id: Uuid,
+    ) -> Result<std::collections::HashMap<String, i64>, ApiError>;
+    async fn count_by_status(
+        &self,
+        company_id: Uuid,
+    ) -> Result<std::collections::HashMap<String, i64>, ApiError>;
+    async fn count_by_asset(&self, asset_id: &Uuid, company_id: Uuid) -> Result<i64, ApiError>;
 }
 
 pub struct SqlxSecurityFindingRepository {
@@ -285,7 +392,11 @@ impl SqlxSecurityFindingRepository {
 
 #[async_trait]
 impl SecurityFindingRepository for SqlxSecurityFindingRepository {
-    async fn create(&self, finding: &SecurityFindingCreate) -> Result<SecurityFinding, ApiError> {
+    async fn create(
+        &self,
+        finding: &SecurityFindingCreate,
+        company_id: Uuid,
+    ) -> Result<SecurityFinding, ApiError> {
         let id = Uuid::new_v4();
         let now = Utc::now();
         let severity = finding.severity.to_string();
@@ -293,8 +404,8 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         let row = sqlx::query_as::<_, SecurityFinding>(
             r#"
             INSERT INTO security_findings 
-                (id, security_scan_id, asset_id, finding_type, severity, title, description, remediation, data, status, first_seen_at, last_seen_at, cvss_score, cve_ids, tags, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'open', $10, $10, $11, $12, $13, $10, $10)
+                (id, security_scan_id, asset_id, finding_type, severity, title, description, remediation, data, status, first_seen_at, last_seen_at, cvss_score, cve_ids, tags, created_at, updated_at, company_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'open', $10, $10, $11, $12, $13, $10, $10, $14)
             RETURNING *
             "#
         )
@@ -311,6 +422,7 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         .bind(finding.cvss_score)
         .bind(&finding.cve_ids)
         .bind(&finding.tags)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
@@ -320,6 +432,7 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
     async fn create_or_update(
         &self,
         finding: &SecurityFindingCreate,
+        company_id: Uuid,
     ) -> Result<SecurityFinding, ApiError> {
         let now = Utc::now();
         let severity = finding.severity.to_string();
@@ -329,13 +442,14 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         let existing = sqlx::query_as::<_, SecurityFinding>(
             r#"
             SELECT * FROM security_findings 
-            WHERE asset_id = $1 AND finding_type = $2 AND title = $3 AND status NOT IN ('resolved', 'false_positive')
+            WHERE asset_id = $1 AND finding_type = $2 AND title = $3 AND company_id = $4 AND status NOT IN ('resolved', 'false_positive')
             ORDER BY first_seen_at DESC LIMIT 1
             "#
         )
         .bind(finding.asset_id)
         .bind(&finding.finding_type)
         .bind(&finding.title)
+        .bind(company_id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -351,9 +465,9 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
                     cvss_score = COALESCE($6, cvss_score),
                     cve_ids = COALESCE($7, cve_ids),
                     updated_at = $2
-                WHERE id = $1
+                WHERE id = $1 AND company_id = $8
                 RETURNING *
-                "#
+                "#,
             )
             .bind(existing.id)
             .bind(now)
@@ -362,22 +476,29 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
             .bind(&severity)
             .bind(finding.cvss_score)
             .bind(&finding.cve_ids)
+            .bind(company_id)
             .fetch_one(&self.pool)
             .await?;
 
             Ok(row)
         } else {
             // Create new finding
-            self.create(finding).await
+            self.create(finding, company_id).await
         }
     }
 
-    async fn get_by_id(&self, id: &Uuid) -> Result<Option<SecurityFinding>, ApiError> {
-        let row =
-            sqlx::query_as::<_, SecurityFinding>("SELECT * FROM security_findings WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?;
+    async fn get_by_id(
+        &self,
+        id: &Uuid,
+        company_id: Uuid,
+    ) -> Result<Option<SecurityFinding>, ApiError> {
+        let row = sqlx::query_as::<_, SecurityFinding>(
+            "SELECT * FROM security_findings WHERE id = $1 AND company_id = $2",
+        )
+        .bind(id)
+        .bind(company_id)
+        .fetch_optional(&self.pool)
+        .await?;
 
         Ok(row)
     }
@@ -386,11 +507,13 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         &self,
         asset_id: &Uuid,
         limit: i64,
+        company_id: Uuid,
     ) -> Result<Vec<SecurityFinding>, ApiError> {
         let rows = sqlx::query_as::<_, SecurityFinding>(
-            "SELECT * FROM security_findings WHERE asset_id = $1 ORDER BY first_seen_at DESC LIMIT $2"
+            "SELECT * FROM security_findings WHERE asset_id = $1 AND company_id = $2 ORDER BY first_seen_at DESC LIMIT $3"
         )
         .bind(asset_id)
+        .bind(company_id)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -398,11 +521,16 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         Ok(rows)
     }
 
-    async fn list_by_scan(&self, scan_id: &Uuid) -> Result<Vec<SecurityFinding>, ApiError> {
+    async fn list_by_scan(
+        &self,
+        scan_id: &Uuid,
+        company_id: Uuid,
+    ) -> Result<Vec<SecurityFinding>, ApiError> {
         let rows = sqlx::query_as::<_, SecurityFinding>(
-            "SELECT * FROM security_findings WHERE security_scan_id = $1 ORDER BY severity, first_seen_at DESC"
+            "SELECT * FROM security_findings WHERE security_scan_id = $1 AND company_id = $2 ORDER BY severity, first_seen_at DESC"
         )
         .bind(scan_id)
+        .bind(company_id)
         .fetch_all(&self.pool)
         .await?;
 
@@ -412,6 +540,7 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
     async fn list_filtered(
         &self,
         filter: &SecurityFindingFilter,
+        company_id: Uuid,
     ) -> Result<(Vec<SecurityFinding>, i64), ApiError> {
         // Build dynamic query
         let mut conditions: Vec<String> = Vec::new();
@@ -421,40 +550,20 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         let mut query = String::from("SELECT * FROM security_findings WHERE 1=1");
         let mut count_query = String::from("SELECT COUNT(*) FROM security_findings WHERE 1=1");
 
-        // Add conditions based on filter
-        if filter.asset_ids.is_some() {
-            params_count += 1;
-            let cond = format!(" AND asset_id = ANY(${})", params_count);
-            query.push_str(&cond);
-            count_query.push_str(&cond);
-        }
+        // Add company_id condition
+        params_count += 1;
+        let cond = format!(" AND company_id = ${}", params_count);
+        query.push_str(&cond);
+        count_query.push_str(&cond);
 
-        if filter.severities.is_some() {
-            params_count += 1;
-            let cond = format!(" AND severity = ANY(${})", params_count);
-            query.push_str(&cond);
-            count_query.push_str(&cond);
-        }
+        // Add other filters (implementation simplified as helper logic for query building should handle company_id injection if refactored, but here we just bind it manually in the sqlx query below)
+        // Since sqlx query below is hardcoded with $1, $2 etc, I will just modify IT.
 
-        if filter.statuses.is_some() {
-            params_count += 1;
-            let cond = format!(" AND status = ANY(${})", params_count);
-            query.push_str(&cond);
-            count_query.push_str(&cond);
-        }
-
-        // Add ordering
-        let order = format!(
-            " ORDER BY {} {} LIMIT {} OFFSET {}",
-            filter.sort_by, filter.sort_direction, filter.limit, filter.offset
-        );
-        query.push_str(&order);
-
-        // For simplicity, use a simpler approach
         let rows = sqlx::query_as::<_, SecurityFinding>(
             r#"
             SELECT * FROM security_findings 
-            WHERE ($1::uuid[] IS NULL OR asset_id = ANY($1))
+            WHERE company_id = $6
+              AND ($1::uuid[] IS NULL OR asset_id = ANY($1))
               AND ($2::text[] IS NULL OR severity = ANY($2))
               AND ($3::text[] IS NULL OR status = ANY($3))
             ORDER BY first_seen_at DESC
@@ -466,13 +575,15 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         .bind(filter.statuses.as_ref().map(|v| v.as_slice()))
         .bind(filter.limit)
         .bind(filter.offset)
+        .bind(company_id)
         .fetch_all(&self.pool)
         .await?;
 
         let total = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT COUNT(*) FROM security_findings 
-            WHERE ($1::uuid[] IS NULL OR asset_id = ANY($1))
+            WHERE company_id = $4
+              AND ($1::uuid[] IS NULL OR asset_id = ANY($1))
               AND ($2::text[] IS NULL OR severity = ANY($2))
               AND ($3::text[] IS NULL OR status = ANY($3))
             "#,
@@ -480,6 +591,7 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         .bind(filter.asset_ids.as_ref().map(|v| v.as_slice()))
         .bind(filter.severities.as_ref().map(|v| v.as_slice()))
         .bind(filter.statuses.as_ref().map(|v| v.as_slice()))
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
@@ -491,6 +603,7 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         id: &Uuid,
         update: &SecurityFindingUpdate,
         _updated_by: Option<Uuid>,
+        company_id: Uuid,
     ) -> Result<SecurityFinding, ApiError> {
         let now = Utc::now();
         let status = update.status.as_ref().map(|s| s.to_string());
@@ -503,7 +616,7 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
                 remediation = COALESCE($4, remediation),
                 tags = COALESCE($5, tags),
                 updated_at = $6
-            WHERE id = $1
+            WHERE id = $1 AND company_id = $7
             RETURNING *
             "#,
         )
@@ -513,57 +626,73 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         .bind(&update.remediation)
         .bind(update.tags.as_ref().map(|v| v.as_slice()))
         .bind(now)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(row)
     }
 
-    async fn resolve(&self, id: &Uuid, resolved_by: Uuid) -> Result<SecurityFinding, ApiError> {
+    async fn resolve(
+        &self,
+        id: &Uuid,
+        resolved_by: Uuid,
+        company_id: Uuid,
+    ) -> Result<SecurityFinding, ApiError> {
         let now = Utc::now();
 
         let row = sqlx::query_as::<_, SecurityFinding>(
             r#"
             UPDATE security_findings 
             SET status = 'resolved', resolved_at = $2, resolved_by = $3, updated_at = $2
-            WHERE id = $1
+            WHERE id = $1 AND company_id = $4
             RETURNING *
             "#,
         )
         .bind(id)
         .bind(now)
         .bind(resolved_by)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(row)
     }
 
-    async fn count_by_severity(&self) -> Result<std::collections::HashMap<String, i64>, ApiError> {
+    async fn count_by_severity(
+        &self,
+        company_id: Uuid,
+    ) -> Result<std::collections::HashMap<String, i64>, ApiError> {
         let rows = sqlx::query_as::<_, (String, i64)>(
-            "SELECT severity, COUNT(*) FROM security_findings WHERE status != 'resolved' GROUP BY severity"
+            "SELECT severity, COUNT(*) FROM security_findings WHERE status != 'resolved' AND company_id = $1 GROUP BY severity"
         )
+        .bind(company_id)
         .fetch_all(&self.pool)
         .await?;
 
         Ok(rows.into_iter().collect())
     }
 
-    async fn count_by_status(&self) -> Result<std::collections::HashMap<String, i64>, ApiError> {
+    async fn count_by_status(
+        &self,
+        company_id: Uuid,
+    ) -> Result<std::collections::HashMap<String, i64>, ApiError> {
         let rows = sqlx::query_as::<_, (String, i64)>(
-            "SELECT status, COUNT(*) FROM security_findings GROUP BY status",
+            "SELECT status, COUNT(*) FROM security_findings WHERE company_id = $1 GROUP BY status",
         )
+        .bind(company_id)
         .fetch_all(&self.pool)
         .await?;
 
         Ok(rows.into_iter().collect())
     }
 
-    async fn count_by_asset(&self, asset_id: &Uuid) -> Result<i64, ApiError> {
+    async fn count_by_asset(&self, asset_id: &Uuid, company_id: Uuid) -> Result<i64, ApiError> {
         let count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM security_findings WHERE asset_id = $1",
+            "SELECT COUNT(*) FROM security_findings WHERE asset_id = $1 AND company_id = $2",
         )
         .bind(asset_id)
+        .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 

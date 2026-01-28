@@ -70,11 +70,15 @@ impl RiskService {
     }
 
     /// Calculate risk score for a single asset based on its security findings
-    pub async fn calculate_asset_risk(&self, asset_id: Uuid) -> Result<Asset, ApiError> {
-        // 1. Get Asset
+    pub async fn calculate_asset_risk(
+        &self,
+        company_id: Uuid,
+        asset_id: Uuid,
+    ) -> Result<Asset, ApiError> {
+        // 1. Get Asset (company-scoped)
         let asset = self
             .asset_repo
-            .get_by_id(&asset_id)
+            .get_by_id(company_id, &asset_id)
             .await?
             .ok_or_else(|| ApiError::NotFound(format!("Asset {} not found", asset_id)))?;
 
@@ -84,7 +88,7 @@ impl RiskService {
         // 3. Get Security Findings for Asset (proper security findings with severity)
         let findings = self
             .security_finding_repo
-            .list_by_asset(&asset_id, 1000)
+            .list_by_asset(&asset_id, 1000, company_id)
             .await?;
 
         // 4. Calculate Score based on findings severity and type
@@ -102,28 +106,27 @@ impl RiskService {
             *severity_counts.entry(finding.severity.clone()).or_insert(0) += 1;
 
             // Get scoring from config or use fallbacks
-            let (severity_score, type_multiplier) = if let Some((score, mult)) =
-                scoring_config.get(&finding.finding_type)
-            {
-                config_used.insert(finding.finding_type.clone(), true);
-                (*score, *mult)
-            } else {
-                // Fallback to hardcoded values for unknown types
-                let severity_score = Self::get_fallback_severity_score(&finding.severity);
+            let (severity_score, type_multiplier) =
+                if let Some((score, mult)) = scoring_config.get(&finding.finding_type) {
+                    config_used.insert(finding.finding_type.clone(), true);
+                    (*score, *mult)
+                } else {
+                    // Fallback to hardcoded values for unknown types
+                    let severity_score = Self::get_fallback_severity_score(&finding.severity);
 
-                // Special handling for open_port with port-specific multipliers
-                let type_multiplier = if finding.finding_type == "open_port" {
-                    if let Some(port) = finding.data.get("port").and_then(|p| p.as_i64()) {
-                        Self::get_port_multiplier(port)
+                    // Special handling for open_port with port-specific multipliers
+                    let type_multiplier = if finding.finding_type == "open_port" {
+                        if let Some(port) = finding.data.get("port").and_then(|p| p.as_i64()) {
+                            Self::get_port_multiplier(port)
+                        } else {
+                            1.0
+                        }
                     } else {
                         1.0
-                    }
-                } else {
-                    1.0
-                };
+                    };
 
-                (severity_score, type_multiplier)
-            };
+                    (severity_score, type_multiplier)
+                };
 
             // Add CVSS score if available (weighted)
             let cvss_bonus = finding.cvss_score.map(|s| s * 2.0).unwrap_or(0.0);
@@ -174,7 +177,7 @@ impl RiskService {
         // 9. Update Asset with new risk data
         let updated_asset = self
             .asset_repo
-            .update_risk(&asset.id, risk_score, risk_level, &factors)
+            .update_risk(company_id, &asset.id, risk_score, risk_level, &factors)
             .await?;
 
         tracing::info!(
@@ -190,15 +193,21 @@ impl RiskService {
     }
 
     /// Recalculate risk for all assets
-    pub async fn recalculate_all_risks(&self) -> Result<RiskRecalculationResult, ApiError> {
-        let assets = self.asset_repo.list(None, Some(10000), None).await?;
+    pub async fn recalculate_all_risks(
+        &self,
+        company_id: Uuid,
+    ) -> Result<RiskRecalculationResult, ApiError> {
+        let assets = self
+            .asset_repo
+            .list(company_id, None, Some(10000), None)
+            .await?;
 
         let mut success_count = 0;
         let mut error_count = 0;
         let mut errors: Vec<String> = Vec::new();
 
         for asset in assets {
-            match self.calculate_asset_risk(asset.id).await {
+            match self.calculate_asset_risk(company_id, asset.id).await {
                 Ok(_) => success_count += 1,
                 Err(e) => {
                     error_count += 1;
@@ -217,16 +226,17 @@ impl RiskService {
     }
 
     /// Get real risk overview with actual data from database
-    pub async fn get_risk_overview(&self) -> Result<serde_json::Value, ApiError> {
+    pub async fn get_risk_overview(&self, company_id: Uuid) -> Result<serde_json::Value, ApiError> {
         // Query assets grouped by risk level
         let risk_levels = sqlx::query_as::<_, (Option<String>, i64)>(
             r#"
             SELECT risk_level, COUNT(*) as count
             FROM assets
-            WHERE risk_level IS NOT NULL
+            WHERE risk_level IS NOT NULL AND company_id = $1
             GROUP BY risk_level
             "#,
         )
+        .bind(company_id)
         .fetch_all(&self.db_pool)
         .await?;
 
@@ -251,19 +261,23 @@ impl RiskService {
                 AVG(risk_score) as avg_score,
                 SUM(risk_score) as total_score
             FROM assets
-            WHERE risk_score IS NOT NULL
+            WHERE risk_score IS NOT NULL AND company_id = $1
             "#,
         )
+        .bind(company_id)
         .fetch_one(&self.db_pool)
         .await?;
 
         let (total_with_scores, avg_score, total_score) = stats;
 
-        // Get total assets
-        let total_assets = self.asset_repo.count(None).await?;
+        // Get total assets (system-wide)
+        let total_assets = self.asset_repo.count(company_id, None).await?;
 
-        // Get findings summary
-        let findings_summary = self.security_finding_repo.count_by_severity().await?;
+        // Get findings summary (system-wide)
+        let findings_summary = self
+            .security_finding_repo
+            .count_by_severity(company_id)
+            .await?;
 
         Ok(json!({
             "total_risk_score": total_score.unwrap_or(0.0),
@@ -277,19 +291,24 @@ impl RiskService {
     }
 
     /// Get assets with highest risk scores
-    pub async fn get_high_risk_assets(&self, limit: i64) -> Result<Vec<Asset>, ApiError> {
+    pub async fn get_high_risk_assets(
+        &self,
+        company_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<Asset>, ApiError> {
         let rows = sqlx::query_as::<_, crate::models::asset::AssetRow>(
             r#"
             SELECT 
-                id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id,
+                id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id, company_id,
                 importance, risk_score, risk_level, last_risk_run,
                 NULL::uuid as last_scan_id, NULL::text as last_scan_status, NULL::timestamptz as last_scanned_at
             FROM assets
-            WHERE risk_score IS NOT NULL
+            WHERE risk_score IS NOT NULL AND company_id = $1
             ORDER BY risk_score DESC
-            LIMIT $1
+            LIMIT $2
             "#
         )
+        .bind(company_id)
         .bind(limit)
         .fetch_all(&self.db_pool)
         .await?;

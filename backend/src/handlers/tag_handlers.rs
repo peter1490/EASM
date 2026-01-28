@@ -26,11 +26,13 @@ fn default_limit() -> i64 {
 /// List all tags with their asset counts
 pub async fn list_tags(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Query(params): Query<TagListQuery>,
 ) -> Result<Json<TagListResponse>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let response = app_state
         .tag_service
-        .list_tags(params.limit, params.offset)
+        .list_tags(company_id, params.limit, params.offset)
         .await?;
     Ok(Json(response))
 }
@@ -38,11 +40,13 @@ pub async fn list_tags(
 /// Get a single tag by ID
 pub async fn get_tag(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Tag>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     let tag = app_state
         .tag_service
-        .get_tag(&id)
+        .get_tag(company_id, &id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("Tag {} not found", id)))?;
     Ok(Json(tag))
@@ -64,7 +68,8 @@ pub async fn create_tag(
         ));
     }
 
-    let tag = app_state.tag_service.create_tag(payload).await?;
+    let company_id = user.company_id.unwrap_or_default();
+    let tag = app_state.tag_service.create_tag(company_id, payload).await?;
     Ok(Json(tag))
 }
 
@@ -85,7 +90,11 @@ pub async fn update_tag(
         ));
     }
 
-    let tag = app_state.tag_service.update_tag(&id, payload).await?;
+    let company_id = user.company_id.unwrap_or_default();
+    let tag = app_state
+        .tag_service
+        .update_tag(company_id, &id, payload)
+        .await?;
     Ok(Json(tag))
 }
 
@@ -102,16 +111,22 @@ pub async fn delete_tag(
         ));
     }
 
-    app_state.tag_service.delete_tag(&id).await?;
+    let company_id = user.company_id.unwrap_or_default();
+    app_state.tag_service.delete_tag(company_id, &id).await?;
     Ok(Json(()))
 }
 
 /// Get tags for an asset
 pub async fn get_asset_tags(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(asset_id): Path<Uuid>,
 ) -> Result<Json<Vec<AssetTagDetail>>, ApiError> {
-    let tags = app_state.tag_service.get_asset_tags(&asset_id).await?;
+    let company_id = user.company_id.unwrap_or_default();
+    let tags = app_state
+        .tag_service
+        .get_asset_tags(company_id, &asset_id)
+        .await?;
     Ok(Json(tags))
 }
 
@@ -137,9 +152,10 @@ pub async fn tag_asset(
         ));
     }
 
+    let company_id = user.company_id.unwrap_or_default();
     app_state
         .tag_service
-        .tag_asset(&asset_id, &payload.tag_id)
+        .tag_asset(company_id, &asset_id, &payload.tag_id)
         .await?;
     Ok(Json(()))
 }
@@ -160,7 +176,11 @@ pub async fn untag_asset(
         ));
     }
 
-    app_state.tag_service.untag_asset(&asset_id, &tag_id).await?;
+    let company_id = user.company_id.unwrap_or_default();
+    app_state
+        .tag_service
+        .untag_asset(company_id, &asset_id, &tag_id)
+        .await?;
     Ok(Json(()))
 }
 
@@ -177,7 +197,11 @@ pub async fn run_auto_tag_for_tag(
         ));
     }
 
-    let result = app_state.tag_service.run_auto_tag_for_tag(&tag_id).await?;
+    let company_id = user.company_id.unwrap_or_default();
+    let result = app_state
+        .tag_service
+        .run_auto_tag_for_tag(company_id, &tag_id)
+        .await?;
     Ok(Json(result))
 }
 
@@ -193,7 +217,7 @@ pub async fn run_auto_tag_all(
         ));
     }
 
-    let result = app_state.tag_service.run_auto_tag_all().await?;
+    let company_id = user.company_id.unwrap_or_default();
+    let result = app_state.tag_service.run_auto_tag_all(company_id).await?;
     Ok(Json(result))
 }
-

@@ -1,10 +1,11 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Extension, Query, State},
     response::Json,
 };
 use serde::Deserialize;
 
 use crate::{
+    auth::context::UserContext,
     error::ApiError,
     models::{FindingFilter, FindingListResponse},
     AppState,
@@ -53,8 +54,10 @@ pub struct FindingFilterParams {
 /// Filter findings with advanced criteria
 pub async fn filter_findings(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Query(params): Query<FindingFilterParams>,
 ) -> Result<Json<FindingListResponse>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     // Parse finding types
     let finding_types = params.finding_types.map(|types| {
         types
@@ -129,7 +132,10 @@ pub async fn filter_findings(
         offset: params.offset.unwrap_or(0),
     };
 
-    let result = app_state.finding_repository.filter(&filter).await?;
+    let result = app_state
+        .finding_repository
+        .filter(&filter, company_id)
+        .await?;
 
     Ok(Json(result))
 }
@@ -137,11 +143,14 @@ pub async fn filter_findings(
 /// Get all distinct finding types for filter UI
 pub async fn get_finding_types(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
 ) -> Result<Json<Vec<String>>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
     // Query to get distinct finding types
     let types = sqlx::query_scalar::<_, String>(
-        "SELECT DISTINCT finding_type FROM findings ORDER BY finding_type",
+        "SELECT DISTINCT finding_type FROM findings WHERE company_id = $1 ORDER BY finding_type",
     )
+    .bind(company_id)
     .fetch_all(&app_state.db_pool)
     .await?;
 

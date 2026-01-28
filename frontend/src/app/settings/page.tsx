@@ -18,6 +18,9 @@ import {
   deleteTag,
   runAutoTagForTag,
   runAutoTagAll,
+  listCompanies,
+  createCompany,
+  updateCompany,
   listFindingTypeConfigs,
   updateFindingTypeConfig,
   bulkUpdateFindingTypeConfigs,
@@ -32,6 +35,7 @@ import {
   type TagCreate,
   type TagUpdate,
   type AutoTagResult,
+  type CompanyWithRole,
   type FindingTypeConfig,
   type FindingTypeConfigUpdate,
   type RiskRecalculationResult,
@@ -49,7 +53,7 @@ import Modal from "@/components/ui/Modal";
 import Input from "@/components/ui/Input";
 import Checkbox from "@/components/ui/Checkbox";
 
-type TabType = "status" | "users" | "config" | "tags" | "risk_scoring";
+type TabType = "status" | "users" | "config" | "companies" | "tags" | "risk_scoring";
 
 const ROLE_COLORS: Record<string, "error" | "warning" | "info" | "secondary" | "success"> = {
   admin: "error",
@@ -325,11 +329,11 @@ const InfoLabel = ({ text, keyName }: { text: string; keyName: string }) => {
 };
 
 export default function SettingsPage() {
-  const { user } = useAuth();
+  const { user, refreshCompanies: refreshCompaniesContext } = useAuth();
   const searchParams = useSearchParams();
   const tabFromUrl = searchParams.get("tab") as TabType | null;
   const [activeTab, setActiveTab] = useState<TabType>(
-    tabFromUrl && ["status", "users", "config", "tags", "risk_scoring"].includes(tabFromUrl) ? tabFromUrl : "status"
+    tabFromUrl && ["status", "users", "config", "companies", "tags", "risk_scoring"].includes(tabFromUrl) ? tabFromUrl : "status"
   );
   const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
   const [health, setHealth] = useState<{ status: string; version: string } | null>(null);
@@ -389,6 +393,15 @@ export default function SettingsPage() {
   const [tagSubmitting, setTagSubmitting] = useState(false);
   const [runningAutoTag, setRunningAutoTag] = useState<string | null>(null);
   const [autoTagResult, setAutoTagResult] = useState<AutoTagResult | null>(null);
+
+  // Companies state
+  const [companies, setCompanies] = useState<CompanyWithRole[]>([]);
+  const [companiesLoading, setCompaniesLoading] = useState(true);
+  const [showCompanyModal, setShowCompanyModal] = useState(false);
+  const [editingCompany, setEditingCompany] = useState<CompanyWithRole | null>(null);
+  const [companyFormName, setCompanyFormName] = useState("");
+  const [companyFormError, setCompanyFormError] = useState<string | null>(null);
+  const [companySubmitting, setCompanySubmitting] = useState(false);
 
   // Finding Type Config state
   const [findingTypeConfigs, setFindingTypeConfigs] = useState<FindingTypeConfig[]>([]);
@@ -469,6 +482,24 @@ export default function SettingsPage() {
       setTagsLoading(false);
     }
   }, []);
+
+  const loadCompanies = useCallback(async () => {
+    try {
+      setCompaniesLoading(true);
+      const list = await listCompanies();
+      setCompanies(list);
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setCompaniesLoading(false);
+    }
+  }, []);
+
+  const syncCompanies = useCallback(async () => {
+    await loadCompanies();
+    await refreshCompaniesContext();
+  }, [loadCompanies, refreshCompaniesContext]);
 
   const loadFindingTypeConfigs = useCallback(async () => {
     try {
@@ -622,6 +653,47 @@ export default function SettingsPage() {
     }
   };
 
+  const openCreateCompanyModal = () => {
+    setCompanyFormName("");
+    setCompanyFormError(null);
+    setEditingCompany(null);
+    setShowCompanyModal(true);
+  };
+
+  const openEditCompanyModal = (company: CompanyWithRole) => {
+    setCompanyFormName(company.name);
+    setCompanyFormError(null);
+    setEditingCompany(company);
+    setShowCompanyModal(true);
+  };
+
+  const handleSaveCompany = async () => {
+    const name = companyFormName.trim();
+    if (!name) {
+      setCompanyFormError("Company name is required");
+      return;
+    }
+
+    setCompanySubmitting(true);
+    setCompanyFormError(null);
+
+    try {
+      if (editingCompany) {
+        await updateCompany(editingCompany.id, name);
+      } else {
+        await createCompany(name);
+      }
+      setShowCompanyModal(false);
+      setEditingCompany(null);
+      setCompanyFormName("");
+      await syncCompanies();
+    } catch (e) {
+      setCompanyFormError((e as Error).message);
+    } finally {
+      setCompanySubmitting(false);
+    }
+  };
+
   const openEditFindingTypeModal = (config: FindingTypeConfig) => {
     setFindingTypeFormData({
       display_name: config.display_name,
@@ -705,12 +777,13 @@ export default function SettingsPage() {
     loadData(false); // Initial load with full spinner
     if (isAdmin) {
       loadSettings(false);
+      syncCompanies();
       loadTags();
       loadFindingTypeConfigs();
     }
     const iv = setInterval(() => loadData(true), 10000); // Silent refreshes
     return () => clearInterval(iv);
-  }, [isAdmin, loadData, loadSettings, loadTags, loadFindingTypeConfigs]);
+  }, [isAdmin, loadData, loadSettings, syncCompanies, loadTags, loadFindingTypeConfigs]);
 
   async function handleAddRole(userId: string, role: string) {
     if (!role) return;
@@ -993,6 +1066,7 @@ export default function SettingsPage() {
     ...(isAdmin ? [
       { id: "config" as TabType, label: "Configuration", icon: "🛡️" },
       { id: "users" as TabType, label: "User Management", icon: "👥", badge: users.length },
+      { id: "companies" as TabType, label: "Companies", icon: "🏢", badge: companies.length },
       { id: "tags" as TabType, label: "Tags", icon: "🏷️", badge: tagsTotalCount },
       { id: "risk_scoring" as TabType, label: "Risk Scoring", icon: "📊", badge: findingTypeConfigs.length },
     ] : []),
@@ -1500,6 +1574,80 @@ export default function SettingsPage() {
               </Card>
             </>
           )}
+        </div>
+      )}
+
+      {/* Companies Tab */}
+      {activeTab === "companies" && isAdmin && (
+        <div className="space-y-6 stagger-children">
+          <Card>
+            <CardHeader className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div>
+                <CardTitle>Manage Companies</CardTitle>
+                <CardDescription>
+                  Create and rename companies. Your access is scoped by company membership.
+                </CardDescription>
+              </div>
+              <div className="flex gap-3 flex-wrap">
+                <Button onClick={openCreateCompanyModal}>+ New Company</Button>
+                <Button variant="outline" onClick={syncCompanies} disabled={companiesLoading}>
+                  {companiesLoading ? "Refreshing..." : "Refresh"}
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {companiesLoading ? (
+                <div className="py-12">
+                  <LoadingSpinner size="lg" />
+                </div>
+              ) : companies.length === 0 ? (
+                <EmptyState
+                  icon="🏢"
+                  title="No companies"
+                  description="Create your first company to start scoping assets and scans."
+                  action={<Button onClick={openCreateCompanyModal}>Create Company</Button>}
+                />
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Name</TableHead>
+                      <TableHead>Role</TableHead>
+                      <TableHead>Assigned</TableHead>
+                      <TableHead>Created</TableHead>
+                      <TableHead className="text-right">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {companies.map((company) => (
+                      <TableRow key={company.id}>
+                        <TableCell>
+                          <div className="font-medium">{company.name}</div>
+                          <div className="text-xs text-muted-foreground font-mono">{company.id}</div>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={ROLE_COLORS[company.role] || "secondary"}>
+                            {company.role}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {new Date(company.assigned_at).toLocaleDateString()}
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {new Date(company.created_at).toLocaleDateString()}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button variant="outline" size="sm" onClick={() => openEditCompanyModal(company)}>
+                            Rename
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
         </div>
       )}
 
@@ -2489,6 +2637,46 @@ export default function SettingsPage() {
               className="bg-destructive hover:bg-destructive/90"
             >
               Delete Tag
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Create/Edit Company Modal */}
+      <Modal
+        isOpen={showCompanyModal}
+        onClose={() => { setShowCompanyModal(false); setEditingCompany(null); setCompanyFormError(null); }}
+        title={editingCompany ? "Rename Company" : "Create Company"}
+      >
+        <div className="space-y-4">
+          {companyFormError && (
+            <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
+              {companyFormError}
+            </div>
+          )}
+
+          <Input
+            label="Company Name"
+            value={companyFormName}
+            onChange={(e) => setCompanyFormName(e.target.value)}
+            placeholder="Acme Corp"
+            required
+          />
+
+          <div className="flex justify-end gap-3 pt-4 border-t">
+            <Button
+              variant="outline"
+              onClick={() => { setShowCompanyModal(false); setEditingCompany(null); }}
+              disabled={companySubmitting}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSaveCompany}
+              loading={companySubmitting}
+              disabled={!companyFormName.trim()}
+            >
+              {editingCompany ? "Save Changes" : "Create Company"}
             </Button>
           </div>
         </div>

@@ -44,6 +44,8 @@ anyhow = "1.0"
 
 # Date and time
 chrono = { version = "0.4", features = ["serde"] }
+cron = "0.12"
+chrono-tz = "0.8"
 
 # UUID generation
 uuid = { version = "1.0", features = ["v4", "serde"] }

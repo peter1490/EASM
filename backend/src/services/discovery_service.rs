@@ -14,7 +14,7 @@
 
 use chrono::Utc;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -36,7 +36,7 @@ use crate::{
         confidence::ConfidenceScorer,
         external::{DnsResolver, ExternalServicesManager, HttpAnalyzer},
         task_manager::{TaskContext, TaskManager, TaskType},
-        SecurityScanService,
+        RiskService, SecurityScanService,
     },
     utils::network::expand_cidr,
 };
@@ -131,6 +131,7 @@ pub struct DiscoveryService {
 
     // Services
     security_scan_service: Option<Arc<SecurityScanService>>,
+    risk_service: Arc<RiskService>,
 
     // External services
     external_services: Arc<ExternalServicesManager>,
@@ -160,6 +161,7 @@ impl DiscoveryService {
         http_analyzer: Arc<HttpAnalyzer>,
         task_manager: Arc<TaskManager>,
         settings: SharedSettings,
+        risk_service: Arc<RiskService>,
     ) -> Self {
         Self {
             asset_repo,
@@ -170,6 +172,7 @@ impl DiscoveryService {
             asset_relationship_repo,
             blacklist_repo,
             security_scan_service: None,
+            risk_service,
             external_services,
             dns_resolver,
             http_analyzer,
@@ -320,6 +323,17 @@ impl DiscoveryService {
         company_id: Uuid,
         config: Option<DiscoveryConfig>,
     ) -> Result<DiscoveryRun, ApiError> {
+        self.run_discovery_with_trigger(company_id, config, TriggerType::Manual)
+            .await
+    }
+
+    /// Start a new discovery run for a company with a specific trigger type.
+    pub async fn run_discovery_with_trigger(
+        &self,
+        company_id: Uuid,
+        config: Option<DiscoveryConfig>,
+        trigger_type: TriggerType,
+    ) -> Result<DiscoveryRun, ApiError> {
         // Check if discovery is already running for this company
         {
             let statuses = self.status.lock().await;
@@ -336,7 +350,7 @@ impl DiscoveryService {
 
         // Create a new discovery run
         let run_create = DiscoveryRunCreate {
-            trigger_type: Some(TriggerType::Manual),
+            trigger_type: Some(trigger_type),
             config: config
                 .as_ref()
                 .map(|c| serde_json::to_value(c).unwrap_or(json!({}))),
@@ -702,6 +716,15 @@ impl DiscoveryService {
             )
             .await?;
 
+        if total_result.total_assets() > 0 {
+            if let Err(e) = self
+                .update_risk_history_for_assets(company_id, &total_result)
+                .await
+            {
+                tracing::warn!("Failed to update risk history after discovery: {}", e);
+            }
+        }
+
         ctx.update_progress(0.95, Some("Finalizing".to_string()))
             .await?;
 
@@ -712,6 +735,53 @@ impl DiscoveryService {
             total_result.assets_created.len(),
             total_result.assets_updated.len()
         );
+
+        Ok(())
+    }
+
+    async fn update_risk_history_for_assets(
+        &self,
+        company_id: Uuid,
+        result: &DiscoveryResult,
+    ) -> Result<(), ApiError> {
+        let mut asset_ids: HashSet<Uuid> = HashSet::new();
+        asset_ids.extend(result.assets_created.iter().copied());
+        asset_ids.extend(result.assets_updated.iter().copied());
+
+        if asset_ids.is_empty() {
+            return Ok(());
+        }
+
+        {
+            let mut statuses = self.status.lock().await;
+            let status = statuses
+                .entry(company_id)
+                .or_insert_with(DiscoveryStatus::default);
+            status.current_phase = "Updating risk scores".to_string();
+        }
+
+        for asset_id in asset_ids {
+            if let Err(e) = self
+                .risk_service
+                .calculate_asset_risk(company_id, asset_id)
+                .await
+            {
+                tracing::warn!(
+                    "Failed to calculate risk for asset {} after discovery: {}",
+                    asset_id,
+                    e
+                );
+                let mut statuses = self.status.lock().await;
+                let status = statuses
+                    .entry(company_id)
+                    .or_insert_with(DiscoveryStatus::default);
+                if status.errors.len() < 50 {
+                    status
+                        .errors
+                        .push(format!("Risk calc failed for asset {}", asset_id));
+                }
+            }
+        }
 
         Ok(())
     }
@@ -1779,6 +1849,7 @@ impl Clone for DiscoveryService {
             asset_relationship_repo: Arc::clone(&self.asset_relationship_repo),
             blacklist_repo: Arc::clone(&self.blacklist_repo),
             security_scan_service: self.security_scan_service.clone(),
+            risk_service: Arc::clone(&self.risk_service),
             external_services: Arc::clone(&self.external_services),
             dns_resolver: Arc::clone(&self.dns_resolver),
             http_analyzer: Arc::clone(&self.http_analyzer),

@@ -2,6 +2,7 @@ pub mod asset_repo;
 pub mod blacklist_repo;
 pub mod company_repo;
 pub mod discovery_repo;
+pub mod discovery_schedule_repo;
 pub mod evidence_repo;
 pub mod finding_repo;
 pub mod finding_type_config_repo;
@@ -21,6 +22,7 @@ pub use discovery_repo::{
     DiscoveryRunRepository, SqlxAssetRelationshipRepository, SqlxAssetSourceRepository,
     SqlxDiscoveryQueueRepository, SqlxDiscoveryRunRepository,
 };
+pub use discovery_schedule_repo::{DiscoveryScheduleRepository, SqlxDiscoveryScheduleRepository};
 pub use evidence_repo::EvidenceRepository;
 pub use finding_repo::FindingRepository;
 pub use scan_repo::ScanRepository;

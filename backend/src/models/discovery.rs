@@ -85,6 +85,42 @@ pub struct DiscoveryConfig {
     pub skip_recent: Option<bool>,
     /// Recent threshold in hours
     pub recent_hours: Option<u32>,
+    /// Timezone for scheduled discovery runs (IANA tz string)
+    pub timezone: Option<String>,
+}
+
+// ============================================================================
+// Discovery Schedules - Cron-based automation
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct DiscoverySchedule {
+    pub id: Uuid,
+    pub name: String,
+    pub cron: String,
+    pub enabled: bool,
+    pub config: Value,
+    pub last_run_at: Option<DateTime<Utc>>,
+    pub next_run_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub company_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryScheduleCreate {
+    pub name: String,
+    pub cron: String,
+    pub enabled: Option<bool>,
+    pub config: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DiscoveryScheduleUpdate {
+    pub name: Option<String>,
+    pub cron: Option<String>,
+    pub enabled: Option<bool>,
+    pub config: Option<Value>,
 }
 
 // ============================================================================

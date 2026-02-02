@@ -1,6 +1,7 @@
 pub mod auth_service;
 pub mod confidence;
 pub mod discovery_service;
+pub mod discovery_schedule_service;
 pub mod drift_service;
 pub mod external;
 pub mod metrics_service;
@@ -15,6 +16,7 @@ pub mod task_manager;
 pub use auth_service::AuthService;
 pub use confidence::ConfidenceScorer;
 pub use discovery_service::{DiscoveryService, DiscoveryStatus};
+pub use discovery_schedule_service::DiscoveryScheduleService;
 pub use drift_service::{DriftService, DriftServiceImpl};
 pub use metrics_service::MetricsService;
 pub use risk_service::{RiskRecalculationResult, RiskService};

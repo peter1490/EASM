@@ -4,6 +4,7 @@ pub mod auth_handlers;
 pub mod blacklist_handlers;
 pub mod company_handlers;
 pub mod discovery_handlers;
+pub mod discovery_schedule_handlers;
 pub mod drift_handlers;
 pub mod evidence_handlers;
 pub mod finding_handlers;

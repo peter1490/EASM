@@ -9,6 +9,7 @@ use crate::{
             SqlxAssetRelationshipRepository, SqlxAssetSourceRepository,
             SqlxDiscoveryQueueRepository, SqlxDiscoveryRunRepository,
         },
+        discovery_schedule_repo::SqlxDiscoveryScheduleRepository,
         evidence_repo::SqlxEvidenceRepository,
         finding_repo::SqlxFindingRepository,
         finding_type_config_repo::SqlxFindingTypeConfigRepository,
@@ -18,16 +19,16 @@ use crate::{
         tag_repo::SqlxTagRepository,
         user_repo::SqlxUserRepository,
         AssetRelationshipRepository, AssetRepository, AssetSourceRepository, BlacklistRepository,
-        CompanyRepository, DiscoveryQueueRepository, DiscoveryRunRepository, EvidenceRepository,
-        FindingRepository, FindingTypeConfigRepository, ScanRepository,
-        SecurityFindingRepository, SecurityScanRepository, SeedRepository, TagRepository,
-        UserRepository,
+        CompanyRepository, DiscoveryQueueRepository, DiscoveryRunRepository,
+        DiscoveryScheduleRepository, EvidenceRepository, FindingRepository,
+        FindingTypeConfigRepository, ScanRepository, SecurityFindingRepository,
+        SecurityScanRepository, SeedRepository, TagRepository, UserRepository,
     },
     services::external::{DnsResolver, ExternalServicesManager, HttpAnalyzer},
     services::{
-        AuthService, DiscoveryService, DriftService, DriftServiceImpl, ElasticsearchService,
-        MetricsService, RiskService, ScanService, SearchService, SecurityScanService, TagService,
-        TaskManager,
+        AuthService, DiscoveryScheduleService, DiscoveryService, DriftService, DriftServiceImpl,
+        ElasticsearchService, MetricsService, RiskService, ScanService, SearchService,
+        SecurityScanService, TagService, TaskManager,
     },
 };
 use axum::extract::FromRef;
@@ -53,6 +54,7 @@ pub struct AppState {
     pub db_pool: DatabasePool,
     pub scan_service: Arc<ScanService>,
     pub discovery_service: Arc<DiscoveryService>,
+    pub discovery_schedule_service: Arc<DiscoveryScheduleService>,
     pub security_scan_service: Arc<SecurityScanService>,
     pub drift_service: Arc<dyn DriftService + Send + Sync>,
     pub search_service: Option<Arc<dyn SearchService + Send + Sync>>,
@@ -69,6 +71,7 @@ pub struct AppState {
     pub user_repository: Arc<dyn UserRepository + Send + Sync>,
     pub discovery_run_repository: Arc<dyn DiscoveryRunRepository + Send + Sync>,
     pub discovery_queue_repository: Arc<dyn DiscoveryQueueRepository + Send + Sync>,
+    pub discovery_schedule_repository: Arc<dyn DiscoveryScheduleRepository + Send + Sync>,
     pub asset_source_repository: Arc<dyn AssetSourceRepository + Send + Sync>,
     pub asset_relationship_repository: Arc<dyn AssetRelationshipRepository + Send + Sync>,
     pub security_scan_repository: Arc<dyn SecurityScanRepository + Send + Sync>,
@@ -135,6 +138,8 @@ impl AppState {
             Arc::new(SqlxAssetSourceRepository::new(db_pool.clone()));
         let asset_relationship_repository: Arc<dyn AssetRelationshipRepository + Send + Sync> =
             Arc::new(SqlxAssetRelationshipRepository::new(db_pool.clone()));
+        let discovery_schedule_repository: Arc<dyn DiscoveryScheduleRepository + Send + Sync> =
+            Arc::new(SqlxDiscoveryScheduleRepository::new(db_pool.clone()));
 
         // Create security scan repositories
         let security_scan_repository: Arc<dyn SecurityScanRepository + Send + Sync> =
@@ -230,9 +235,15 @@ impl AppState {
                 http_analyzer.clone(),
                 task_manager.clone(),
                 shared_settings.clone(),
+                risk_service.clone(),
             )
             .with_security_scan_service(security_scan_service.clone()),
         );
+
+        let discovery_schedule_service = Arc::new(DiscoveryScheduleService::new(
+            discovery_schedule_repository.clone(),
+            discovery_service.clone(),
+        ));
 
         // Create drift service
         let drift_service: Arc<dyn DriftService + Send + Sync> = Arc::new(DriftServiceImpl::new(
@@ -282,6 +293,7 @@ impl AppState {
             db_pool,
             scan_service,
             discovery_service,
+            discovery_schedule_service,
             security_scan_service,
             drift_service,
             search_service,
@@ -298,6 +310,7 @@ impl AppState {
             user_repository,
             discovery_run_repository,
             discovery_queue_repository,
+            discovery_schedule_repository,
             asset_source_repository,
             asset_relationship_repository,
             security_scan_repository,

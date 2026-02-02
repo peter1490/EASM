@@ -21,6 +21,8 @@ pub struct RunDiscoveryRequest {
     pub max_depth: Option<u32>,
     /// Specific seed IDs to process (None = all seeds)
     pub seed_ids: Option<Vec<Uuid>>,
+    /// Optional timezone (IANA string)
+    pub timezone: Option<String>,
 }
 
 impl From<RunDiscoveryRequest> for DiscoveryConfig {
@@ -31,6 +33,7 @@ impl From<RunDiscoveryRequest> for DiscoveryConfig {
             seed_ids: req.seed_ids,
             skip_recent: None,
             recent_hours: None,
+            timezone: req.timezone,
         }
     }
 }

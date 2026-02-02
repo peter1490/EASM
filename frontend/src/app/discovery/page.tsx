@@ -6,6 +6,10 @@ import {
   stopDiscovery,
   getDiscoveryStatus,
   listDiscoveryRuns,
+  listDiscoverySchedules,
+  createDiscoverySchedule,
+  updateDiscoverySchedule,
+  deleteDiscoverySchedule,
   listSeeds,
   createSeed,
   deleteSeed,
@@ -15,6 +19,7 @@ import {
   getBlacklistStats,
   type DiscoveryStatus,
   type DiscoveryRun,
+  type DiscoverySchedule,
   type Seed,
   type SeedType,
   type BlacklistEntry,
@@ -36,7 +41,7 @@ import Modal from "@/components/ui/Modal";
 import { getDiscoveryCountClasses } from "@/utils/discoveryScale";
 import Checkbox from "@/components/ui/Checkbox";
 
-type TabType = "overview" | "seeds" | "history" | "blacklist";
+type TabType = "overview" | "seeds" | "history" | "schedule" | "blacklist";
 
 const STATUS_COLORS: Record<string, "error" | "warning" | "info" | "secondary" | "success"> = {
   pending: "secondary",
@@ -83,11 +88,32 @@ const BLACKLIST_BADGE_COLORS: Record<string, "info" | "warning" | "error" | "suc
   certificate: "info",
 };
 
+const FALLBACK_TIMEZONES = [
+  "UTC",
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Los_Angeles",
+  "Europe/London",
+  "Europe/Paris",
+  "Europe/Berlin",
+  "Asia/Tokyo",
+  "Asia/Singapore",
+  "Australia/Sydney",
+];
+
+function getDefaultTimeZone(): string {
+  if (typeof Intl === "undefined") return "UTC";
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return tz || "UTC";
+}
+
 export default function DiscoveryPage() {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<TabType>("overview");
   const [status, setStatus] = useState<DiscoveryStatus | null>(null);
   const [runs, setRuns] = useState<DiscoveryRun[]>([]);
+  const [schedules, setSchedules] = useState<DiscoverySchedule[]>([]);
   const [seeds, setSeeds] = useState<Seed[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -107,6 +133,30 @@ export default function DiscoveryPage() {
   
   // Run detail modal
   const [selectedRun, setSelectedRun] = useState<DiscoveryRun | null>(null);
+
+  // Schedule state
+  const [scheduleLoading, setScheduleLoading] = useState(false);
+  const [scheduleCreating, setScheduleCreating] = useState(false);
+  const [scheduleUpdating, setScheduleUpdating] = useState(false);
+  const [scheduleDeleting, setScheduleDeleting] = useState(false);
+  const [scheduleDeleteConfirm, setScheduleDeleteConfirm] = useState<DiscoverySchedule | null>(null);
+  const [scheduleEditTarget, setScheduleEditTarget] = useState<DiscoverySchedule | null>(null);
+  const [scheduleForm, setScheduleForm] = useState({
+    name: "",
+    cron: "",
+    enabled: true,
+    maxDepth: 3,
+    autoScanThreshold: 0.7,
+    timezone: getDefaultTimeZone(),
+  });
+  const [scheduleEditForm, setScheduleEditForm] = useState({
+    name: "",
+    cron: "",
+    enabled: true,
+    maxDepth: 3,
+    autoScanThreshold: 0.7,
+    timezone: getDefaultTimeZone(),
+  });
 
   // Blacklist state
   const [blacklistEntries, setBlacklistEntries] = useState<BlacklistEntry[]>([]);
@@ -134,26 +184,47 @@ export default function DiscoveryPage() {
 
   const isAdmin = user?.roles?.includes("admin");
   const isAnalyst = user?.roles?.includes("analyst") || user?.roles?.includes("operator") || isAdmin;
+  const defaultTimezone = useMemo(() => getDefaultTimeZone(), []);
+  const timezoneOptions = useMemo(() => {
+    const supported = (Intl as any)?.supportedValuesOf?.("timeZone");
+    const base = Array.isArray(supported) && supported.length > 0 ? supported : FALLBACK_TIMEZONES;
+    if (base.includes(defaultTimezone)) return base;
+    return [defaultTimezone, ...base];
+  }, [defaultTimezone]);
 
   const loadData = useCallback(async (isRefresh = false) => {
     try {
       if (isRefresh) {
         setRefreshing(true);
       }
-      const [statusData, runsData, seedsData] = await Promise.all([
+      const [statusData, runsData, seedsData, schedulesData] = await Promise.all([
         getDiscoveryStatus(),
         listDiscoveryRuns(50),
         listSeeds(),
+        listDiscoverySchedules(),
       ]);
       setStatus(statusData);
       setRuns(runsData);
       setSeeds(seedsData);
+      setSchedules(schedulesData);
       setError(null);
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setLoading(false);
       setRefreshing(false);
+    }
+  }, []);
+
+  const loadSchedules = useCallback(async () => {
+    try {
+      setScheduleLoading(true);
+      const data = await listDiscoverySchedules();
+      setSchedules(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setScheduleLoading(false);
     }
   }, []);
 
@@ -217,6 +288,122 @@ export default function DiscoveryPage() {
     }
   }
 
+  function resetScheduleForm() {
+    setScheduleForm({
+      name: "",
+      cron: "",
+      enabled: true,
+      maxDepth: 3,
+      autoScanThreshold: 0.7,
+      timezone: defaultTimezone,
+    });
+  }
+
+  async function handleCreateSchedule() {
+    if (!scheduleForm.name.trim()) {
+      setError("Schedule name is required");
+      return;
+    }
+    if (!scheduleForm.cron.trim()) {
+      setError("Cron expression is required");
+      return;
+    }
+
+    setScheduleCreating(true);
+    setError(null);
+    try {
+      await createDiscoverySchedule({
+        name: scheduleForm.name.trim(),
+        cron: scheduleForm.cron.trim(),
+        enabled: scheduleForm.enabled,
+        config: {
+          max_depth: scheduleForm.maxDepth,
+          auto_scan_threshold: scheduleForm.autoScanThreshold,
+          timezone: scheduleForm.timezone,
+        },
+      });
+      resetScheduleForm();
+      await loadSchedules();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setScheduleCreating(false);
+    }
+  }
+
+  function openScheduleEdit(schedule: DiscoverySchedule) {
+    setScheduleEditTarget(schedule);
+    setScheduleEditForm({
+      name: schedule.name,
+      cron: schedule.cron,
+      enabled: schedule.enabled,
+      maxDepth: getScheduleConfigNumber(schedule, "max_depth", 3),
+      autoScanThreshold: getScheduleConfigNumber(schedule, "auto_scan_threshold", 0.7),
+      timezone: getScheduleConfigString(schedule, "timezone", "UTC"),
+    });
+  }
+
+  async function handleUpdateSchedule() {
+    if (!scheduleEditTarget) return;
+    if (!scheduleEditForm.name.trim()) {
+      setError("Schedule name is required");
+      return;
+    }
+    if (!scheduleEditForm.cron.trim()) {
+      setError("Cron expression is required");
+      return;
+    }
+
+    setScheduleUpdating(true);
+    setError(null);
+    try {
+      await updateDiscoverySchedule(scheduleEditTarget.id, {
+        name: scheduleEditForm.name.trim(),
+        cron: scheduleEditForm.cron.trim(),
+        enabled: scheduleEditForm.enabled,
+        config: {
+          max_depth: scheduleEditForm.maxDepth,
+          auto_scan_threshold: scheduleEditForm.autoScanThreshold,
+          timezone: scheduleEditForm.timezone,
+        },
+      });
+      setScheduleEditTarget(null);
+      await loadSchedules();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setScheduleUpdating(false);
+    }
+  }
+
+  async function handleToggleSchedule(schedule: DiscoverySchedule) {
+    setScheduleUpdating(true);
+    setError(null);
+    try {
+      await updateDiscoverySchedule(schedule.id, { enabled: !schedule.enabled });
+      await loadSchedules();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setScheduleUpdating(false);
+    }
+  }
+
+  async function handleDeleteSchedule() {
+    if (!scheduleDeleteConfirm) return;
+    setScheduleDeleting(true);
+    setError(null);
+    try {
+      await deleteDiscoverySchedule(scheduleDeleteConfirm.id);
+      setScheduleDeleteConfirm(null);
+      await loadSchedules();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setScheduleDeleting(false);
+    }
+  }
+
   // Blacklist functions
   const loadBlacklistData = useCallback(async () => {
     try {
@@ -240,6 +427,12 @@ export default function DiscoveryPage() {
       loadBlacklistData();
     }
   }, [activeTab, loadBlacklistData]);
+
+  useEffect(() => {
+    if (activeTab === "schedule") {
+      loadSchedules();
+    }
+  }, [activeTab, loadSchedules]);
 
   async function handleBlacklistCreate() {
     if (!blacklistCreateFormData.object_value.trim()) {
@@ -304,12 +497,48 @@ export default function DiscoveryPage() {
     return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
   }
 
+  function formatTimestamp(value: string | null, timeZone?: string): string {
+    if (!value) return "—";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "—";
+    try {
+      return date.toLocaleString(undefined, timeZone ? { timeZone } : undefined);
+    } catch {
+      return date.toLocaleString();
+    }
+  }
+
+  function getScheduleConfigNumber(
+    schedule: DiscoverySchedule,
+    key: "max_depth" | "auto_scan_threshold",
+    fallback: number,
+  ): number {
+    const raw = (schedule.config as Record<string, unknown> | undefined)?.[key];
+    return typeof raw === "number" && !Number.isNaN(raw) ? raw : fallback;
+  }
+
+  function getScheduleConfigString(
+    schedule: DiscoverySchedule,
+    key: "timezone",
+    fallback: string,
+  ): string {
+    const raw = (schedule.config as Record<string, unknown> | undefined)?.[key];
+    return typeof raw === "string" && raw.trim().length > 0 ? raw : fallback;
+  }
+
   // Stats
   const completedRuns = runs.filter(r => r.status === "completed").length;
   const failedRuns = runs.filter(r => r.status === "failed").length;
   const totalAssetsDiscovered = runs.reduce((sum, r) => sum + r.assets_discovered, 0);
   const totalDiscoveryScale = getDiscoveryCountClasses(totalAssetsDiscovered);
   const statusDiscoveryScale = getDiscoveryCountClasses(status?.assets_discovered || 0);
+  const activeSchedules = schedules.filter(schedule => schedule.enabled).length;
+  const nextSchedule = useMemo(() => {
+    const upcoming = schedules
+      .filter((schedule) => schedule.enabled && schedule.next_run_at)
+      .sort((a, b) => new Date(a.next_run_at as string).getTime() - new Date(b.next_run_at as string).getTime());
+    return upcoming[0] || null;
+  }, [schedules]);
   
   const seedStats = useMemo(() => ({
     total: seeds.length,
@@ -325,6 +554,7 @@ export default function DiscoveryPage() {
     { id: "overview" as TabType, label: "Overview", icon: "📊" },
     { id: "seeds" as TabType, label: "Seeds", icon: "🌱", badge: seeds.length },
     { id: "history" as TabType, label: "History", icon: "📜", badge: runs.length },
+    { id: "schedule" as TabType, label: "Schedule", icon: "⏱️", badge: activeSchedules },
     { id: "blacklist" as TabType, label: "Blacklist", icon: "🚫", badge: blacklistStats?.total_entries },
   ];
 
@@ -824,6 +1054,211 @@ export default function DiscoveryPage() {
         </div>
       )}
 
+      {/* Schedule Tab */}
+      {activeTab === "schedule" && (
+        <div className="space-y-6 stagger-children">
+          <div className="grid gap-4 md:grid-cols-3">
+            <Card>
+              <CardHeader className="pb-4">
+                <CardDescription>Total Schedules</CardDescription>
+                <CardTitle className="text-2xl font-mono">{schedules.length}</CardTitle>
+              </CardHeader>
+            </Card>
+            <Card>
+              <CardHeader className="pb-4">
+                <CardDescription>Active Schedules</CardDescription>
+                <CardTitle className="text-2xl font-mono text-success">{activeSchedules}</CardTitle>
+              </CardHeader>
+            </Card>
+            <Card>
+              <CardHeader className="pb-4">
+                <CardDescription>Next Run</CardDescription>
+                <CardTitle className="text-sm font-mono text-muted-foreground">
+                  {nextSchedule
+                    ? formatTimestamp(
+                        nextSchedule.next_run_at,
+                        getScheduleConfigString(nextSchedule, "timezone", "UTC"),
+                      )
+                    : "—"}
+                </CardTitle>
+              </CardHeader>
+            </Card>
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-5">
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <CardTitle>Create Schedule</CardTitle>
+                <CardDescription>Use cron to automate discovery runs (UTC)</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <Input
+                  label="Schedule Name"
+                  placeholder="Daily discovery"
+                  value={scheduleForm.name}
+                  onChange={(e) => setScheduleForm({ ...scheduleForm, name: e.target.value })}
+                />
+                <Input
+                  label="Cron Expression"
+                  placeholder="0 3 * * *"
+                  value={scheduleForm.cron}
+                  onChange={(e) => setScheduleForm({ ...scheduleForm, cron: e.target.value })}
+                />
+                <div className="text-xs text-muted-foreground">
+                  5-7 fields supported (minute hour day month weekday) • seconds/year optional
+                </div>
+                <Select
+                  label="Timezone"
+                  value={scheduleForm.timezone}
+                  onChange={(e) => setScheduleForm({ ...scheduleForm, timezone: e.target.value })}
+                >
+                  {timezoneOptions.map((tz) => (
+                    <option key={tz} value={tz}>
+                      {tz}
+                    </option>
+                  ))}
+                </Select>
+                <Checkbox
+                  checked={scheduleForm.enabled}
+                  onChange={(checked) => setScheduleForm({ ...scheduleForm, enabled: checked })}
+                  label="Enabled"
+                />
+                <div>
+                  <label className="block text-sm font-medium mb-2">
+                    Max Depth: <span className="text-primary font-mono">{scheduleForm.maxDepth}</span>
+                  </label>
+                  <input
+                    type="range"
+                    min={1}
+                    max={5}
+                    value={scheduleForm.maxDepth}
+                    onChange={(e) => setScheduleForm({ ...scheduleForm, maxDepth: Number(e.target.value) })}
+                    className="w-full h-2 bg-muted rounded-full appearance-none cursor-pointer accent-primary"
+                  />
+                  <div className="flex justify-between text-xs text-muted-foreground mt-1">
+                    <span>1 (shallow)</span>
+                    <span>5 (deep)</span>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-2">
+                    Auto-Scan Threshold:{" "}
+                    <span className="text-primary font-mono">{scheduleForm.autoScanThreshold.toFixed(2)}</span>
+                  </label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={scheduleForm.autoScanThreshold}
+                    onChange={(e) =>
+                      setScheduleForm({ ...scheduleForm, autoScanThreshold: Number(e.target.value) })
+                    }
+                    className="w-full h-2 bg-muted rounded-full appearance-none cursor-pointer accent-primary"
+                  />
+                  <div className="flex justify-between text-xs text-muted-foreground mt-1">
+                    <span>0.0 (scan all)</span>
+                    <span>1.0 (high confidence only)</span>
+                  </div>
+                </div>
+                <Button
+                  onClick={handleCreateSchedule}
+                  disabled={scheduleCreating}
+                  loading={scheduleCreating}
+                  className="w-full"
+                >
+                  Create Schedule
+                </Button>
+              </CardContent>
+            </Card>
+
+            <Card className="lg:col-span-3">
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle>Scheduled Discoveries</CardTitle>
+                    <CardDescription>Manage automated discovery runs</CardDescription>
+                  </div>
+                  <Button variant="outline" onClick={loadSchedules} disabled={scheduleLoading}>
+                    {scheduleLoading ? "Refreshing..." : "Refresh"}
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {scheduleLoading ? (
+                  <div className="flex justify-center py-12">
+                    <LoadingSpinner size="lg" />
+                  </div>
+                ) : schedules.length === 0 ? (
+                  <EmptyState
+                    icon="⏱️"
+                    title="No schedules yet"
+                    description="Create a cron schedule to run discovery automatically"
+                  />
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Name</TableHead>
+                        <TableHead>Cron</TableHead>
+                        <TableHead>Next Run</TableHead>
+                        <TableHead>Last Run</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead className="text-right">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {schedules.map((schedule) => {
+                        const scheduleTimezone = getScheduleConfigString(schedule, "timezone", "UTC");
+                        return (
+                        <TableRow key={schedule.id}>
+                          <TableCell className="font-medium">{schedule.name}</TableCell>
+                          <TableCell className="font-mono text-xs text-muted-foreground">
+                            {schedule.cron}
+                          </TableCell>
+                          <TableCell className="text-sm text-muted-foreground">
+                            {formatTimestamp(schedule.next_run_at, scheduleTimezone)}
+                          </TableCell>
+                          <TableCell className="text-sm text-muted-foreground">
+                            {formatTimestamp(schedule.last_run_at, scheduleTimezone)}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={schedule.enabled ? "success" : "secondary"}>
+                              {schedule.enabled ? "Enabled" : "Disabled"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <div className="flex justify-end gap-2">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleToggleSchedule(schedule)}
+                                disabled={scheduleUpdating || scheduleDeleting}
+                              >
+                                {schedule.enabled ? "Disable" : "Enable"}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => openScheduleEdit(schedule)}
+                                disabled={scheduleUpdating || scheduleDeleting}
+                              >
+                                Edit
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </div>
+      )}
+
       {/* Blacklist Tab */}
       {activeTab === "blacklist" && (
         <div className="space-y-6 stagger-children">
@@ -1101,6 +1536,137 @@ export default function DiscoveryPage() {
             <div className="flex gap-3 pt-4 border-t">
               <Button variant="outline" onClick={() => setSelectedRun(null)}>
                 Close
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Schedule Edit Modal */}
+      <Modal
+        isOpen={!!scheduleEditTarget}
+        onClose={() => setScheduleEditTarget(null)}
+        title="Edit Discovery Schedule"
+      >
+        {scheduleEditTarget && (
+          <div className="space-y-4">
+            <Input
+              label="Schedule Name"
+              value={scheduleEditForm.name}
+              onChange={(e) => setScheduleEditForm({ ...scheduleEditForm, name: e.target.value })}
+            />
+            <Input
+              label="Cron Expression"
+              value={scheduleEditForm.cron}
+              onChange={(e) => setScheduleEditForm({ ...scheduleEditForm, cron: e.target.value })}
+            />
+            <div className="text-xs text-muted-foreground">
+              5-7 fields supported (minute hour day month weekday) • seconds/year optional
+            </div>
+            <Select
+              label="Timezone"
+              value={scheduleEditForm.timezone}
+              onChange={(e) => setScheduleEditForm({ ...scheduleEditForm, timezone: e.target.value })}
+            >
+              {timezoneOptions.map((tz) => (
+                <option key={tz} value={tz}>
+                  {tz}
+                </option>
+              ))}
+            </Select>
+            <Checkbox
+              checked={scheduleEditForm.enabled}
+              onChange={(checked) => setScheduleEditForm({ ...scheduleEditForm, enabled: checked })}
+              label="Enabled"
+            />
+            <div>
+              <label className="block text-sm font-medium mb-2">
+                Max Depth: <span className="text-primary font-mono">{scheduleEditForm.maxDepth}</span>
+              </label>
+              <input
+                type="range"
+                min={1}
+                max={5}
+                value={scheduleEditForm.maxDepth}
+                onChange={(e) => setScheduleEditForm({ ...scheduleEditForm, maxDepth: Number(e.target.value) })}
+                className="w-full h-2 bg-muted rounded-full appearance-none cursor-pointer accent-primary"
+              />
+              <div className="flex justify-between text-xs text-muted-foreground mt-1">
+                <span>1 (shallow)</span>
+                <span>5 (deep)</span>
+              </div>
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-2">
+                Auto-Scan Threshold:{" "}
+                <span className="text-primary font-mono">{scheduleEditForm.autoScanThreshold.toFixed(2)}</span>
+              </label>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={scheduleEditForm.autoScanThreshold}
+                onChange={(e) =>
+                  setScheduleEditForm({ ...scheduleEditForm, autoScanThreshold: Number(e.target.value) })
+                }
+                className="w-full h-2 bg-muted rounded-full appearance-none cursor-pointer accent-primary"
+              />
+              <div className="flex justify-between text-xs text-muted-foreground mt-1">
+                <span>0.0 (scan all)</span>
+                <span>1.0 (high confidence only)</span>
+              </div>
+            </div>
+            <div className="flex flex-col gap-3 pt-4 border-t sm:flex-row sm:items-center sm:justify-between">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setScheduleDeleteConfirm(scheduleEditTarget);
+                  setScheduleEditTarget(null);
+                }}
+                disabled={scheduleUpdating || scheduleDeleting}
+                className="text-destructive hover:text-destructive"
+              >
+                Delete Schedule
+              </Button>
+              <div className="flex justify-end gap-3">
+                <Button variant="outline" onClick={() => setScheduleEditTarget(null)} disabled={scheduleUpdating}>
+                  Cancel
+                </Button>
+                <Button onClick={handleUpdateSchedule} loading={scheduleUpdating}>
+                  Save Changes
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Schedule Delete Confirmation Modal */}
+      <Modal
+        isOpen={!!scheduleDeleteConfirm}
+        onClose={() => setScheduleDeleteConfirm(null)}
+        title="Delete Discovery Schedule"
+      >
+        {scheduleDeleteConfirm && (
+          <div className="space-y-4">
+            <p className="text-muted-foreground">
+              Are you sure you want to delete this schedule?
+            </p>
+            <div className="p-4 bg-muted rounded-lg space-y-2">
+              <div className="text-sm font-medium">{scheduleDeleteConfirm.name}</div>
+              <div className="text-xs text-muted-foreground font-mono">{scheduleDeleteConfirm.cron}</div>
+            </div>
+            <div className="flex justify-end gap-3 pt-4 border-t">
+              <Button variant="outline" onClick={() => setScheduleDeleteConfirm(null)} disabled={scheduleDeleting}>
+                Cancel
+              </Button>
+              <Button
+                onClick={handleDeleteSchedule}
+                loading={scheduleDeleting}
+                className="bg-destructive hover:bg-destructive/90 text-destructive-foreground"
+              >
+                Delete Schedule
               </Button>
             </div>
           </div>

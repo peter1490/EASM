@@ -220,9 +220,37 @@ export type DiscoveryConfig = {
   skip_recent?: boolean;
   /** Recent threshold in hours */
   recent_hours?: number;
+  /** Timezone for scheduled runs (IANA string) */
+  timezone?: string;
   // Compatibility fields (mapped by backend)
   confidence_threshold?: number;
   include_scan?: boolean;
+};
+
+export type DiscoverySchedule = {
+  id: string;
+  name: string;
+  cron: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DiscoveryScheduleCreate = {
+  name: string;
+  cron: string;
+  enabled?: boolean;
+  config?: DiscoveryConfig;
+};
+
+export type DiscoveryScheduleUpdate = {
+  name?: string;
+  cron?: string;
+  enabled?: boolean;
+  config?: DiscoveryConfig;
 };
 
 // ============================================================================
@@ -574,6 +602,42 @@ export async function getDiscoveryRun(id: string): Promise<DiscoveryRun> {
   const res = await apiFetch(`${API_BASE}/api/discovery/runs/${id}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get discovery run: ${res.status}`);
   return res.json();
+}
+
+export async function listDiscoverySchedules(): Promise<DiscoverySchedule[]> {
+  const res = await apiFetch(`${API_BASE}/api/discovery/schedules`, { cache: "no-store", credentials: "include" });
+  if (!res.ok) throw new Error(`Failed to list discovery schedules: ${res.status}`);
+  return res.json();
+}
+
+export async function createDiscoverySchedule(payload: DiscoveryScheduleCreate): Promise<DiscoverySchedule> {
+  const res = await apiFetch(`${API_BASE}/api/discovery/schedules`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to create discovery schedule: ${res.status}`);
+  return res.json();
+}
+
+export async function updateDiscoverySchedule(id: string, payload: DiscoveryScheduleUpdate): Promise<DiscoverySchedule> {
+  const res = await apiFetch(`${API_BASE}/api/discovery/schedules/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to update discovery schedule: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteDiscoverySchedule(id: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/api/discovery/schedules/${id}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to delete discovery schedule: ${res.status}`);
 }
 
 // ============================================================================

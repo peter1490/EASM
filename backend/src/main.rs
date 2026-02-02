@@ -19,6 +19,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Starting Rust EASM Backend v{}", env!("CARGO_PKG_VERSION"));
 
+    // Start discovery schedule runner
+    app_state.discovery_schedule_service.clone().start();
+
     // Create CORS layer with configuration
     let cors_layer = middleware::create_cors_layer(settings_snapshot.cors_allow_origins.clone());
 
@@ -143,6 +146,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/discovery/runs/:id",
             get(handlers::discovery_handlers::get_discovery_run),
+        )
+        .route(
+            "/api/discovery/schedules",
+            get(handlers::discovery_schedule_handlers::list_discovery_schedules)
+                .post(handlers::discovery_schedule_handlers::create_discovery_schedule),
+        )
+        .route(
+            "/api/discovery/schedules/:id",
+            patch(handlers::discovery_schedule_handlers::update_discovery_schedule)
+                .delete(handlers::discovery_schedule_handlers::delete_discovery_schedule),
         )
         .route(
             "/api/static/health",

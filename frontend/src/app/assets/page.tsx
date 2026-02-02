@@ -18,6 +18,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import EmptyState from "@/components/ui/EmptyState";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import Header from "@/components/Header";
+import { getDiscoveryCountClasses } from "@/utils/discoveryScale";
 import AssetDetailModal from "@/components/AssetDetailModal";
 import Checkbox from "@/components/ui/Checkbox";
 import Link from "next/link";
@@ -250,6 +251,8 @@ export default function AssetsPage() {
   const hasActiveFilters = searchQuery || assetType !== "all" || scanStatus !== "all" || 
     sourceFilter !== "all" || minConfidence > 0;
 
+  const discoveryScale = getDiscoveryCountClasses(discoveryStatus?.assets_discovered || 0);
+
   return (
     <div className="space-y-6 animate-fade-in">
       <Header
@@ -272,7 +275,10 @@ export default function AssetsPage() {
                 <div>
                   <div className="font-semibold text-primary">Discovery in Progress</div>
                   <div className="text-sm text-muted-foreground">
-                    {discoveryStatus.assets_discovered} assets discovered • {discoveryStatus.seeds_processed} seeds processed
+                    <span className={`font-mono font-semibold ${discoveryScale.text}`}>
+                      {discoveryStatus.assets_discovered}
+                    </span>{" "}
+                    assets discovered • {discoveryStatus.seeds_processed} seeds processed
                   </div>
                 </div>
               </div>

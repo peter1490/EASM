@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { useParams } from "next/navigation";
 import {
   getAsset,
@@ -36,6 +36,7 @@ import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import Modal from "@/components/ui/Modal";
 import Checkbox from "@/components/ui/Checkbox";
 import AssetDiscoveryGraph from "@/components/AssetDiscoveryGraph";
+import RiskFindingsEvolutionChart, { type EvolutionPoint } from "@/components/RiskFindingsEvolutionChart";
 
 type TabType = "overview" | "security" | "scans" | "evolution" | "metadata";
 
@@ -333,6 +334,35 @@ export default function AssetDetailPage() {
   const latestRisk = riskHistory[0];
   const previousRisk = riskHistory[1];
   const riskDelta = latestRisk && previousRisk ? latestRisk.risk_score - previousRisk.risk_score : null;
+
+  const evolutionSeries: EvolutionPoint[] = useMemo(() => {
+    if (riskHistory.length === 0) return [];
+    const findingWindows = findings.map((finding) => ({
+      firstSeen: new Date(finding.first_seen_at).getTime(),
+      resolvedAt: finding.resolved_at ? new Date(finding.resolved_at).getTime() : null,
+      status: finding.status,
+    }));
+
+    const sortedRisk = [...riskHistory].sort(
+      (a, b) => new Date(a.calculated_at).getTime() - new Date(b.calculated_at).getTime(),
+    );
+
+    return sortedRisk.map((entry) => {
+      const timestamp = new Date(entry.calculated_at).getTime();
+      const activeFindings = findingWindows.reduce((count, finding) => {
+        if (finding.firstSeen > timestamp) return count;
+        if (finding.resolvedAt && finding.resolvedAt <= timestamp) return count;
+        if (finding.status === "resolved" || finding.status === "false_positive") return count;
+        return count + 1;
+      }, 0);
+
+      return {
+        timestamp: entry.calculated_at,
+        risk_score: entry.risk_score,
+        active_findings: activeFindings,
+      };
+    });
+  }, [riskHistory, findings]);
 
   const getFindingsBySeverity = (summary?: Record<string, unknown>) => {
     const bySeverity = summary?.findings_by_severity as Record<string, number> | undefined;
@@ -1056,6 +1086,17 @@ export default function AssetDetailPage() {
 
       {activeTab === "evolution" && (
         <div className="space-y-6 stagger-children">
+          <RiskFindingsEvolutionChart
+            title="Risk and Findings Evolution"
+            description="Risk score (left axis) and active findings (right axis) over time"
+            data={evolutionSeries}
+            emptyState={{
+              title: "No evolution timeline yet",
+              description: "Risk history appears after risk calculations and scans run for this asset.",
+              icon: "chart",
+            }}
+          />
+
           <Card>
             <CardHeader>
               <CardTitle>Risk Score Evolution</CardTitle>

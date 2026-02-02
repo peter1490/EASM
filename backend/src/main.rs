@@ -162,6 +162,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(handlers::risk_handlers::get_risk_overview),
         )
         .route(
+            "/api/risk/evolution",
+            get(handlers::risk_handlers::get_company_evolution),
+        )
+        .route(
             "/api/risk/recalculate-all",
             post(handlers::risk_handlers::recalculate_all_risks),
         )

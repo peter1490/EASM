@@ -1,9 +1,10 @@
 use crate::{
     database::DatabasePool,
     error::ApiError,
-    models::asset::Asset,
+    models::{asset::Asset, risk::CompanyEvolutionPoint},
     repositories::{AssetRepository, SecurityFindingRepository},
 };
+use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -314,6 +315,86 @@ impl RiskService {
         .await?;
 
         Ok(rows.into_iter().map(Asset::from).collect())
+    }
+
+    pub async fn get_company_evolution(
+        &self,
+        company_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<CompanyEvolutionPoint>, ApiError> {
+        let limit = limit.max(7).min(365);
+        let today = Utc::now().date_naive();
+        let start_day = today - Duration::days(limit - 1);
+        let start_at = DateTime::<Utc>::from_naive_utc_and_offset(
+            start_day.and_hms_opt(0, 0, 0).unwrap(),
+            Utc,
+        );
+        let end_at = DateTime::<Utc>::from_naive_utc_and_offset(
+            (today + Duration::days(1)).and_hms_opt(0, 0, 0).unwrap(),
+            Utc,
+        );
+
+        let risk_rows = sqlx::query_as::<_, (DateTime<Utc>, Option<f64>)>(
+            r#"
+            SELECT date_trunc('day', h.calculated_at) as bucket, AVG(h.risk_score) as avg_score
+            FROM asset_risk_history h
+            JOIN assets a ON a.id = h.asset_id
+            WHERE a.company_id = $1 AND h.calculated_at >= $2
+            GROUP BY bucket
+            ORDER BY bucket ASC
+            "#,
+        )
+        .bind(company_id)
+        .bind(start_at)
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        let mut risk_by_day: HashMap<DateTime<Utc>, Option<f64>> = HashMap::new();
+        for (bucket, avg_score) in risk_rows {
+            risk_by_day.insert(bucket, avg_score);
+        }
+
+        let findings_rows = sqlx::query_as::<_, (DateTime<Utc>, Option<DateTime<Utc>>)>(
+            r#"
+            SELECT first_seen_at, resolved_at
+            FROM security_findings
+            WHERE company_id = $1
+              AND first_seen_at <= $2
+              AND (resolved_at IS NULL OR resolved_at >= $3)
+            "#,
+        )
+        .bind(company_id)
+        .bind(end_at)
+        .bind(start_at)
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        let mut series = Vec::with_capacity(limit as usize);
+        for offset in 0..limit {
+            let day = start_day + Duration::days(offset);
+            let day_start = DateTime::<Utc>::from_naive_utc_and_offset(
+                day.and_hms_opt(0, 0, 0).unwrap(),
+                Utc,
+            );
+            let day_end = day_start + Duration::days(1);
+            let active = findings_rows
+                .iter()
+                .filter(|(first_seen, resolved_at)| {
+                    *first_seen < day_end
+                        && resolved_at
+                            .map(|resolved| resolved > day_end)
+                            .unwrap_or(true)
+                })
+                .count() as i64;
+
+            series.push(CompanyEvolutionPoint {
+                timestamp: day_start,
+                risk_score: risk_by_day.get(&day_start).copied().flatten(),
+                active_findings: active,
+            });
+        }
+
+        Ok(series)
     }
 }
 

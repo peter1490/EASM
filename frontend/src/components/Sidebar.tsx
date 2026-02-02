@@ -65,6 +65,16 @@ export default function Sidebar() {
                 </option>
               ))}
             </select>
+            <Link
+              href="/company-overview"
+              className={`mt-3 flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold uppercase tracking-wider transition-all ${
+                pathname.startsWith("/company-overview")
+                  ? "bg-gradient-to-r from-primary/20 to-primary/5 text-sidebar-foreground border border-primary/30"
+                  : "text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground"
+              }`}
+            >
+              <span className="text-sm">Company Overview</span>
+            </Link>
           </div>
         )}
         

@@ -164,6 +164,16 @@ export type AssetEvolutionResponse = {
   scan_history: AssetScanHistoryEntry[];
 };
 
+export type CompanyEvolutionPoint = {
+  timestamp: string;
+  risk_score: number | null;
+  active_findings: number;
+};
+
+export type CompanyEvolutionResponse = {
+  series: CompanyEvolutionPoint[];
+};
+
 // ============================================================================
 // DISCOVERY TYPES
 // ============================================================================
@@ -685,6 +695,14 @@ export async function listPendingSecurityScans(limit = 50): Promise<SecurityScan
 export async function getAssetRisk(assetId: string): Promise<Asset> {
   const res = await apiFetch(`${API_BASE}/api/risk/assets/${assetId}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get asset risk: ${res.status}`);
+  return res.json();
+}
+
+export async function getCompanyEvolution(limit = 60): Promise<CompanyEvolutionResponse> {
+  const params = new URLSearchParams();
+  params.append("limit", limit.toString());
+  const res = await apiFetch(`${API_BASE}/api/risk/evolution?${params.toString()}`, { cache: "no-store", credentials: "include" });
+  if (!res.ok) throw new Error(`Failed to get company evolution: ${res.status}`);
   return res.json();
 }
 

@@ -33,6 +33,7 @@ import Select from "@/components/ui/Select";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import EmptyState from "@/components/ui/EmptyState";
 import Modal from "@/components/ui/Modal";
+import { getDiscoveryCountClasses } from "@/utils/discoveryScale";
 import Checkbox from "@/components/ui/Checkbox";
 
 type TabType = "overview" | "seeds" | "history" | "blacklist";
@@ -307,6 +308,8 @@ export default function DiscoveryPage() {
   const completedRuns = runs.filter(r => r.status === "completed").length;
   const failedRuns = runs.filter(r => r.status === "failed").length;
   const totalAssetsDiscovered = runs.reduce((sum, r) => sum + r.assets_discovered, 0);
+  const totalDiscoveryScale = getDiscoveryCountClasses(totalAssetsDiscovered);
+  const statusDiscoveryScale = getDiscoveryCountClasses(status?.assets_discovered || 0);
   
   const seedStats = useMemo(() => ({
     total: seeds.length,
@@ -367,7 +370,7 @@ export default function DiscoveryPage() {
               {[
                 { label: "Total Seeds", value: status.seeds_total || 0, color: "text-foreground" },
                 { label: "Seeds Processed", value: status.seeds_processed, color: "text-success" },
-                { label: "Assets Found", value: status.assets_discovered, color: "text-primary" },
+                { label: "Assets Found", value: status.assets_discovered, color: statusDiscoveryScale.text },
                 { label: "Assets Updated", value: status.assets_updated || 0, color: "text-info" },
                 { label: "Queue Pending", value: status.queue_pending || 0, color: "text-muted-foreground" },
               ].map((stat, idx) => (
@@ -462,7 +465,9 @@ export default function DiscoveryPage() {
             <Card className="group hover:border-primary/30 transition-colors">
               <CardHeader className="pb-3">
                 <CardDescription>Assets Discovered</CardDescription>
-                <CardTitle className="text-3xl font-mono text-primary">{totalAssetsDiscovered}</CardTitle>
+                <CardTitle className={`text-3xl font-mono ${totalDiscoveryScale.text}`}>
+                  {totalAssetsDiscovered}
+                </CardTitle>
               </CardHeader>
               <CardContent className="pt-0 pb-5">
                 <div className="text-xs text-muted-foreground">Total across all runs</div>
@@ -790,7 +795,11 @@ export default function DiscoveryPage() {
                           </span>
                         </TableCell>
                         <TableCell><span className="font-mono">{run.seeds_processed}</span></TableCell>
-                        <TableCell><span className="font-mono text-success">{run.assets_discovered}</span></TableCell>
+                        <TableCell>
+                          <span className={`font-mono ${getDiscoveryCountClasses(run.assets_discovered).text}`}>
+                            {run.assets_discovered}
+                          </span>
+                        </TableCell>
                         <TableCell><span className="font-mono text-info">{run.assets_updated}</span></TableCell>
                         <TableCell>
                           <span className="text-muted-foreground font-mono">
@@ -1041,7 +1050,9 @@ export default function DiscoveryPage() {
                 <div className="text-xs text-muted-foreground">Seeds Processed</div>
               </div>
               <div className="p-4 bg-success/10 rounded-lg text-center">
-                <div className="text-2xl font-bold font-mono text-success">{selectedRun.assets_discovered}</div>
+                <div className={`text-2xl font-bold font-mono ${getDiscoveryCountClasses(selectedRun.assets_discovered).text}`}>
+                  {selectedRun.assets_discovered}
+                </div>
                 <div className="text-xs text-muted-foreground">Assets Discovered</div>
               </div>
               <div className="p-4 bg-info/10 rounded-lg text-center">

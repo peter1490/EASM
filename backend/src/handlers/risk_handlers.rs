@@ -1,7 +1,7 @@
 use crate::{
     auth::{context::UserContext, rbac::Role},
     error::ApiError,
-    models::asset::Asset,
+    models::{asset::Asset, risk::CompanyEvolutionResponse},
     services::RiskRecalculationResult,
     AppState,
 };
@@ -24,8 +24,18 @@ pub struct HighRiskQuery {
     pub limit: i64,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CompanyEvolutionQuery {
+    #[serde(default = "default_evolution_limit")]
+    pub limit: i64,
+}
+
 fn default_limit() -> i64 {
     20
+}
+
+fn default_evolution_limit() -> i64 {
+    60
 }
 
 /// GET /api/risk/assets/:id - Get risk data for a specific asset
@@ -108,4 +118,18 @@ pub async fn get_high_risk_assets(
         .get_high_risk_assets(company_id, query.limit)
         .await?;
     Ok(Json(assets))
+}
+
+/// GET /api/risk/evolution - Get company-wide risk and findings evolution
+pub async fn get_company_evolution(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
+    Query(query): Query<CompanyEvolutionQuery>,
+) -> Result<Json<CompanyEvolutionResponse>, ApiError> {
+    let company_id = user.company_id.unwrap_or_default();
+    let series = app_state
+        .risk_service
+        .get_company_evolution(company_id, query.limit)
+        .await?;
+    Ok(Json(CompanyEvolutionResponse { series }))
 }

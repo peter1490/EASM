@@ -372,19 +372,20 @@ export default function RiskPage() {
                             <div className="w-20 h-2.5 bg-muted rounded-full overflow-hidden">
                               <div 
                                 className={`h-full transition-all ${
-                                  (asset.risk_score || 0) >= 8 ? "bg-destructive" :
-                                  (asset.risk_score || 0) >= 6 ? "bg-orange-500" :
-                                  (asset.risk_score || 0) >= 4 ? "bg-warning" :
-                                  (asset.risk_score || 0) >= 2 ? "bg-info" : "bg-success"
+                                  (asset.risk_score || 0) >= 80 ? "bg-destructive" :
+                                  (asset.risk_score || 0) >= 60 ? "bg-orange-500" :
+                                  (asset.risk_score || 0) >= 40 ? "bg-warning" :
+                                  (asset.risk_score || 0) >= 20 ? "bg-info" : "bg-success"
                                 }`}
-                                style={{ width: `${((asset.risk_score || 0) / 10) * 100}%` }}
+                                style={{ width: `${Math.min((asset.risk_score || 0), 100)}%` }}
                               />
                             </div>
                             <span className={`font-mono font-semibold ${
-                              (asset.risk_score || 0) >= 8 ? "text-destructive" :
-                              (asset.risk_score || 0) >= 6 ? "text-orange-500" :
-                              (asset.risk_score || 0) >= 4 ? "text-warning" :
-                              "text-muted-foreground"
+                              (asset.risk_score || 0) >= 80 ? "text-destructive" :
+                              (asset.risk_score || 0) >= 60 ? "text-orange-500" :
+                              (asset.risk_score || 0) >= 40 ? "text-warning" :
+                              (asset.risk_score || 0) >= 20 ? "text-info" :
+                              "text-success"
                             }`}>
                               {asset.risk_score?.toFixed(1) || "N/A"}
                             </span>

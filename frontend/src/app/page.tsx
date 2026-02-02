@@ -20,6 +20,7 @@ import EmptyState from "@/components/ui/EmptyState";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import Header from "@/components/Header";
 import { useAuth } from "@/context/AuthContext";
+import { getDiscoveryCountClasses } from "@/utils/discoveryScale";
 
 export default function Dashboard() {
   const { user } = useAuth();
@@ -70,6 +71,7 @@ export default function Dashboard() {
   const highRiskAssets = assetsByRisk?.high || 0;
 
   const recentScans = scans.slice(0, 5);
+  const discoveryScale = getDiscoveryCountClasses(discoveryStatus?.assets_discovered || 0);
 
   const getFindingsCount = (scan: SecurityScan) => {
     const summary = scan.result_summary as Record<string, unknown> | undefined;
@@ -100,7 +102,10 @@ export default function Dashboard() {
                 <div>
                   <div className="font-semibold text-primary">Discovery in Progress</div>
                   <div className="text-sm text-muted-foreground">
-                    {discoveryStatus.assets_discovered} assets discovered • {discoveryStatus.seeds_processed} seeds processed
+                    <span className={`font-mono font-semibold ${discoveryScale.text}`}>
+                      {discoveryStatus.assets_discovered}
+                    </span>{" "}
+                    assets discovered • {discoveryStatus.seeds_processed} seeds processed
                   </div>
                 </div>
               </div>

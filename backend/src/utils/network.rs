@@ -7,6 +7,42 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+/// Returns true when an IP should be treated as internal/non-routable.
+pub fn is_internal_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || is_ipv4_shared(v4)
+                || is_ipv4_reserved(v4)
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast()
+        }
+    }
+}
+
+fn is_ipv4_shared(v4: std::net::Ipv4Addr) -> bool {
+    // 100.64.0.0/10 (Carrier-Grade NAT)
+    let octets = v4.octets();
+    octets[0] == 100 && (64..=127).contains(&octets[1])
+}
+
+fn is_ipv4_reserved(v4: std::net::Ipv4Addr) -> bool {
+    // 240.0.0.0/4 and 0.0.0.0/8 are non-routable
+    let octets = v4.octets();
+    octets[0] >= 240 || octets[0] == 0
+}
+
 // ============================================================================
 // PORT SCAN RESULT WITH SERVICE DETECTION
 // ============================================================================

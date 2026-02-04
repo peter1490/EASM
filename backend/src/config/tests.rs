@@ -39,6 +39,7 @@ mod tests {
             "RDNS_CONCURRENCY",
             "TCP_SCAN_TIMEOUT",
             "TCP_SCAN_CONCURRENCY",
+            "BLOCK_INTERNAL_IP_SCANS",
             "MAX_CIDR_HOSTS",
             "MAX_DISCOVERY_DEPTH",
             "SUBDOMAIN_ENUM_TIMEOUT",
@@ -131,6 +132,7 @@ mod tests {
         assert_eq!(settings.tls_timeout_seconds, 4.0);
         assert_eq!(settings.dns_concurrency, 256);
         assert_eq!(settings.tcp_scan_timeout, 0.35);
+        assert!(settings.block_internal_ip_scans);
 
         // Test discovery defaults
         assert_eq!(settings.max_cidr_hosts, 4096);
@@ -406,6 +408,7 @@ mod tests {
                 ("ENABLE_URLSCAN", "false"),
                 ("RATE_LIMIT_ENABLED", "1"),
                 ("ENABLE_OTX", "0"),
+                ("BLOCK_INTERNAL_IP_SCANS", "0"),
             ],
             || {
                 let settings = Settings::new().expect("Failed to create settings");
@@ -414,6 +417,7 @@ mod tests {
                 assert!(!settings.enable_urlscan);
                 assert!(settings.rate_limit_enabled);
                 assert!(!settings.enable_otx);
+                assert!(!settings.block_internal_ip_scans);
             },
         );
     }

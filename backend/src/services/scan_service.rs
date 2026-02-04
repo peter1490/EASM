@@ -17,7 +17,7 @@ use crate::{
         },
         task_manager::{TaskContext, TaskManager, TaskType},
     },
-    utils::network::{expand_cidr, scan_ports},
+    utils::network::{expand_cidr, is_internal_ip, scan_ports},
 };
 
 pub struct ScanService {
@@ -359,6 +359,14 @@ impl ScanService {
                             .await?;
                         // Store IPs with their parent subdomain asset for lineage
                         for ip in ips {
+                            if settings.block_internal_ip_scans && is_internal_ip(ip) {
+                                tracing::info!(
+                                    "Skipping internal IP scan for {} (resolved from {})",
+                                    ip,
+                                    subdomain
+                                );
+                                continue;
+                            }
                             resolved_ips_with_parent.push((ip, subdomain_asset.id));
                         }
                     }
@@ -430,6 +438,12 @@ impl ScanService {
         let ip: IpAddr = ip_str
             .parse()
             .map_err(|e| ApiError::Validation(format!("Invalid IP address: {}", e)))?;
+        let settings = self.current_settings();
+
+        if settings.block_internal_ip_scans && is_internal_ip(ip) {
+            tracing::info!("Skipping internal IP scan for {}", ip);
+            return Ok(());
+        }
 
         ctx.update_progress(0.3, Some(format!("Scanning IP {}", ip)))
             .await?;
@@ -450,21 +464,26 @@ impl ScanService {
         tracing::info!("Processing CIDR scan for {}", cidr);
         let settings = self.current_settings();
 
-        let ips = expand_cidr(cidr)?;
+        let mut ips = expand_cidr(cidr)?;
         let max_hosts = settings.max_cidr_hosts as usize;
+        let total_ips = ips.len();
 
-        if ips.len() > max_hosts {
+        if total_ips > max_hosts {
             return Err(ApiError::Validation(format!(
                 "CIDR range {} contains {} hosts, exceeding limit of {}",
                 cidr,
-                ips.len(),
+                total_ips,
                 max_hosts
             )));
         }
 
         // Create CIDR finding
-        self.create_cidr_finding(scan_id, cidr, ips.len(), company_id)
+        self.create_cidr_finding(scan_id, cidr, total_ips, company_id)
             .await?;
+
+        if settings.block_internal_ip_scans {
+            ips.retain(|ip| !is_internal_ip(*ip));
+        }
 
         ctx.update_progress(
             0.3,
@@ -547,6 +566,11 @@ impl ScanService {
     ) -> Result<(), ApiError> {
         tracing::debug!("Processing IP address {} with parent {:?}", ip, parent_id);
         let settings = self.current_settings();
+
+        if settings.block_internal_ip_scans && is_internal_ip(ip) {
+            tracing::info!("Skipping internal IP scan for {}", ip);
+            return Ok(());
+        }
 
         // Step 1: Port scanning
         ctx.update_progress(0.4, Some(format!("Port scanning {}", ip)))
@@ -644,6 +668,11 @@ impl ScanService {
     ) -> Result<(), ApiError> {
         tracing::debug!("Processing IP address {} with parent {:?}", ip, parent_id);
         let settings = self.current_settings();
+
+        if settings.block_internal_ip_scans && is_internal_ip(ip) {
+            tracing::info!("Skipping internal IP scan for {}", ip);
+            return Ok(());
+        }
 
         // Step 1: Port scanning
         let timeout_duration = Duration::from_secs_f64(settings.tcp_scan_timeout);

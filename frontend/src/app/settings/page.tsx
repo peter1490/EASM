@@ -100,6 +100,7 @@ const HELP_TEXT: Record<string, string> = {
   dns_concurrency: "Concurrent DNS queries allowed.",
   rdns_concurrency: "Concurrent reverse DNS queries.",
   max_concurrent_scans: "Max background scans running concurrently.",
+  block_internal_ip_scans: "Skip active scans against private or internal IP ranges.",
   max_evidence_bytes: "Maximum allowed upload size for evidence.",
   evidence_allowed_types: "Allowed MIME types for evidence uploads.",
   max_cidr_hosts: "Maximum hosts allowed per CIDR scan.",
@@ -180,6 +181,7 @@ type SettingsFormState = {
   dns_concurrency: string;
   rdns_concurrency: string;
   max_concurrent_scans: string;
+  block_internal_ip_scans: boolean;
   max_evidence_bytes: string;
   evidence_allowed_types: string;
   max_cidr_hosts: string;
@@ -228,6 +230,7 @@ const createEmptySettingsForm = (): SettingsFormState => ({
   dns_concurrency: "",
   rdns_concurrency: "",
   max_concurrent_scans: "",
+  block_internal_ip_scans: true,
   max_evidence_bytes: "",
   evidence_allowed_types: "",
   max_cidr_hosts: "",
@@ -278,6 +281,7 @@ const settingsToForm = (view: SettingsView): SettingsFormState => ({
   dns_concurrency: view.dns_concurrency.toString(),
   rdns_concurrency: view.rdns_concurrency.toString(),
   max_concurrent_scans: view.max_concurrent_scans.toString(),
+  block_internal_ip_scans: view.block_internal_ip_scans,
   max_evidence_bytes: view.max_evidence_bytes.toString(),
   evidence_allowed_types: listToString(view.evidence_allowed_types),
   max_cidr_hosts: view.max_cidr_hosts.toString(),
@@ -822,9 +826,10 @@ export default function SettingsPage() {
       http_timeout_seconds: toNumber(settingsForm.http_timeout_seconds),
       tls_timeout_seconds: toNumber(settingsForm.tls_timeout_seconds),
       dns_concurrency: toNumber(settingsForm.dns_concurrency),
-      rdns_concurrency: toNumber(settingsForm.rdns_concurrency),
-      max_concurrent_scans: toNumber(settingsForm.max_concurrent_scans),
-      max_evidence_bytes: toNumber(settingsForm.max_evidence_bytes),
+  rdns_concurrency: toNumber(settingsForm.rdns_concurrency),
+  max_concurrent_scans: toNumber(settingsForm.max_concurrent_scans),
+  block_internal_ip_scans: settingsForm.block_internal_ip_scans,
+  max_evidence_bytes: toNumber(settingsForm.max_evidence_bytes),
       evidence_allowed_types: splitList(settingsForm.evidence_allowed_types),
       max_cidr_hosts: toNumber(settingsForm.max_cidr_hosts),
       max_discovery_depth: toNumber(settingsForm.max_discovery_depth),
@@ -1449,6 +1454,11 @@ export default function SettingsPage() {
                       type="number"
                       value={settingsForm.max_concurrent_scans}
                       onChange={(e) => updateFormField("max_concurrent_scans", e.target.value)}
+                    />
+                    <Checkbox
+                      checked={settingsForm.block_internal_ip_scans}
+                      onChange={(checked) => updateFormField("block_internal_ip_scans", checked)}
+                      label={<InfoLabel text="Never scan internal IPs" keyName="block_internal_ip_scans" />}
                     />
                   </CardContent>
                 </Card>

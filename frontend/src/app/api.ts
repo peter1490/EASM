@@ -1036,6 +1036,7 @@ export type SettingsView = {
   dns_concurrency: number;
   rdns_concurrency: number;
   max_concurrent_scans: number;
+  block_internal_ip_scans: boolean;
   max_evidence_bytes: number;
   evidence_allowed_types: string[];
   max_cidr_hosts: number;
@@ -1090,6 +1091,7 @@ export type SettingsUpdatePayload = {
   dns_concurrency?: number;
   rdns_concurrency?: number;
   max_concurrent_scans?: number;
+  block_internal_ip_scans?: boolean;
   max_evidence_bytes?: number;
   evidence_allowed_types?: string[];
   max_cidr_hosts?: number;

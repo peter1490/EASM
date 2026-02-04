@@ -63,6 +63,7 @@ pub struct SettingsUpdateRequest {
     pub dns_concurrency: Option<u32>,
     pub rdns_concurrency: Option<u32>,
     pub max_concurrent_scans: Option<u32>,
+    pub block_internal_ip_scans: Option<bool>,
 
     // Evidence storage
     pub max_evidence_bytes: Option<u64>,
@@ -140,6 +141,7 @@ pub struct SettingsView {
     pub dns_concurrency: u32,
     pub rdns_concurrency: u32,
     pub max_concurrent_scans: u32,
+    pub block_internal_ip_scans: bool,
 
     // Evidence storage
     pub max_evidence_bytes: u64,
@@ -254,6 +256,7 @@ fn to_view(settings: &ManagedSettings, reveal_secrets: bool) -> SettingsView {
         dns_concurrency: settings.dns_concurrency,
         rdns_concurrency: settings.rdns_concurrency,
         max_concurrent_scans: settings.max_concurrent_scans,
+        block_internal_ip_scans: settings.block_internal_ip_scans,
         max_evidence_bytes: settings.max_evidence_bytes,
         evidence_allowed_types: settings.evidence_allowed_types.clone(),
         max_cidr_hosts: settings.max_cidr_hosts,
@@ -377,6 +380,9 @@ fn merge_settings(mut current: ManagedSettings, update: SettingsUpdateRequest) -
     }
     if let Some(v) = update.max_concurrent_scans {
         current.max_concurrent_scans = v;
+    }
+    if let Some(v) = update.block_internal_ip_scans {
+        current.block_internal_ip_scans = v;
     }
 
     // Evidence

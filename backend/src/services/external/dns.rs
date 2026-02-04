@@ -61,11 +61,17 @@ impl DnsResolver {
 
     /// Create a new DNS resolver with custom configuration
     pub async fn with_config(config: DnsConfig) -> Result<Self, ApiError> {
-        let mut resolver_opts = ResolverOpts::default();
+        let (resolver_config, mut resolver_opts) =
+            trust_dns_resolver::system_conf::read_system_conf().map_err(|e| {
+                ApiError::ExternalService(format!(
+                    "Failed to read system DNS configuration: {}",
+                    e
+                ))
+            })?;
         resolver_opts.timeout = config.query_timeout;
         resolver_opts.attempts = 2;
 
-        let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), resolver_opts);
+        let resolver = TokioAsyncResolver::tokio(resolver_config, resolver_opts);
 
         // Create rate limiter
         let quota = Quota::per_second(std::num::NonZeroU32::new(config.rate_limit).unwrap());

@@ -109,6 +109,8 @@ pub struct ManagedSettings {
     pub rdns_concurrency: u32,
     #[serde(default = "default_max_concurrent_scans")]
     pub max_concurrent_scans: u32,
+    #[serde(default = "default_true")]
+    pub block_internal_ip_scans: bool,
 
     // Evidence storage
     #[serde(default = "default_max_evidence_bytes")]
@@ -262,6 +264,7 @@ impl Default for ManagedSettings {
             dns_concurrency: default_dns_concurrency(),
             rdns_concurrency: default_rdns_concurrency(),
             max_concurrent_scans: default_max_concurrent_scans(),
+            block_internal_ip_scans: default_true(),
 
             max_evidence_bytes: default_max_evidence_bytes(),
             evidence_allowed_types: default_evidence_types(),
@@ -356,6 +359,7 @@ impl ManagedSettings {
         settings.dns_concurrency = normalized.dns_concurrency;
         settings.rdns_concurrency = normalized.rdns_concurrency;
         settings.max_concurrent_scans = normalized.max_concurrent_scans;
+        settings.block_internal_ip_scans = normalized.block_internal_ip_scans;
 
         // Evidence
         settings.max_evidence_bytes = normalized.max_evidence_bytes;
@@ -419,6 +423,7 @@ impl From<&Settings> for ManagedSettings {
             dns_concurrency: settings.dns_concurrency,
             rdns_concurrency: settings.rdns_concurrency,
             max_concurrent_scans: settings.max_concurrent_scans,
+            block_internal_ip_scans: settings.block_internal_ip_scans,
 
             max_evidence_bytes: settings.max_evidence_bytes,
             evidence_allowed_types: settings.evidence_allowed_types.clone(),

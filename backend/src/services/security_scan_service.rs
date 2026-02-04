@@ -37,8 +37,8 @@ use crate::{
     utils::{
         crypto::get_tls_certificate_info,
         network::{
-            get_known_vulnerabilities, scan_ports_with_services, CDN_SIGNATURES, EXTENDED_PORTS,
-            PROXY_HEADERS, SECURITY_HEADERS, WAF_SIGNATURES,
+            get_known_vulnerabilities, is_internal_ip, scan_ports_with_services, CDN_SIGNATURES,
+            EXTENDED_PORTS, PROXY_HEADERS, SECURITY_HEADERS, WAF_SIGNATURES,
         },
     },
 };
@@ -431,6 +431,9 @@ impl SecurityScanService {
         company_id: Uuid,
     ) -> Result<(), ApiError> {
         let domain = &asset.identifier;
+        let settings = self.current_settings();
+        let mut internal_only = false;
+        let mut scan_target_ip: Option<IpAddr> = None;
 
         // Step 1: DNS security checks
         ctx.update_progress(0.1, Some("Checking DNS security".to_string()))
@@ -447,7 +450,20 @@ impl SecurityScanService {
             .await?;
         match self.dns_resolver.resolve_hostname(domain).await {
             Ok(ips) => {
-                if let Some(ip) = ips.first() {
+                if settings.block_internal_ip_scans {
+                    scan_target_ip = ips.iter().copied().find(|ip| !is_internal_ip(*ip));
+                    internal_only = scan_target_ip.is_none() && !ips.is_empty();
+                    if internal_only {
+                        tracing::info!(
+                            "Skipping active scans for {}: only internal IPs resolved",
+                            domain
+                        );
+                    }
+                } else {
+                    scan_target_ip = ips.first().copied();
+                }
+
+                if let Some(ip) = scan_target_ip {
                     // Port scan with service detection
                     if matches!(
                         scan_type,
@@ -462,7 +478,7 @@ impl SecurityScanService {
                             .scan_ports_with_service_detection(
                                 scan_id,
                                 asset,
-                                *ip,
+                                ip,
                                 risk_factors,
                                 company_id,
                             )
@@ -520,13 +536,27 @@ impl SecurityScanService {
             scan_type,
             SecurityScanType::TlsAnalysis | SecurityScanType::Full
         ) {
-            ctx.update_progress(0.7, Some("Analyzing TLS".to_string()))
-                .await?;
-            if let Some(tls_details) = self
-                .analyze_tls_with_findings(scan_id, asset, domain, 443, risk_factors, company_id)
-                .await?
-            {
-                summary.tls_certificates = Some(vec![tls_details]);
+            if settings.block_internal_ip_scans && internal_only {
+                tracing::info!(
+                    "Skipping TLS analysis for {}: only internal IPs resolved",
+                    domain
+                );
+            } else {
+                ctx.update_progress(0.7, Some("Analyzing TLS".to_string()))
+                    .await?;
+                if let Some(tls_details) = self
+                    .analyze_tls_with_findings(
+                        scan_id,
+                        asset,
+                        domain,
+                        443,
+                        risk_factors,
+                        company_id,
+                    )
+                    .await?
+                {
+                    summary.tls_certificates = Some(vec![tls_details]);
+                }
             }
         }
 
@@ -565,6 +595,16 @@ impl SecurityScanService {
             .identifier
             .parse()
             .map_err(|e| ApiError::Validation(format!("Invalid IP: {}", e)))?;
+        let settings = self.current_settings();
+
+        if settings.block_internal_ip_scans && is_internal_ip(ip) {
+            tracing::info!(
+                "Skipping internal IP scan for asset {} ({})",
+                asset.id,
+                ip
+            );
+            return Ok(());
+        }
 
         // Port scan with service detection
         if matches!(

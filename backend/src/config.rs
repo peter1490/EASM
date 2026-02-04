@@ -104,6 +104,7 @@ pub struct Settings {
     pub rdns_concurrency: u32,
     pub tcp_scan_timeout: f64,
     pub tcp_scan_concurrency: u32,
+    pub block_internal_ip_scans: bool,
 
     // Discovery Settings
     pub max_cidr_hosts: u32,
@@ -220,6 +221,7 @@ impl Settings {
             .set_default("rdns_concurrency", 256u32)?
             .set_default("tcp_scan_timeout", 0.35)?
             .set_default("tcp_scan_concurrency", 64u32)?
+            .set_default("block_internal_ip_scans", true)?
 
             // Discovery Settings defaults
             .set_default("max_cidr_hosts", 4096u32)?
@@ -474,6 +476,9 @@ impl Settings {
             }
             if let Some(v) = parse_bool_env("RATE_LIMIT_ENABLED") {
                 builder = builder.set_override("rate_limit_enabled", v)?;
+            }
+            if let Some(v) = parse_bool_env("BLOCK_INTERNAL_IP_SCANS") {
+                builder = builder.set_override("block_internal_ip_scans", v)?;
             }
         }
 

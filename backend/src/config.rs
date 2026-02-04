@@ -185,7 +185,7 @@ impl Settings {
             .set_default("opencorporates_api_token", None::<String>)?
 
             // Security defaults
-            .set_default("cors_allow_origins", "http://localhost:3000,http://127.0.0.1:3000")?
+            .set_default("cors_allow_origins", "http://localhost:80,http://127.0.0.1:80")?
             .set_default("api_key_header", "X-API-Key")?
             .set_default("api_keys", "")?
 
@@ -311,7 +311,9 @@ impl Settings {
             if let Some(v) = read_env("OPENCORPORATES_API_TOKEN") {
                 builder = builder.set_override("opencorporates_api_token", v)?;
             }
-            if let Some(v) = read_env("CORS_ALLOW_ORIGINS") {
+            if let Some(v) =
+                read_env("CORS_ALLOW_ORIGINS").or_else(|| std::env::var("CORS_ALLOW_ORIGINS").ok())
+            {
                 builder = builder.set_override("cors_allow_origins", v)?;
             }
             if let Some(v) = read_env("API_KEY_HEADER") {

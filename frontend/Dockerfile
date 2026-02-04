@@ -76,6 +76,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE}
+ENV PORT=80
 
 # Install only production dependencies for the runtime image
 COPY --from=build /app/package.json /app/package-lock.json ./
@@ -86,7 +87,7 @@ COPY --from=build /app/.next ./.next
 COPY --from=build /app/public ./public
 
 # Expose port
-EXPOSE 3000
+EXPOSE 80
 
 # Run the application
 CMD ["npm", "start"]

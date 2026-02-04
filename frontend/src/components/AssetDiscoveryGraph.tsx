@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { getAssetPath } from '@/app/api';
+import { getAssetPath, Asset } from '@/app/api';
 import {
     ReactFlow,
     MiniMap,
@@ -22,16 +22,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import dagre from 'dagre';
 
-interface Asset {
-    id: string;
-    asset_type: string;
-    value: string;
-    parent_id?: string;
-    seed_id?: string;
-    confidence: number;
-    sources?: string[];
-    metadata?: Record<string, unknown>;
-}
+
 
 interface AssetDiscoveryGraphProps {
     assetId: string;
@@ -56,7 +47,7 @@ const CustomAssetNode = ({ data }: NodeProps<Node<CustomNodeData>>) => {
     let icon = "📄";
     const bgColor = "bg-white";
     let borderColor = "border-gray-200";
-    
+
     if (isTarget) {
         borderColor = "border-blue-500 ring-2 ring-blue-200";
     }
@@ -86,12 +77,12 @@ const CustomAssetNode = ({ data }: NodeProps<Node<CustomNodeData>>) => {
     };
 
     return (
-        <div 
+        <div
             className={`px-4 py-3 shadow-md rounded-lg border-2 ${borderColor} ${bgColor} min-w-[200px] ${!isTarget ? 'cursor-pointer hover:border-blue-300 hover:shadow-lg transition-all' : ''}`}
             onClick={handleClick}
         >
             <Handle type="target" position={Position.Top} className="!bg-gray-400" />
-            
+
             <div className="flex items-start gap-3">
                 <div className="text-2xl">{icon}</div>
                 <div className="flex-1 overflow-hidden">
@@ -104,11 +95,11 @@ const CustomAssetNode = ({ data }: NodeProps<Node<CustomNodeData>>) => {
                     <div className="text-xs text-gray-400 hover:text-blue-500">↗</div>
                 )}
             </div>
-            
+
             {confidence !== undefined && (
                 <div className="mt-2 flex items-center gap-2">
                     <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                        <div 
+                        <div
                             className={`h-full rounded-full ${confidence >= 0.8 ? 'bg-green-500' : confidence >= 0.5 ? 'bg-yellow-500' : 'bg-red-500'}`}
                             style={{ width: `${confidence * 100}%` }}
                         />
@@ -196,10 +187,10 @@ export default function AssetDiscoveryGraph({ assetId }: AssetDiscoveryGraphProp
                 const initialNodes: Node[] = assets.map((asset) => ({
                     id: asset.id,
                     type: 'assetNode',
-                    data: { 
+                    data: {
                         label: asset.value,
                         type: asset.asset_type,
-                        confidence: asset.confidence,
+                        confidence: asset.ownership_confidence,
                         isTarget: asset.id === assetId,
                         metadata: asset.metadata,
                         assetId: asset.id,
@@ -211,7 +202,7 @@ export default function AssetDiscoveryGraph({ assetId }: AssetDiscoveryGraphProp
                 // Create edges based on parent_id
                 // Since the list is a path (linear or tree up to root), we can just link parent -> child
                 const initialEdges: Edge[] = [];
-                
+
                 assets.forEach((asset) => {
                     if (asset.parent_id) {
                         // Check if parent exists in the list (it should)
@@ -234,11 +225,11 @@ export default function AssetDiscoveryGraph({ assetId }: AssetDiscoveryGraphProp
 
                 // If strictly linear list without explicit parent_id links working (fallback):
                 if (initialEdges.length === 0 && assets.length > 1) {
-                     for (let i = 0; i < assets.length - 1; i++) {
+                    for (let i = 0; i < assets.length - 1; i++) {
                         initialEdges.push({
-                            id: `e${assets[i].id}-${assets[i+1].id}`,
+                            id: `e${assets[i].id}-${assets[i + 1].id}`,
                             source: assets[i].id,
-                            target: assets[i+1].id,
+                            target: assets[i + 1].id,
                             type: 'smoothstep',
                             animated: true,
                             markerEnd: {
@@ -246,7 +237,7 @@ export default function AssetDiscoveryGraph({ assetId }: AssetDiscoveryGraphProp
                             },
                             style: { stroke: '#9ca3af', strokeWidth: 2 },
                         });
-                     }
+                    }
                 }
 
                 const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
@@ -306,8 +297,8 @@ export default function AssetDiscoveryGraph({ assetId }: AssetDiscoveryGraphProp
                 attributionPosition="bottom-right"
             >
                 <Controls className="!bg-white !border-gray-200 !shadow-sm" />
-                <MiniMap 
-                    className="!bg-white !border-gray-200 !shadow-sm" 
+                <MiniMap
+                    className="!bg-white !border-gray-200 !shadow-sm"
                     nodeColor={() => '#e2e8f0'}
                     maskColor="rgba(248, 250, 252, 0.6)"
                 />

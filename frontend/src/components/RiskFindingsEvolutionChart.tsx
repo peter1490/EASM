@@ -198,7 +198,7 @@ export default function RiskFindingsEvolutionChart({
 
   const tickCount = 4;
   const xTicks = Array.from({ length: tickCount }, (_, index) => {
-    const ratio = tickCount === 1 ? 0 : index / (tickCount - 1);
+    const ratio = index / (tickCount - 1);
     return minTime + ratio * (maxTime - minTime || 1);
   });
 

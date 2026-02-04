@@ -109,7 +109,7 @@ mod tests {
         // Test security defaults
         assert_eq!(
             settings.cors_allow_origins,
-            vec!["http://localhost:3000", "http://127.0.0.1:3000"]
+            vec!["http://localhost:80", "http://127.0.0.1:80"]
         );
         assert_eq!(settings.api_key_header, "X-API-Key");
         assert!(settings.api_keys.is_empty());

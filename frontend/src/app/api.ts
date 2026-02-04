@@ -262,6 +262,8 @@ export type SecurityScanStatus = "pending" | "running" | "completed" | "failed" 
 export type FindingSeverity = "critical" | "high" | "medium" | "low" | "info";
 export type FindingStatus = "open" | "acknowledged" | "in_progress" | "resolved" | "false_positive" | "accepted";
 
+export type Finding = SecurityFinding; // Alias for drift analysis
+
 export type SecurityScan = {
   id: string;
   asset_id: string;
@@ -440,10 +442,10 @@ export async function listSeeds(): Promise<Seed[]> {
 
 export async function createSeed(seed: { seed_type: SeedType | string; value: string; note?: string }): Promise<Seed> {
   // Map frontend seed types to backend
-  const backendSeedType = seed.seed_type === "root_domain" || seed.seed_type === "acquisition_domain" 
-    ? "domain" 
+  const backendSeedType = seed.seed_type === "root_domain" || seed.seed_type === "acquisition_domain"
+    ? "domain"
     : seed.seed_type;
-  
+
   const res = await apiFetch(`${API_BASE}/api/seeds`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -468,7 +470,7 @@ export async function listAssets(min_confidence = 0, limit?: number, offset?: nu
   params.append("min_confidence", min_confidence.toString());
   if (limit !== undefined) params.append("limit", limit.toString());
   if (offset !== undefined) params.append("offset", offset.toString());
-  
+
   const res = await apiFetch(`${API_BASE}/api/assets?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list assets: ${res.status}`);
   return res.json();
@@ -501,7 +503,7 @@ export type AssetSearchResponse = {
 
 export async function searchAssetsAdvanced(params: AssetSearchParams): Promise<AssetSearchResponse> {
   const queryParams = new URLSearchParams();
-  
+
   if (params.q) queryParams.append("q", params.q);
   if (params.asset_type && params.asset_type !== "all") queryParams.append("asset_type", params.asset_type);
   if (params.min_confidence !== undefined) queryParams.append("min_confidence", params.min_confidence.toString());
@@ -513,9 +515,9 @@ export async function searchAssetsAdvanced(params: AssetSearchParams): Promise<A
   if (params.limit !== undefined) queryParams.append("limit", params.limit.toString());
   if (params.offset !== undefined) queryParams.append("offset", params.offset.toString());
 
-  const res = await apiFetch(`${API_BASE}/api/assets/search?${queryParams.toString()}`, { 
-    cache: "no-store", 
-    credentials: "include" 
+  const res = await apiFetch(`${API_BASE}/api/assets/search?${queryParams.toString()}`, {
+    cache: "no-store",
+    credentials: "include"
   });
   if (!res.ok) throw new Error(`Failed to search assets: ${res.status}`);
   return res.json();
@@ -592,7 +594,7 @@ export async function listDiscoveryRuns(limit = 50, offset = 0): Promise<Discove
   const params = new URLSearchParams();
   params.append("limit", limit.toString());
   params.append("offset", offset.toString());
-  
+
   const res = await apiFetch(`${API_BASE}/api/discovery/runs?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list discovery runs: ${res.status}`);
   return res.json();
@@ -660,7 +662,7 @@ export async function listSecurityScans(limit = 50, offset = 0, assetId?: string
   params.append("limit", limit.toString());
   params.append("offset", offset.toString());
   if (assetId) params.append("asset_id", assetId);
-  
+
   const res = await apiFetch(`${API_BASE}/api/security/scans?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list security scans: ${res.status}`);
   return res.json();
@@ -688,7 +690,7 @@ export async function listSecurityFindings(filter?: SecurityFindingFilter): Prom
   if (filter?.status) params.append("status", filter.status);
   if (filter?.limit) params.append("limit", filter.limit.toString());
   if (filter?.offset) params.append("offset", filter.offset.toString());
-  
+
   const res = await apiFetch(`${API_BASE}/api/security/findings?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list security findings: ${res.status}`);
   return res.json();
@@ -746,7 +748,7 @@ export async function getAssetFindings(assetId: string): Promise<SecurityFinding
 export async function listPendingSecurityScans(limit = 50): Promise<SecurityScan[]> {
   const params = new URLSearchParams();
   params.append("limit", limit.toString());
-  
+
   const res = await apiFetch(`${API_BASE}/api/security/scans/pending?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list pending scans: ${res.status}`);
   return res.json();
@@ -803,7 +805,7 @@ export async function recalculateAllRisks(): Promise<RiskRecalculationResult> {
 export async function getHighRiskAssets(limit = 20): Promise<Asset[]> {
   const params = new URLSearchParams();
   params.append("limit", limit.toString());
-  
+
   const res = await apiFetch(`${API_BASE}/api/risk/high-risk-assets?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get high risk assets: ${res.status}`);
   return res.json();
@@ -818,7 +820,7 @@ export async function searchAssets(query: string, size = 20, from = 0): Promise<
   params.append("q", query);
   params.append("size", size.toString());
   params.append("from", from.toString());
-  
+
   const res = await apiFetch(`${API_BASE}/api/search/assets?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to search assets: ${res.status}`);
   return res.json();
@@ -829,7 +831,7 @@ export async function searchFindings(query: string, size = 20, from = 0): Promis
   params.append("q", query);
   params.append("size", size.toString());
   params.append("from", from.toString());
-  
+
   const res = await apiFetch(`${API_BASE}/api/search/findings?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to search findings: ${res.status}`);
   return res.json();
@@ -1205,7 +1207,7 @@ export async function listTags(limit = 100, offset = 0): Promise<TagListResponse
   const params = new URLSearchParams();
   params.append("limit", limit.toString());
   params.append("offset", offset.toString());
-  
+
   const res = await apiFetch(`${API_BASE}/api/tags?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list tags: ${res.status}`);
   return res.json();
@@ -1550,5 +1552,26 @@ export async function bulkUpdateFindingTypeConfigs(
     const errorText = await res.text();
     throw new Error(errorText || `Failed to bulk update finding type configs: ${res.status}`);
   }
+  return res.json();
+}
+
+// ============================================================================
+// DRIFT API
+// ============================================================================
+
+export async function detectDrift(scanId: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/api/security/scans/${scanId}/drift`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to detect drift: ${res.status}`);
+}
+
+export async function getDriftFindings(scanId: string): Promise<Finding[]> {
+  const res = await apiFetch(`${API_BASE}/api/security/scans/${scanId}/drift`, {
+    cache: "no-store",
+    credentials: "include"
+  });
+  if (!res.ok) throw new Error(`Failed to get drift findings: ${res.status}`);
   return res.json();
 }

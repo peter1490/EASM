@@ -2,11 +2,14 @@
 # Build with: docker build --build-arg ENVIRONMENT=development|production
 
 ARG ENVIRONMENT=production
+ARG DATABASE_URL
 
 # ============================================================================
 # Development Stage
 # ============================================================================
-FROM rust:1.84 AS development
+FROM rust:1.86 AS development
+
+ARG DATABASE_URL
 
 WORKDIR /app
 
@@ -22,7 +25,7 @@ COPY src ./src
 COPY migrations ./migrations
 
 # Build dependencies in debug mode for faster builds
-RUN cargo update -p base64ct --precise 1.7.1 && cargo fetch
+RUN cargo fetch
 
 # Create evidence directory
 RUN mkdir -p /app/evidence
@@ -35,6 +38,7 @@ EXPOSE 8000
 ENV SERVER_HOST=0.0.0.0
 ENV SERVER_PORT=8000
 ENV RUST_BACKTRACE=1
+ENV DATABASE_URL=${DATABASE_URL}
 
 # Use cargo watch for hot reload in development
 # Note: cargo-watch is installed with nightly, but we run the app with stable
@@ -43,7 +47,9 @@ CMD ["cargo", "watch", "-x", "run"]
 # ============================================================================
 # Production Builder Stage
 # ============================================================================
-FROM rust:1.84 AS builder
+FROM rust:1.86 AS builder
+
+ARG DATABASE_URL
 
 WORKDIR /app
 
@@ -54,10 +60,10 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY migrations ./migrations
 
-ENV DATABASE_URL=postgresql://easm:easm@172.19.8.37:5432/easm
+ENV DATABASE_URL=${DATABASE_URL}
 
 # Build the application in release mode with optimizations
-RUN cargo update -p base64ct --precise 1.7.1 && cargo build --release
+RUN cargo build --release
 
 # ============================================================================
 # Production Runtime Stage

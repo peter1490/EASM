@@ -23,6 +23,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     app_state.discovery_schedule_service.clone().start();
 
     // Create CORS layer with configuration
+    tracing::info!(
+        "CORS allow origins: {:?}",
+        settings_snapshot.cors_allow_origins
+    );
     let cors_layer = middleware::create_cors_layer(settings_snapshot.cors_allow_origins.clone());
 
     // Public routes (Health + Auth)
@@ -255,6 +259,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         // Metrics and performance endpoints
         .route("/api/metrics", get(handlers::metrics_handlers::get_metrics))
+        // Drift endpoints
+        .route(
+            "/api/security/scans/:id/drift",
+            post(handlers::drift_handlers::detect_port_drift)
+                .get(handlers::drift_handlers::get_drift_findings),
+        )
         .route(
             "/api/metrics/report",
             get(handlers::metrics_handlers::get_performance_report),

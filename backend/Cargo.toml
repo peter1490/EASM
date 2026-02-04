@@ -60,7 +60,7 @@ async-trait = "0.1"
 # Network utilities
 trust-dns-resolver = "0.23"
 ipnet = "2.9"
-openidconnect = "3.4"
+openidconnect = "3.5.0"
 
 # TLS and crypto
 rustls = "0.22"

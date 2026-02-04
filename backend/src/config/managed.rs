@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 fn default_cors() -> Vec<String> {
     vec![
-        "http://localhost:3000".to_string(),
-        "http://127.0.0.1:3000".to_string(),
+        "http://localhost:80".to_string(),
+        "http://127.0.0.1:80".to_string(),
     ]
 }
 

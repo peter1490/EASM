@@ -7,7 +7,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
-use trust_dns_resolver::{config::*, TokioAsyncResolver};
+use trust_dns_resolver::TokioAsyncResolver;
 
 /// DNS resolution configuration
 #[derive(Debug, Clone)]

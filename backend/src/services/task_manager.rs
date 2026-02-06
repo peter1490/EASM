@@ -252,6 +252,26 @@ impl TaskManager {
         Ok(task_id)
     }
 
+    pub async fn count_active_tasks_by_requester(
+        &self,
+        requester_id: &str,
+        task_type: TaskType,
+    ) -> usize {
+        let tasks = self.tasks.read().await;
+        tasks
+            .values()
+            .filter(|task| {
+                task.is_active()
+                    && task.task_type == task_type
+                    && task
+                        .metadata
+                        .get("requested_by")
+                        .and_then(|v| v.as_str())
+                        == Some(requester_id)
+            })
+            .count()
+    }
+
     /// Get task information by ID
     pub async fn get_task(&self, task_id: Uuid) -> Option<TaskInfo> {
         let tasks = self.tasks.read().await;

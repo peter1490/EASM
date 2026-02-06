@@ -322,8 +322,9 @@ impl DiscoveryService {
         &self,
         company_id: Uuid,
         config: Option<DiscoveryConfig>,
+        requested_by: Option<Uuid>,
     ) -> Result<DiscoveryRun, ApiError> {
-        self.run_discovery_with_trigger(company_id, config, TriggerType::Manual)
+        self.run_discovery_with_trigger(company_id, config, TriggerType::Manual, requested_by)
             .await
     }
 
@@ -333,6 +334,7 @@ impl DiscoveryService {
         company_id: Uuid,
         config: Option<DiscoveryConfig>,
         trigger_type: TriggerType,
+        requested_by: Option<Uuid>,
     ) -> Result<DiscoveryRun, ApiError> {
         // Check if discovery is already running for this company
         {
@@ -348,9 +350,24 @@ impl DiscoveryService {
             }
         }
 
+        if let Some(user_id) = requested_by {
+            let settings = self.current_settings();
+            let active = self
+                .task_manager
+                .count_active_tasks_by_requester(&user_id.to_string(), TaskType::Discovery)
+                .await;
+            if active >= settings.max_active_discovery_per_user as usize {
+                return Err(ApiError::RateLimit(format!(
+                    "Too many active discovery tasks (limit {})",
+                    settings.max_active_discovery_per_user
+                )));
+            }
+        }
+
         // Create a new discovery run
+        let trigger_type_clone = trigger_type.clone();
         let run_create = DiscoveryRunCreate {
-            trigger_type: Some(trigger_type),
+            trigger_type: Some(trigger_type_clone),
             config: config
                 .as_ref()
                 .map(|c| serde_json::to_value(c).unwrap_or(json!({}))),
@@ -361,6 +378,14 @@ impl DiscoveryService {
             .create(&run_create, company_id)
             .await?;
         let run_id = run.id;
+
+        tracing::info!(
+            run_id = %run_id,
+            company_id = %company_id,
+            trigger_type = ?trigger_type,
+            requested_by = ?requested_by,
+            "Created discovery run"
+        );
 
         // Update status
         {
@@ -382,7 +407,9 @@ impl DiscoveryService {
 
         let task_metadata = json!({
             "discovery_run_id": run_id,
-            "started_at": Utc::now()
+            "started_at": Utc::now(),
+            "company_id": company_id,
+            "requested_by": requested_by.map(|id| id.to_string()),
         });
 
         let task_id = self
@@ -1817,7 +1844,7 @@ impl DiscoveryService {
         };
 
         match security_scan_service
-            .create_scan(scan_create, company_id)
+            .create_scan(scan_create, company_id, None)
             .await
         {
             Ok(scan) => {

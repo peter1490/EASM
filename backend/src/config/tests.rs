@@ -1,11 +1,13 @@
 #[cfg(test)]
 mod tests {
+    use crate::auth::rbac::Role;
     use crate::config::{
         get_settings, security_headers, ConfigError, Settings, COMMON_PORTS, SUBDOMAIN_WORDLIST,
     };
     use std::env;
     use std::io::Write;
     use tempfile::NamedTempFile;
+    use uuid::Uuid;
 
     /// Helper to set environment variables for testing
     fn with_env_vars<F, R>(vars: Vec<(&str, &str)>, test: F) -> R
@@ -15,6 +17,7 @@ mod tests {
         // List of all config-related environment variables that might interfere
         // Include both uppercase and lowercase versions since config crate might be case-insensitive
         let all_config_vars = vec![
+            "ENVIRONMENT",
             "DATABASE_URL",
             "database_url",
             "CERTSPOTTER_API_TOKEN",
@@ -57,6 +60,15 @@ mod tests {
             "RATE_LIMIT_WINDOW_SECONDS",
             "MAX_CONCURRENT_SCANS",
             "SCAN_QUEUE_CHECK_INTERVAL",
+            "ALLOW_ANON",
+            "API_KEY_IP_ALLOWLIST",
+            "BREAK_GLASS_TOKEN",
+            "ALLOW_INTERNAL_SCANS",
+            "SCAN_ALLOWLIST_CIDRS",
+            "SCAN_ALLOWLIST_DOMAINS",
+            "MAX_ACTIVE_SCANS_PER_USER",
+            "MAX_ACTIVE_DISCOVERY_PER_USER",
+            "REINDEX_MIN_INTERVAL_SECONDS",
         ];
 
         // Store original values for all config variables
@@ -73,6 +85,11 @@ mod tests {
         // Set test values
         for (key, value) in &vars {
             env::set_var(key, value);
+        }
+
+        // Default to development unless explicitly overridden
+        if !vars.iter().any(|(key, _)| *key == "ENVIRONMENT") {
+            env::set_var("ENVIRONMENT", "development");
         }
 
         // Run test
@@ -137,7 +154,7 @@ mod tests {
         // Test discovery defaults
         assert_eq!(settings.max_cidr_hosts, 4096);
         assert_eq!(settings.max_discovery_depth, 3);
-        assert_eq!(settings.subdomain_enum_timeout, 120.0);
+        assert_eq!(settings.subdomain_enum_timeout, 60.0);
         assert!(settings.enable_wayback);
         assert!(!settings.enable_urlscan);
         assert_eq!(settings.related_asset_confidence_default, 0.3);
@@ -150,6 +167,11 @@ mod tests {
         // Test background task defaults
         assert_eq!(settings.max_concurrent_scans, 5);
         assert_eq!(settings.scan_queue_check_interval, 5.0);
+        assert_eq!(settings.max_active_scans_per_user, 2);
+        assert_eq!(settings.max_active_discovery_per_user, 1);
+
+        // Search defaults
+        assert_eq!(settings.reindex_min_interval_seconds, 300);
     }
 
     #[test]
@@ -185,7 +207,10 @@ mod tests {
                     "CORS_ALLOW_ORIGINS",
                     "http://localhost:3000,http://localhost:8080,https://example.com",
                 ),
-                ("API_KEYS", "key1,key2,key3"),
+                (
+                    "API_KEYS",
+                    "key1:00000000-0000-0000-0000-000000000000:admin,key2:00000000-0000-0000-0000-000000000000:viewer,key3:11111111-1111-1111-1111-111111111111:operator",
+                ),
                 (
                     "EVIDENCE_ALLOWED_TYPES",
                     "image/png,text/plain,application/pdf",
@@ -204,7 +229,19 @@ mod tests {
                 "https://example.com"
             ]
         );
-        assert_eq!(settings.api_keys, vec!["key1", "key2", "key3"]);
+        assert_eq!(settings.api_keys.len(), 3);
+        assert!(settings.api_keys[0].matches("key1"));
+        assert_eq!(settings.api_keys[0].company_id, Uuid::nil());
+        assert_eq!(settings.api_keys[0].role, Role::Admin);
+        assert!(settings.api_keys[1].matches("key2"));
+        assert_eq!(settings.api_keys[1].company_id, Uuid::nil());
+        assert_eq!(settings.api_keys[1].role, Role::Viewer);
+        assert!(settings.api_keys[2].matches("key3"));
+        assert_eq!(
+            settings.api_keys[2].company_id,
+            Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap()
+        );
+        assert_eq!(settings.api_keys[2].role, Role::Operator);
         assert_eq!(
             settings.evidence_allowed_types,
             vec!["image/png", "text/plain", "application/pdf"]
@@ -219,7 +256,10 @@ mod tests {
                     "CORS_ALLOW_ORIGINS",
                     " http://localhost:3000 , http://localhost:8080 , https://example.com ",
                 ),
-                ("API_KEYS", " key1 , key2 , key3 "),
+                (
+                    "API_KEYS",
+                    " key1:00000000-0000-0000-0000-000000000000:admin , key2:00000000-0000-0000-0000-000000000000:viewer ",
+                ),
             ],
             || {
                 let settings = Settings::new().expect("Failed to create settings");
@@ -232,7 +272,9 @@ mod tests {
                         "https://example.com"
                     ]
                 );
-                assert_eq!(settings.api_keys, vec!["key1", "key2", "key3"]);
+                assert_eq!(settings.api_keys.len(), 2);
+                assert!(settings.api_keys[0].matches("key1"));
+                assert!(settings.api_keys[1].matches("key2"));
             },
         );
     }

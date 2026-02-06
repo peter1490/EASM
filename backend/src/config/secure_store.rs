@@ -52,6 +52,7 @@ impl SecretCrypto {
         }
 
         let cipher = Aes256Gcm::new(&self.key);
+        #[allow(deprecated)]
         let nonce = Nonce::from_slice(nonce);
 
         let plaintext = cipher

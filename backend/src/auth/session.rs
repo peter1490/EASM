@@ -27,12 +27,12 @@ impl UserSession {
 }
 
 pub struct SessionManager {
-    secret: String,
+    _secret: String,
 }
 
 impl SessionManager {
     pub fn new(secret: String) -> Self {
-        Self { secret }
+        Self { _secret: secret }
     }
 
     // JWT logic would go here if using JWTs, or cookie signing logic via axum-extra

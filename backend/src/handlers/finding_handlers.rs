@@ -57,7 +57,9 @@ pub async fn filter_findings(
     Extension(user): Extension<UserContext>,
     Query(params): Query<FindingFilterParams>,
 ) -> Result<Json<FindingListResponse>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for findings".to_string())
+    })?;
     // Parse finding types
     let finding_types = params.finding_types.map(|types| {
         types
@@ -145,7 +147,9 @@ pub async fn get_finding_types(
     State(app_state): State<AppState>,
     Extension(user): Extension<UserContext>,
 ) -> Result<Json<Vec<String>>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for findings".to_string())
+    })?;
     // Query to get distinct finding types
     let types = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT finding_type FROM findings WHERE company_id = $1 ORDER BY finding_type",

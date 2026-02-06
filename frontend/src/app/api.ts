@@ -39,6 +39,20 @@ export function getApiBase() {
 
 const API_BASE = getApiBase();
 const COMPANY_STORAGE_KEY = "easm_company_id";
+const CSRF_COOKIE_NAME = "csrf_token";
+
+function getCookie(name: string): string | null {
+  if (typeof document === "undefined") return null;
+  const parts = document.cookie.split(";").map((part) => part.trim());
+  for (const part of parts) {
+    if (!part) continue;
+    const [key, ...rest] = part.split("=");
+    if (key === name) {
+      return rest.join("=") || null;
+    }
+  }
+  return null;
+}
 
 export function getStoredCompanyId(): string | null {
   if (typeof window === "undefined") return null;
@@ -67,6 +81,13 @@ async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
   const companyId = getStoredCompanyId();
   if (companyId) {
     headers.set("X-Company-ID", companyId);
+  }
+  const method = (init.method ?? "GET").toUpperCase();
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+    const csrfToken = getCookie(CSRF_COOKIE_NAME);
+    if (csrfToken) {
+      headers.set("X-CSRF-Token", csrfToken);
+    }
   }
   const credentials = init.credentials ?? "include";
   return fetch(input, { ...init, headers, credentials });

@@ -34,7 +34,9 @@ pub async fn list_discovery_schedules(
     State(app_state): State<AppState>,
     Extension(user): Extension<UserContext>,
 ) -> Result<Json<Vec<DiscoverySchedule>>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for schedules".to_string())
+    })?;
     let schedules = app_state
         .discovery_schedule_service
         .list_schedules(company_id)
@@ -48,7 +50,9 @@ pub async fn create_discovery_schedule(
     Extension(user): Extension<UserContext>,
     Json(payload): Json<CreateDiscoveryScheduleRequest>,
 ) -> Result<Json<DiscoverySchedule>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for schedules".to_string())
+    })?;
     let config_value = payload
         .config
         .map(serde_json::to_value)
@@ -77,7 +81,9 @@ pub async fn update_discovery_schedule(
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateDiscoveryScheduleRequest>,
 ) -> Result<Json<DiscoverySchedule>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for schedules".to_string())
+    })?;
     let config_value: Option<Value> = payload
         .config
         .map(serde_json::to_value)
@@ -104,7 +110,9 @@ pub async fn delete_discovery_schedule(
     Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for schedules".to_string())
+    })?;
     app_state
         .discovery_schedule_service
         .delete_schedule(company_id, &id)

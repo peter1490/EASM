@@ -5,13 +5,14 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
-use axum_extra::extract::cookie::{Cookie, PrivateCookieJar, SameSite};
+use axum_extra::extract::cookie::{Cookie, CookieJar, PrivateCookieJar, SameSite};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
 pub struct AuthCallbackParams {
     code: String,
-    state: String, // CSRF token
+    #[serde(rename = "state")]
+    _state: String, // CSRF token
 }
 
 #[derive(Serialize)]
@@ -52,6 +53,25 @@ fn check_uses_https(state: &AppState) -> bool {
     cors_uses_https || redirect_uses_https
 }
 
+fn session_same_site(state: &AppState) -> SameSite {
+    let config = state.config.load();
+    if config.environment.eq_ignore_ascii_case("production") {
+        SameSite::Strict
+    } else {
+        SameSite::Lax
+    }
+}
+
+fn build_csrf_cookie(uses_https: bool, same_site: SameSite) -> Cookie<'static> {
+    let token = uuid::Uuid::new_v4().to_string();
+    Cookie::build(("csrf_token", token))
+        .path("/")
+        .secure(uses_https)
+        .http_only(false)
+        .same_site(same_site)
+        .build()
+}
+
 pub async fn login_google(State(state): State<AppState>) -> Result<Json<LoginResponse>, ApiError> {
     let (url, _csrf_token, _nonce) = state.auth_service.get_google_auth_url().await?;
     // In a real app, store csrf_token in cookie/session to verify state param in callback
@@ -64,7 +84,14 @@ pub async fn login_local(
     State(state): State<AppState>,
     jar: PrivateCookieJar,
     Json(params): Json<LocalLoginParams>,
-) -> Result<(PrivateCookieJar, Json<crate::auth::session::UserSession>), ApiError> {
+) -> Result<
+    (
+        PrivateCookieJar,
+        CookieJar,
+        Json<crate::auth::session::UserSession>,
+    ),
+    ApiError,
+> {
     let session = state
         .auth_service
         .login_local(&params.email, &params.password)
@@ -74,23 +101,33 @@ pub async fn login_local(
 
     let uses_https = check_uses_https(&state);
 
+    let same_site = session_same_site(&state);
     let cookie = Cookie::build(("session", session_str))
         .path("/")
         .secure(uses_https)
         .http_only(true)
-        .same_site(SameSite::Lax)
+        .same_site(same_site)
         .build();
 
     let jar = jar.add(cookie);
+    let csrf_cookie = build_csrf_cookie(uses_https, same_site);
+    let csrf_jar = CookieJar::new().add(csrf_cookie);
 
-    Ok((jar, Json(session)))
+    Ok((jar, csrf_jar, Json(session)))
 }
 
 pub async fn callback_google(
     State(state): State<AppState>,
     jar: PrivateCookieJar,
     Query(params): Query<AuthCallbackParams>,
-) -> Result<(PrivateCookieJar, Json<crate::auth::session::UserSession>), ApiError> {
+) -> Result<
+    (
+        PrivateCookieJar,
+        CookieJar,
+        Json<crate::auth::session::UserSession>,
+    ),
+    ApiError,
+> {
     let session = state
         .auth_service
         .handle_google_callback(params.code)
@@ -101,17 +138,20 @@ pub async fn callback_google(
 
     let uses_https = check_uses_https(&state);
 
+    let same_site = session_same_site(&state);
     let cookie = Cookie::build(("session", session_str))
         .path("/")
         .secure(uses_https)
         .http_only(true)
-        .same_site(SameSite::Lax)
+        .same_site(same_site)
         .build();
 
     let jar = jar.add(cookie);
+    let csrf_cookie = build_csrf_cookie(uses_https, same_site);
+    let csrf_jar = CookieJar::new().add(csrf_cookie);
 
     // Return jar (which sets headers) and session
-    Ok((jar, Json(session)))
+    Ok((jar, csrf_jar, Json(session)))
 }
 
 pub async fn login_keycloak(
@@ -127,7 +167,14 @@ pub async fn callback_keycloak(
     State(state): State<AppState>,
     jar: PrivateCookieJar,
     Query(params): Query<AuthCallbackParams>,
-) -> Result<(PrivateCookieJar, Json<crate::auth::session::UserSession>), ApiError> {
+) -> Result<
+    (
+        PrivateCookieJar,
+        CookieJar,
+        Json<crate::auth::session::UserSession>,
+    ),
+    ApiError,
+> {
     let session = state
         .auth_service
         .handle_keycloak_callback(params.code)
@@ -137,21 +184,27 @@ pub async fn callback_keycloak(
 
     let uses_https = check_uses_https(&state);
 
+    let same_site = session_same_site(&state);
     let cookie = Cookie::build(("session", session_str))
         .path("/")
         .secure(uses_https)
         .http_only(true)
-        .same_site(SameSite::Lax)
+        .same_site(same_site)
         .build();
 
     let jar = jar.add(cookie);
+    let csrf_cookie = build_csrf_cookie(uses_https, same_site);
+    let csrf_jar = CookieJar::new().add(csrf_cookie);
 
-    Ok((jar, Json(session)))
+    Ok((jar, csrf_jar, Json(session)))
 }
 
-pub async fn logout(jar: PrivateCookieJar) -> (PrivateCookieJar, impl IntoResponse) {
+pub async fn logout(
+    jar: PrivateCookieJar,
+) -> (PrivateCookieJar, CookieJar, impl IntoResponse) {
     let jar = jar.remove(Cookie::from("session"));
-    (jar, "Logged out")
+    let csrf_jar = CookieJar::new().remove(Cookie::from("csrf_token"));
+    (jar, csrf_jar, "Logged out")
 }
 
 pub async fn get_me(Extension(user): Extension<UserContext>) -> Json<UserContext> {

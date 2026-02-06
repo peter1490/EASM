@@ -2,6 +2,11 @@ use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use thiserror::Error;
+use uuid::Uuid;
+
+use crate::auth::rbac::Role;
+use ipnet::IpNet;
+use sha2::{Digest, Sha256};
 
 pub mod managed;
 mod secure_store;
@@ -36,6 +41,143 @@ where
     }
 }
 
+fn deserialize_ipnet_list<'de, D>(deserializer: D) -> Result<Vec<IpNet>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    if s.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    s.split(',')
+        .map(|raw| {
+            let item = raw.trim();
+            if item.is_empty() {
+                return Err(serde::de::Error::custom(
+                    "Empty CIDR entry in allowlist",
+                ));
+            }
+            if let Ok(net) = item.parse::<IpNet>() {
+                return Ok(net);
+            }
+            if let Ok(ip) = item.parse::<std::net::IpAddr>() {
+                return Ok(IpNet::from(ip));
+            }
+            Err(serde::de::Error::custom(format!(
+                "Invalid CIDR or IP entry '{}'",
+                item
+            )))
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+pub struct ApiKeyScope {
+    pub key_hash: [u8; 32],
+    pub company_id: Uuid,
+    pub role: Role,
+    pub allow_company_override: bool,
+}
+
+impl ApiKeyScope {
+    pub fn key_id(&self) -> String {
+        // Use first 8 bytes of the hash as a stable identifier for logging
+        self.key_hash[..8]
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    pub fn matches(&self, candidate: &str) -> bool {
+        let candidate_hash = hash_api_key(candidate);
+        constant_time_eq(&candidate_hash, &self.key_hash)
+    }
+}
+
+fn deserialize_api_keys<'de, D>(deserializer: D) -> Result<Vec<ApiKeyScope>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    if s.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    s.split(',')
+        .map(|raw| parse_api_key_entry(raw.trim()).map_err(serde::de::Error::custom))
+        .collect()
+}
+
+fn parse_api_key_entry(entry: &str) -> Result<ApiKeyScope, String> {
+    if entry.is_empty() {
+        return Err("API key entry is empty".to_string());
+    }
+
+    let parts: Vec<&str> = entry.split(':').collect();
+    if parts.len() < 3 || parts.len() > 4 {
+        return Err(format!(
+            "API key entry '{}' must be in format key:company_uuid:role[:allow_override]",
+            entry
+        ));
+    }
+
+    let key = parts[0].trim();
+    let company_raw = parts[1].trim();
+    let role_raw = parts[2].trim();
+
+    if key.is_empty() {
+        return Err("API key entry has empty key".to_string());
+    }
+
+    let company_id = Uuid::parse_str(company_raw).map_err(|_| {
+        format!(
+            "API key entry '{}' has invalid company UUID '{}'",
+            entry, company_raw
+        )
+    })?;
+
+    let role = Role::from_str(role_raw).ok_or_else(|| {
+        format!(
+            "API key entry '{}' has invalid role '{}'",
+            entry, role_raw
+        )
+    })?;
+
+    let allow_company_override = parts
+        .get(3)
+        .map(|flag| matches!(flag.trim().to_ascii_lowercase().as_str(), "true" | "allow"))
+        .unwrap_or(false);
+
+    let key_hash = hash_api_key(key);
+
+    Ok(ApiKeyScope {
+        key_hash,
+        company_id,
+        role,
+        allow_company_override,
+    })
+}
+
+fn hash_api_key(key: &str) -> [u8; 32] {
+    let digest = Sha256::digest(key.as_bytes());
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&digest);
+    hash
+}
+
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Application settings with environment variable support
 /// Matches the Python backend configuration exactly
 #[derive(Debug, Clone, Deserialize)]
@@ -64,8 +206,12 @@ pub struct Settings {
     #[serde(deserialize_with = "deserialize_comma_separated")]
     pub cors_allow_origins: Vec<String>,
     pub api_key_header: String,
-    #[serde(deserialize_with = "deserialize_comma_separated")]
-    pub api_keys: Vec<String>,
+    pub allow_anonymous: bool,
+    #[serde(deserialize_with = "deserialize_api_keys")]
+    pub api_keys: Vec<ApiKeyScope>,
+    #[serde(deserialize_with = "deserialize_ipnet_list")]
+    pub api_key_ip_allowlist: Vec<IpNet>,
+    pub break_glass_token: Option<String>,
 
     // Authentication (OIDC/SAML)
     pub auth_secret: String, // For session signing
@@ -105,6 +251,13 @@ pub struct Settings {
     pub tcp_scan_timeout: f64,
     pub tcp_scan_concurrency: u32,
     pub block_internal_ip_scans: bool,
+    pub allow_internal_scans: bool,
+
+    // Scan target allowlists
+    #[serde(deserialize_with = "deserialize_ipnet_list")]
+    pub scan_allowlist_cidrs: Vec<IpNet>,
+    #[serde(deserialize_with = "deserialize_comma_separated")]
+    pub scan_allowlist_domains: Vec<String>,
 
     // Discovery Settings
     pub max_cidr_hosts: u32,
@@ -134,6 +287,11 @@ pub struct Settings {
     // Background Tasks
     pub max_concurrent_scans: u32,
     pub scan_queue_check_interval: f64,
+    pub max_active_scans_per_user: u32,
+    pub max_active_discovery_per_user: u32,
+
+    // Search
+    pub reindex_min_interval_seconds: u32,
 }
 
 impl Settings {
@@ -169,7 +327,10 @@ impl Settings {
         }
 
         let mut builder = config::Config::builder()
-            .set_default("environment", "production")?
+            .set_default(
+                "environment",
+                if cfg!(test) { "development" } else { "production" },
+            )?
             // Database defaults
             .set_default("database_url", "postgresql://easm:easm@localhost:5432/easm")?
             .set_default("elasticsearch_url", None::<String>)?
@@ -189,6 +350,9 @@ impl Settings {
             .set_default("cors_allow_origins", "http://localhost:80,http://127.0.0.1:80")?
             .set_default("api_key_header", "X-API-Key")?
             .set_default("api_keys", "")?
+            .set_default("allow_anonymous", false)?
+            .set_default("api_key_ip_allowlist", "")?
+            .set_default("break_glass_token", None::<String>)?
 
             // Auth defaults
             .set_default("auth_secret", "changeme_super_secret_session_key_must_be_at_least_64_bytes_long_for_security_reasons_so_here_is_a_very_long_string_!!")?
@@ -222,6 +386,11 @@ impl Settings {
             .set_default("tcp_scan_timeout", 0.35)?
             .set_default("tcp_scan_concurrency", 64u32)?
             .set_default("block_internal_ip_scans", true)?
+            .set_default("allow_internal_scans", false)?
+
+            // Scan target allowlists
+            .set_default("scan_allowlist_cidrs", "")?
+            .set_default("scan_allowlist_domains", "")?
 
             // Discovery Settings defaults
             .set_default("max_cidr_hosts", 4096u32)?
@@ -251,6 +420,11 @@ impl Settings {
             // Background Tasks defaults
             .set_default("max_concurrent_scans", 5u32)?
             .set_default("scan_queue_check_interval", 5.0)?
+            .set_default("max_active_scans_per_user", 2u32)?
+            .set_default("max_active_discovery_per_user", 1u32)?
+
+            // Search defaults
+            .set_default("reindex_min_interval_seconds", 300u32)?
             ;
 
         // Load .env as a configuration source instead of mutating process environment (skip in tests)
@@ -324,6 +498,12 @@ impl Settings {
             if let Some(v) = read_env("API_KEYS") {
                 builder = builder.set_override("api_keys", v)?;
             }
+            if let Some(v) = read_env("API_KEY_IP_ALLOWLIST") {
+                builder = builder.set_override("api_key_ip_allowlist", v)?;
+            }
+            if let Some(v) = read_env("BREAK_GLASS_TOKEN") {
+                builder = builder.set_override("break_glass_token", v)?;
+            }
 
             // Auth overrides
             if let Some(v) = read_env("AUTH_SECRET") {
@@ -374,6 +554,12 @@ impl Settings {
             }
             if let Some(v) = read_env("EVIDENCE_STORAGE_PATH") {
                 builder = builder.set_override("evidence_storage_path", v)?;
+            }
+            if let Some(v) = read_env("SCAN_ALLOWLIST_CIDRS") {
+                builder = builder.set_override("scan_allowlist_cidrs", v)?;
+            }
+            if let Some(v) = read_env("SCAN_ALLOWLIST_DOMAINS") {
+                builder = builder.set_override("scan_allowlist_domains", v)?;
             }
 
             // Numeric overrides
@@ -444,6 +630,21 @@ impl Settings {
                 builder = builder.set_override("scan_queue_check_interval", v)?;
             }
             if let Some(v) =
+                read_env("MAX_ACTIVE_SCANS_PER_USER").and_then(|s| s.parse::<u32>().ok())
+            {
+                builder = builder.set_override("max_active_scans_per_user", v)?;
+            }
+            if let Some(v) =
+                read_env("MAX_ACTIVE_DISCOVERY_PER_USER").and_then(|s| s.parse::<u32>().ok())
+            {
+                builder = builder.set_override("max_active_discovery_per_user", v)?;
+            }
+            if let Some(v) =
+                read_env("REINDEX_MIN_INTERVAL_SECONDS").and_then(|s| s.parse::<u32>().ok())
+            {
+                builder = builder.set_override("reindex_min_interval_seconds", v)?;
+            }
+            if let Some(v) =
                 read_env("AUTH_SESSION_EXPIRY_SECONDS").and_then(|s| s.parse::<u64>().ok())
             {
                 builder = builder.set_override("auth_session_expiry_seconds", v)?;
@@ -480,6 +681,12 @@ impl Settings {
             if let Some(v) = parse_bool_env("BLOCK_INTERNAL_IP_SCANS") {
                 builder = builder.set_override("block_internal_ip_scans", v)?;
             }
+            if let Some(v) = parse_bool_env("ALLOW_INTERNAL_SCANS") {
+                builder = builder.set_override("allow_internal_scans", v)?;
+            }
+            if let Some(v) = parse_bool_env("ALLOW_ANON") {
+                builder = builder.set_override("allow_anonymous", v)?;
+            }
         }
 
         let settings = builder.build()?;
@@ -494,6 +701,42 @@ impl Settings {
 
     /// Validate configuration values
     fn validate(&self) -> Result<(), ConfigError> {
+        let environment = self.environment.to_ascii_lowercase();
+        let is_production = environment == "production";
+
+        if is_production && self.allow_anonymous {
+            return Err(ConfigError::Validation(
+                "allow_anonymous cannot be enabled in production".to_string(),
+            ));
+        }
+
+        if is_production && self.api_keys.is_empty() {
+            return Err(ConfigError::Validation(
+                "api_keys must be configured in production".to_string(),
+            ));
+        }
+
+        if is_production
+            && (self.cors_allow_origins.is_empty()
+                || self
+                    .cors_allow_origins
+                    .iter()
+                    .any(|origin| origin.trim() == "*"))
+        {
+            return Err(ConfigError::Validation(
+                "cors_allow_origins must be a non-empty allowlist (no '*') in production"
+                    .to_string(),
+            ));
+        }
+
+        if let Some(token) = &self.break_glass_token {
+            if token.trim().is_empty() {
+                return Err(ConfigError::Validation(
+                    "break_glass_token cannot be empty when set".to_string(),
+                ));
+            }
+        }
+
         // Validate log format
         if !matches!(self.log_format.as_str(), "json" | "plain") {
             return Err(ConfigError::Validation(
@@ -572,6 +815,24 @@ impl Settings {
         if self.rate_limit_window_seconds == 0 {
             return Err(ConfigError::Validation(
                 "rate_limit_window_seconds must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.max_active_scans_per_user == 0 {
+            return Err(ConfigError::Validation(
+                "max_active_scans_per_user must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.max_active_discovery_per_user == 0 {
+            return Err(ConfigError::Validation(
+                "max_active_discovery_per_user must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.reindex_min_interval_seconds == 0 {
+            return Err(ConfigError::Validation(
+                "reindex_min_interval_seconds must be greater than 0".to_string(),
             ));
         }
 

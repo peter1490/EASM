@@ -97,6 +97,62 @@ impl SecurityScanService {
         self.settings.load_full()
     }
 
+    fn should_block_internal(&self, settings: &Settings) -> bool {
+        settings.block_internal_ip_scans
+            || (settings.environment.eq_ignore_ascii_case("production")
+                && !settings.allow_internal_scans)
+    }
+
+    fn is_domain_allowed(&self, settings: &Settings, domain: &str) -> bool {
+        if settings.scan_allowlist_domains.is_empty() {
+            return true;
+        }
+        let candidate = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+        settings.scan_allowlist_domains.iter().any(|allowed| {
+            let allowed = allowed.trim().trim_end_matches('.').to_ascii_lowercase();
+            candidate == allowed || candidate.ends_with(&format!(".{}", allowed))
+        })
+    }
+
+    fn is_ip_allowed(&self, settings: &Settings, ip: IpAddr) -> bool {
+        if self.should_block_internal(settings) && is_internal_ip(ip) {
+            return false;
+        }
+        if !settings.scan_allowlist_cidrs.is_empty()
+            && !settings
+                .scan_allowlist_cidrs
+                .iter()
+                .any(|net| net.contains(&ip))
+        {
+            return false;
+        }
+        true
+    }
+
+    fn validate_asset_target(&self, settings: &Settings, asset: &Asset) -> Result<(), ApiError> {
+        match asset.asset_type {
+            AssetType::Domain => {
+                if !self.is_domain_allowed(settings, &asset.identifier) {
+                    return Err(ApiError::Validation(
+                        "Domain target not permitted by scan policy".to_string(),
+                    ));
+                }
+            }
+            AssetType::Ip => {
+                let ip: IpAddr = asset.identifier.parse().map_err(|_| {
+                    ApiError::Validation("Invalid IP asset identifier".to_string())
+                })?;
+                if !self.is_ip_allowed(settings, ip) {
+                    return Err(ApiError::Validation(
+                        "IP target not permitted by scan policy".to_string(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     // ========================================================================
     // SCAN MANAGEMENT
     // ========================================================================
@@ -107,7 +163,22 @@ impl SecurityScanService {
         &self,
         scan_create: SecurityScanCreate,
         company_id: Uuid,
+        requested_by: Option<Uuid>,
     ) -> Result<SecurityScan, ApiError> {
+        if let Some(user_id) = requested_by {
+            let settings = self.current_settings();
+            let active = self
+                .task_manager
+                .count_active_tasks_by_requester(&user_id.to_string(), TaskType::Scan)
+                .await;
+            if active >= settings.max_active_scans_per_user as usize {
+                return Err(ApiError::RateLimit(format!(
+                    "Too many active scan tasks (limit {})",
+                    settings.max_active_scans_per_user
+                )));
+            }
+        }
+
         // Verify asset exists
         let asset = self
             .asset_repo
@@ -116,6 +187,9 @@ impl SecurityScanService {
             .ok_or_else(|| {
                 ApiError::NotFound(format!("Asset {} not found", scan_create.asset_id))
             })?;
+
+        let settings = self.current_settings();
+        self.validate_asset_target(&settings, &asset)?;
 
         // Create the scan record
         let scan = self.scan_repo.create(&scan_create, company_id).await?;
@@ -130,6 +204,7 @@ impl SecurityScanService {
             "asset_identifier": asset.identifier,
             "scan_type": scan.scan_type,
             "company_id": company_id,
+            "requested_by": requested_by.map(|id| id.to_string()),
         });
 
         self.task_manager
@@ -144,10 +219,11 @@ impl SecurityScanService {
             .await?;
 
         tracing::info!(
-            "Created security scan {} for asset {} (company {})",
-            scan_id,
-            asset.identifier,
-            company_id
+            scan_id = %scan_id,
+            asset = %asset.identifier,
+            company_id = %company_id,
+            requested_by = ?requested_by,
+            "Created security scan"
         );
         Ok(scan)
     }
@@ -295,7 +371,7 @@ impl SecurityScanService {
 
         // Finalize scan
         match result {
-            Ok(mut summary) => {
+            Ok(summary) => {
                 if let Err(e) = self
                     .resolve_stale_findings(
                         scan_id,
@@ -433,7 +509,6 @@ impl SecurityScanService {
         let domain = &asset.identifier;
         let settings = self.current_settings();
         let mut internal_only = false;
-        let mut scan_target_ip: Option<IpAddr> = None;
 
         // Step 1: DNS security checks
         ctx.update_progress(0.1, Some("Checking DNS security".to_string()))
@@ -450,17 +525,16 @@ impl SecurityScanService {
             .await?;
         match self.dns_resolver.resolve_hostname(domain).await {
             Ok(ips) => {
-                if settings.block_internal_ip_scans {
-                    scan_target_ip = ips.iter().copied().find(|ip| !is_internal_ip(*ip));
-                    internal_only = scan_target_ip.is_none() && !ips.is_empty();
-                    if internal_only {
-                        tracing::info!(
-                            "Skipping active scans for {}: only internal IPs resolved",
-                            domain
-                        );
-                    }
-                } else {
-                    scan_target_ip = ips.first().copied();
+                let scan_target_ip = ips
+                    .iter()
+                    .copied()
+                    .find(|ip| self.is_ip_allowed(&settings, *ip));
+                internal_only = scan_target_ip.is_none() && !ips.is_empty();
+                if internal_only {
+                    tracing::info!(
+                        "Skipping active scans for {}: only disallowed IPs resolved",
+                        domain
+                    );
                 }
 
                 if let Some(ip) = scan_target_ip {
@@ -536,9 +610,9 @@ impl SecurityScanService {
             scan_type,
             SecurityScanType::TlsAnalysis | SecurityScanType::Full
         ) {
-            if settings.block_internal_ip_scans && internal_only {
+            if internal_only {
                 tracing::info!(
-                    "Skipping TLS analysis for {}: only internal IPs resolved",
+                    "Skipping TLS analysis for {}: only disallowed IPs resolved",
                     domain
                 );
             } else {
@@ -597,9 +671,9 @@ impl SecurityScanService {
             .map_err(|e| ApiError::Validation(format!("Invalid IP: {}", e)))?;
         let settings = self.current_settings();
 
-        if settings.block_internal_ip_scans && is_internal_ip(ip) {
+        if !self.is_ip_allowed(&settings, ip) {
             tracing::info!(
-                "Skipping internal IP scan for asset {} ({})",
+                "Skipping disallowed IP scan for asset {} ({})",
                 asset.id,
                 ip
             );

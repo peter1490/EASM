@@ -1,17 +1,24 @@
 use axum::http::{HeaderName, Method};
-use tower_http::cors::{Any, CorsLayer, AllowOrigin};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+
+use crate::config::Settings;
 
 /// Create CORS layer with configurable origins from settings
-pub fn create_cors_layer(allowed_origins: Vec<String>) -> CorsLayer {
+pub fn create_cors_layer(settings: &Settings) -> CorsLayer {
     let allowed_headers = vec![
         HeaderName::from_static("content-type"),
         HeaderName::from_static("authorization"),
         HeaderName::from_static("x-api-key"),
         HeaderName::from_static("x-requested-with"),
         HeaderName::from_static("x-company-id"),
+        HeaderName::from_static("x-csrf-token"),
+        HeaderName::from_static("x-break-glass-token"),
     ];
 
-    if allowed_origins.is_empty() || allowed_origins.contains(&"*".to_string()) {
+    let allowed_origins = &settings.cors_allow_origins;
+    let is_production = settings.environment.eq_ignore_ascii_case("production");
+
+    if allowed_origins.is_empty() || allowed_origins.iter().any(|o| o.trim() == "*") {
         // Development mode - allow all origins (mirror request origin so header is set)
         tracing::debug!("CORS: Allowing all origins (development mode)");
         CorsLayer::new()
@@ -25,7 +32,7 @@ pub fn create_cors_layer(allowed_origins: Vec<String>) -> CorsLayer {
                 Method::OPTIONS,
             ])
             .allow_headers(allowed_headers)
-            .allow_credentials(true)
+            .allow_credentials(!is_production)
     } else {
         // Production mode - restrict origins
         let origins: Vec<_> = allowed_origins

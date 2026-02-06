@@ -83,7 +83,7 @@ impl IpRateLimiter {
 }
 
 /// Extract client IP from request headers
-fn extract_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
+pub(crate) fn extract_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
     // Check X-Forwarded-For header first (for proxies)
     if let Some(forwarded) = headers.get("x-forwarded-for") {
         if let Ok(forwarded_str) = forwarded.to_str() {

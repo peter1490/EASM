@@ -117,7 +117,7 @@ impl Role {
 macro_rules! require_role {
     ($user:expr, $role:expr) => {
         if !$user.has_role($role) {
-            return Err(crate::error::ApiError::Forbidden(format!(
+            return Err(crate::error::ApiError::Authorization(format!(
                 "Role {} required",
                 $role
             )));
@@ -128,8 +128,8 @@ macro_rules! require_role {
 #[macro_export]
 macro_rules! require_permission {
     ($user:expr, $perm:expr) => {
-        if !$user.has_permission($perm) {
-            return Err(crate::error::ApiError::Forbidden(format!(
+        if !$user.has_permission(&$perm) {
+            return Err(crate::error::ApiError::Authorization(format!(
                 "Permission {:?} required",
                 $perm
             )));

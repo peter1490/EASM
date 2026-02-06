@@ -46,7 +46,9 @@ pub async fn create_security_scan(
     Extension(user): Extension<UserContext>,
     Json(payload): Json<CreateSecurityScanRequest>,
 ) -> Result<Json<SecurityScan>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for security scans".to_string())
+    })?;
     let scan_create = SecurityScanCreate {
         asset_id: payload.asset_id,
         scan_type: payload.scan_type.map(|s| s.as_str().into()),
@@ -58,7 +60,7 @@ pub async fn create_security_scan(
 
     let scan = app_state
         .security_scan_service
-        .create_scan(scan_create, company_id)
+        .create_scan(scan_create, company_id, user.user_id)
         .await?;
     Ok(Json(scan))
 }
@@ -69,7 +71,9 @@ pub async fn list_security_scans(
     Extension(user): Extension<UserContext>,
     Query(query): Query<ListScansQuery>,
 ) -> Result<Json<Vec<SecurityScan>>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for security scans".to_string())
+    })?;
     let scans = if let Some(asset_id) = query.asset_id {
         app_state
             .security_scan_service
@@ -90,7 +94,9 @@ pub async fn get_security_scan(
     Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SecurityScanDetailResponse>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for security scans".to_string())
+    })?;
     let scan = app_state
         .security_scan_service
         .get_scan_detail(&id, company_id)
@@ -105,7 +111,9 @@ pub async fn list_pending_scans(
     Extension(user): Extension<UserContext>,
     Query(query): Query<ListScansQuery>,
 ) -> Result<Json<Vec<SecurityScan>>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for security scans".to_string())
+    })?;
     let scans = app_state
         .security_scan_service
         .list_pending_scans(query.limit, company_id)
@@ -119,7 +127,9 @@ pub async fn cancel_security_scan(
     Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for security scans".to_string())
+    })?;
     app_state
         .security_scan_service
         .cancel_scan(&id, company_id)
@@ -152,7 +162,9 @@ pub async fn list_security_findings(
     Extension(user): Extension<UserContext>,
     Query(query): Query<ListFindingsQuery>,
 ) -> Result<Json<SecurityFindingListResponse>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for security scans".to_string())
+    })?;
     let filter = SecurityFindingFilter {
         asset_ids: query.asset_id.map(|id| vec![id]),
         scan_ids: query.scan_id.map(|id| vec![id]),
@@ -182,7 +194,9 @@ pub async fn get_security_finding(
     Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SecurityFinding>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for security scans".to_string())
+    })?;
     let finding = app_state
         .security_scan_service
         .get_finding(&id, company_id)
@@ -198,7 +212,9 @@ pub async fn update_security_finding(
     Path(id): Path<Uuid>,
     Json(payload): Json<SecurityFindingUpdate>,
 ) -> Result<Json<SecurityFinding>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for security scans".to_string())
+    })?;
     let updated_by = user.user_id;
     let finding = app_state
         .security_finding_repository
@@ -215,7 +231,9 @@ pub async fn resolve_security_finding(
 ) -> Result<Json<SecurityFinding>, ApiError> {
     // In a real app, we'd get the user ID from the auth context
     let user_id = user.user_id.unwrap_or(Uuid::nil());
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for security scans".to_string())
+    })?;
     // Assuming resolve logic accepts company_id? The call below uses existing resolve method
     // I need to check if resolve takes company_id. Assuming yes for "propagate" objective.
     let finding = app_state
@@ -230,7 +248,9 @@ pub async fn get_findings_summary(
     State(app_state): State<AppState>,
     Extension(user): Extension<UserContext>,
 ) -> Result<Json<Value>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for security scans".to_string())
+    })?;
     let summary = app_state
         .security_scan_service
         .get_findings_summary(company_id)
@@ -250,7 +270,9 @@ pub async fn get_asset_findings(
     Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<SecurityFinding>>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for security scans".to_string())
+    })?;
     let findings = app_state
         .security_scan_service
         .list_findings_for_asset(&id, company_id)
@@ -265,7 +287,9 @@ pub async fn trigger_asset_scan(
     Path(id): Path<Uuid>,
     payload: Option<Json<CreateSecurityScanRequest>>,
 ) -> Result<Json<SecurityScan>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for security scans".to_string())
+    })?;
     let scan_type = payload.as_ref().and_then(|p| p.scan_type.clone());
     let note = payload.as_ref().and_then(|p| p.note.clone());
 
@@ -280,7 +304,7 @@ pub async fn trigger_asset_scan(
 
     let scan = app_state
         .security_scan_service
-        .create_scan(scan_create, company_id)
+        .create_scan(scan_create, company_id, user.user_id)
         .await?;
     Ok(Json(scan))
 }

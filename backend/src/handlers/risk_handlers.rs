@@ -44,7 +44,9 @@ pub async fn get_asset_risk(
     Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Asset>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for risk".to_string())
+    })?;
     // Just return the asset, it includes risk fields
     let asset = app_state
         .asset_repository
@@ -69,7 +71,9 @@ pub async fn recalculate_asset_risk(
         ));
     }
 
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for risk".to_string())
+    })?;
     let asset = app_state
         .risk_service
         .calculate_asset_risk(company_id, id)
@@ -88,7 +92,9 @@ pub async fn recalculate_all_risks(
         ));
     }
 
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for risk".to_string())
+    })?;
     let result = app_state
         .risk_service
         .recalculate_all_risks(company_id)
@@ -101,7 +107,9 @@ pub async fn get_risk_overview(
     State(app_state): State<AppState>,
     Extension(user): Extension<UserContext>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for risk".to_string())
+    })?;
     let overview = app_state.risk_service.get_risk_overview(company_id).await?;
     Ok(Json(overview))
 }
@@ -112,7 +120,9 @@ pub async fn get_high_risk_assets(
     Extension(user): Extension<UserContext>,
     Query(query): Query<HighRiskQuery>,
 ) -> Result<Json<Vec<Asset>>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for risk".to_string())
+    })?;
     let assets = app_state
         .risk_service
         .get_high_risk_assets(company_id, query.limit)
@@ -126,7 +136,9 @@ pub async fn get_company_evolution(
     Extension(user): Extension<UserContext>,
     Query(query): Query<CompanyEvolutionQuery>,
 ) -> Result<Json<CompanyEvolutionResponse>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for risk".to_string())
+    })?;
     let series = app_state
         .risk_service
         .get_company_evolution(company_id, query.limit)

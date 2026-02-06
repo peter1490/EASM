@@ -26,7 +26,9 @@ pub async fn detect_port_drift(
     Extension(user): Extension<UserContext>,
     Path(scan_id): Path<Uuid>,
 ) -> Result<Json<DriftDetectionResponse>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for drift".to_string())
+    })?;
     // Get the scan to verify it exists and get the target
     let scan = app_state
         .scan_repo
@@ -96,7 +98,9 @@ pub async fn get_drift_findings(
     Extension(user): Extension<UserContext>,
     Path(scan_id): Path<Uuid>,
 ) -> Result<Json<Vec<crate::models::Finding>>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for drift".to_string())
+    })?;
     let findings = app_state
         .finding_repo
         .list_by_type("port_drift", company_id)

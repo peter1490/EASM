@@ -61,11 +61,100 @@ impl ScanService {
         self.settings.load_full()
     }
 
+    fn should_block_internal(&self, settings: &Settings) -> bool {
+        settings.block_internal_ip_scans
+            || (settings.environment.eq_ignore_ascii_case("production")
+                && !settings.allow_internal_scans)
+    }
+
+    fn is_domain_allowed(&self, settings: &Settings, domain: &str) -> bool {
+        if settings.scan_allowlist_domains.is_empty() {
+            return true;
+        }
+        let candidate = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+        settings.scan_allowlist_domains.iter().any(|allowed| {
+            let allowed = allowed.trim().trim_end_matches('.').to_ascii_lowercase();
+            candidate == allowed || candidate.ends_with(&format!(".{}", allowed))
+        })
+    }
+
+    fn is_ip_allowed(&self, settings: &Settings, ip: IpAddr) -> bool {
+        if self.should_block_internal(settings) && is_internal_ip(ip) {
+            return false;
+        }
+        if !settings.scan_allowlist_cidrs.is_empty()
+            && !settings
+                .scan_allowlist_cidrs
+                .iter()
+                .any(|net| net.contains(&ip))
+        {
+            return false;
+        }
+        true
+    }
+
+    fn is_cidr_allowed(&self, settings: &Settings, cidr: &ipnet::IpNet) -> bool {
+        if settings.scan_allowlist_cidrs.is_empty() {
+            return true;
+        }
+        settings.scan_allowlist_cidrs.iter().any(|net| {
+            net.contains(&cidr.network()) && net.prefix_len() <= cidr.prefix_len()
+        })
+    }
+
+    fn validate_scan_target(&self, settings: &Settings, target: &str) -> Result<(), ApiError> {
+        if target.contains('/') {
+            let cidr: ipnet::IpNet = target
+                .parse()
+                .map_err(|_| ApiError::Validation("Invalid CIDR target".to_string()))?;
+            if !self.is_cidr_allowed(settings, &cidr) {
+                return Err(ApiError::Validation(
+                    "CIDR target not in allowlist".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+
+        if let Ok(ip) = target.parse::<IpAddr>() {
+            if !self.is_ip_allowed(settings, ip) {
+                return Err(ApiError::Validation(
+                    "IP target not permitted by scan policy".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+
+        if !self.is_domain_allowed(settings, target) {
+            return Err(ApiError::Validation(
+                "Domain target not permitted by scan policy".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
     pub async fn create_scan(
         &self,
         scan_create: ScanCreate,
         company_id: Uuid,
+        requested_by: Option<Uuid>,
     ) -> Result<Scan, ApiError> {
+        let settings = self.current_settings();
+        self.validate_scan_target(&settings, &scan_create.target)?;
+
+        if let Some(user_id) = requested_by {
+            let active = self
+                .task_manager
+                .count_active_tasks_by_requester(&user_id.to_string(), TaskType::Scan)
+                .await;
+            if active >= settings.max_active_scans_per_user as usize {
+                return Err(ApiError::RateLimit(format!(
+                    "Too many active scan tasks (limit {})",
+                    settings.max_active_scans_per_user
+                )));
+            }
+        }
+
         let scan = self.scan_repo.create(&scan_create, company_id).await?;
 
         // Submit scan processing task to TaskManager
@@ -76,7 +165,9 @@ impl ScanService {
         let task_metadata = json!({
             "scan_id": scan_id,
             "target": target,
-            "scan_type": "background_scan"
+            "scan_type": "background_scan",
+            "company_id": company_id,
+            "requested_by": requested_by.map(|id| id.to_string()),
         });
 
         let _task_id = self
@@ -93,9 +184,11 @@ impl ScanService {
             .await?;
 
         tracing::info!(
-            "Created scan {} for target {} and submitted to task manager",
-            scan.id,
-            scan.target
+            scan_id = %scan.id,
+            target = %scan.target,
+            company_id = %company_id,
+            requested_by = ?requested_by,
+            "Created scan and submitted to task manager"
         );
 
         Ok(scan)
@@ -359,9 +452,9 @@ impl ScanService {
                             .await?;
                         // Store IPs with their parent subdomain asset for lineage
                         for ip in ips {
-                            if settings.block_internal_ip_scans && is_internal_ip(ip) {
+                            if !self.is_ip_allowed(&settings, ip) {
                                 tracing::info!(
-                                    "Skipping internal IP scan for {} (resolved from {})",
+                                    "Skipping disallowed IP scan for {} (resolved from {})",
                                     ip,
                                     subdomain
                                 );
@@ -440,8 +533,8 @@ impl ScanService {
             .map_err(|e| ApiError::Validation(format!("Invalid IP address: {}", e)))?;
         let settings = self.current_settings();
 
-        if settings.block_internal_ip_scans && is_internal_ip(ip) {
-            tracing::info!("Skipping internal IP scan for {}", ip);
+        if !self.is_ip_allowed(&settings, ip) {
+            tracing::info!("Skipping disallowed IP scan for {}", ip);
             return Ok(());
         }
 
@@ -481,8 +574,11 @@ impl ScanService {
         self.create_cidr_finding(scan_id, cidr, total_ips, company_id)
             .await?;
 
-        if settings.block_internal_ip_scans {
-            ips.retain(|ip| !is_internal_ip(*ip));
+        ips.retain(|ip| self.is_ip_allowed(&settings, *ip));
+        if ips.is_empty() {
+            return Err(ApiError::Validation(
+                "CIDR target contains no permitted IPs".to_string(),
+            ));
         }
 
         ctx.update_progress(
@@ -567,8 +663,8 @@ impl ScanService {
         tracing::debug!("Processing IP address {} with parent {:?}", ip, parent_id);
         let settings = self.current_settings();
 
-        if settings.block_internal_ip_scans && is_internal_ip(ip) {
-            tracing::info!("Skipping internal IP scan for {}", ip);
+        if !self.is_ip_allowed(&settings, ip) {
+            tracing::info!("Skipping disallowed IP scan for {}", ip);
             return Ok(());
         }
 
@@ -669,8 +765,8 @@ impl ScanService {
         tracing::debug!("Processing IP address {} with parent {:?}", ip, parent_id);
         let settings = self.current_settings();
 
-        if settings.block_internal_ip_scans && is_internal_ip(ip) {
-            tracing::info!("Skipping internal IP scan for {}", ip);
+        if !self.is_ip_allowed(&settings, ip) {
+            tracing::info!("Skipping disallowed IP scan for {}", ip);
             return Ok(());
         }
 

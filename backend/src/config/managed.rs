@@ -109,6 +109,10 @@ pub struct ManagedSettings {
     pub rdns_concurrency: u32,
     #[serde(default = "default_max_concurrent_scans")]
     pub max_concurrent_scans: u32,
+    #[serde(default = "default_max_active_scans_per_user")]
+    pub max_active_scans_per_user: u32,
+    #[serde(default = "default_max_active_discovery_per_user")]
+    pub max_active_discovery_per_user: u32,
     #[serde(default = "default_true")]
     pub block_internal_ip_scans: bool,
 
@@ -153,6 +157,10 @@ pub struct ManagedSettings {
     pub max_orgs_per_domain: u32,
     #[serde(default = "default_max_domains_per_org")]
     pub max_domains_per_org: u32,
+
+    // Search
+    #[serde(default = "default_reindex_min_interval_seconds")]
+    pub reindex_min_interval_seconds: u32,
 }
 
 const fn default_rate_limit_enabled() -> bool {
@@ -185,6 +193,14 @@ const fn default_rdns_concurrency() -> u32 {
 
 const fn default_max_concurrent_scans() -> u32 {
     5
+}
+
+const fn default_max_active_scans_per_user() -> u32 {
+    2
+}
+
+const fn default_max_active_discovery_per_user() -> u32 {
+    1
 }
 
 const fn default_max_evidence_bytes() -> u64 {
@@ -227,6 +243,10 @@ const fn default_max_domains_per_org() -> u32 {
     20
 }
 
+const fn default_reindex_min_interval_seconds() -> u32 {
+    300
+}
+
 impl Default for ManagedSettings {
     fn default() -> Self {
         Self {
@@ -264,6 +284,8 @@ impl Default for ManagedSettings {
             dns_concurrency: default_dns_concurrency(),
             rdns_concurrency: default_rdns_concurrency(),
             max_concurrent_scans: default_max_concurrent_scans(),
+            max_active_scans_per_user: default_max_active_scans_per_user(),
+            max_active_discovery_per_user: default_max_active_discovery_per_user(),
             block_internal_ip_scans: default_true(),
 
             max_evidence_bytes: default_max_evidence_bytes(),
@@ -286,6 +308,8 @@ impl Default for ManagedSettings {
             min_pivot_confidence: default_min_pivot_confidence(),
             max_orgs_per_domain: default_max_orgs_per_domain(),
             max_domains_per_org: default_max_domains_per_org(),
+
+            reindex_min_interval_seconds: default_reindex_min_interval_seconds(),
         }
     }
 }
@@ -359,6 +383,8 @@ impl ManagedSettings {
         settings.dns_concurrency = normalized.dns_concurrency;
         settings.rdns_concurrency = normalized.rdns_concurrency;
         settings.max_concurrent_scans = normalized.max_concurrent_scans;
+        settings.max_active_scans_per_user = normalized.max_active_scans_per_user;
+        settings.max_active_discovery_per_user = normalized.max_active_discovery_per_user;
         settings.block_internal_ip_scans = normalized.block_internal_ip_scans;
 
         // Evidence
@@ -383,6 +409,8 @@ impl ManagedSettings {
         settings.min_pivot_confidence = normalized.min_pivot_confidence;
         settings.max_orgs_per_domain = normalized.max_orgs_per_domain;
         settings.max_domains_per_org = normalized.max_domains_per_org;
+
+        settings.reindex_min_interval_seconds = normalized.reindex_min_interval_seconds;
     }
 }
 
@@ -423,6 +451,8 @@ impl From<&Settings> for ManagedSettings {
             dns_concurrency: settings.dns_concurrency,
             rdns_concurrency: settings.rdns_concurrency,
             max_concurrent_scans: settings.max_concurrent_scans,
+            max_active_scans_per_user: settings.max_active_scans_per_user,
+            max_active_discovery_per_user: settings.max_active_discovery_per_user,
             block_internal_ip_scans: settings.block_internal_ip_scans,
 
             max_evidence_bytes: settings.max_evidence_bytes,
@@ -445,6 +475,8 @@ impl From<&Settings> for ManagedSettings {
             min_pivot_confidence: settings.min_pivot_confidence,
             max_orgs_per_domain: settings.max_orgs_per_domain,
             max_domains_per_org: settings.max_domains_per_org,
+
+            reindex_min_interval_seconds: settings.reindex_min_interval_seconds,
         }
     }
 }

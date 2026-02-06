@@ -1,11 +1,12 @@
 use crate::{
+    auth::{context::UserContext, rbac::Permission},
     error::ApiError,
     models::{Evidence, EvidenceCreate},
     AppState,
 };
 use axum::{
     body::Bytes,
-    extract::{Multipart, Path, State},
+    extract::{Extension, Multipart, Path, State},
     http::{header, StatusCode},
     response::{Json, Response},
 };
@@ -16,9 +17,15 @@ use uuid::Uuid;
 
 pub async fn upload_evidence(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(scan_id): Path<Uuid>,
     mut multipart: Multipart,
 ) -> Result<Json<Evidence>, ApiError> {
+    crate::require_permission!(user, Permission::ViewEvidence);
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for evidence upload".to_string())
+    })?;
+
     let mut file_data: Option<Bytes> = None;
     let mut filename: Option<String> = None;
     let mut content_type: Option<String> = None;
@@ -109,32 +116,56 @@ pub async fn upload_evidence(
 
     let evidence = app_state
         .evidence_repository
-        .create(&evidence_create)
+        .create(&evidence_create, company_id)
         .await?;
     Ok(Json(evidence))
 }
 
 pub async fn download_evidence(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
+    crate::require_permission!(user, Permission::DownloadEvidence);
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for evidence download".to_string())
+    })?;
+
     let evidence = app_state
         .evidence_repository
-        .get_by_id(&id)
+        .get_by_id(&id, company_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("Evidence {} not found", id)))?;
 
     let file_path = PathBuf::from(&evidence.file_path);
+    let settings = app_state.config.load();
+    let evidence_root = PathBuf::from(&settings.evidence_storage_path);
+
+    let canonical_root = fs::canonicalize(&evidence_root)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to resolve evidence root: {}", e)))?;
+    let canonical_file = fs::canonicalize(&file_path)
+        .await
+        .map_err(|_| ApiError::NotFound("Evidence file not found on disk".to_string()))?;
+
+    if !canonical_file.starts_with(&canonical_root) {
+        tracing::warn!(
+            "Attempted evidence path escape: requested={}, resolved={}",
+            file_path.display(),
+            canonical_file.display()
+        );
+        return Err(ApiError::Authorization("Access denied".to_string()));
+    }
 
     // Check if file exists
-    if !file_path.exists() {
+    if !canonical_file.exists() {
         return Err(ApiError::NotFound(
             "Evidence file not found on disk".to_string(),
         ));
     }
 
     // Read file content
-    let file_content = fs::read(&file_path)
+    let file_content = fs::read(&canonical_file)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to read file: {}", e)))?;
 
@@ -165,11 +196,17 @@ pub async fn download_evidence(
 
 pub async fn get_evidence(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Evidence>, ApiError> {
+    crate::require_permission!(user, Permission::ViewEvidence);
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for evidence access".to_string())
+    })?;
+
     let evidence = app_state
         .evidence_repository
-        .get_by_id(&id)
+        .get_by_id(&id, company_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("Evidence {} not found", id)))?;
     Ok(Json(evidence))
@@ -177,8 +214,16 @@ pub async fn get_evidence(
 
 pub async fn list_evidence_by_scan(
     State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(scan_id): Path<Uuid>,
 ) -> Result<Json<Vec<Evidence>>, ApiError> {
-    let evidence = app_state.evidence_repository.list_by_scan(&scan_id).await?;
+    crate::require_permission!(user, Permission::ViewEvidence);
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for evidence listing".to_string())
+    })?;
+    let evidence = app_state
+        .evidence_repository
+        .list_by_scan(&scan_id, company_id)
+        .await?;
     Ok(Json(evidence))
 }

@@ -30,7 +30,9 @@ pub async fn get_metrics(
     State(app_state): State<AppState>,
     Extension(user): Extension<UserContext>,
 ) -> Result<Json<DashboardMetrics>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for metrics".to_string())
+    })?;
     // Get system performance metrics
     let report = app_state.metrics_service.generate_report();
     let system = report.system;

@@ -56,11 +56,13 @@ pub async fn run_discovery(
     Extension(user): Extension<UserContext>,
     payload: Option<Json<RunDiscoveryRequest>>,
 ) -> Result<Json<DiscoveryRun>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for discovery".to_string())
+    })?;
     let config = payload.map(|p| p.0.into());
     let run = app_state
         .discovery_service
-        .run_discovery(company_id, config)
+        .run_discovery(company_id, config, user.user_id)
         .await?;
     Ok(Json(run))
 }
@@ -70,7 +72,9 @@ pub async fn stop_discovery(
     State(app_state): State<AppState>,
     Extension(user): Extension<UserContext>,
 ) -> Result<Json<Value>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for discovery".to_string())
+    })?;
     app_state
         .discovery_service
         .stop_discovery(company_id)
@@ -85,7 +89,9 @@ pub async fn discovery_status(
     State(app_state): State<AppState>,
     Extension(user): Extension<UserContext>,
 ) -> Result<Json<Value>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for discovery".to_string())
+    })?;
     let status = app_state
         .discovery_service
         .get_discovery_status(company_id)
@@ -112,7 +118,9 @@ pub async fn list_discovery_runs(
     Extension(user): Extension<UserContext>,
     Query(query): Query<ListDiscoveryRunsQuery>,
 ) -> Result<Json<Vec<DiscoveryRun>>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for discovery".to_string())
+    })?;
     let runs = app_state
         .discovery_service
         .list_discovery_runs(company_id, query.limit, query.offset)
@@ -126,7 +134,9 @@ pub async fn get_discovery_run(
     Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<DiscoveryRun>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for discovery".to_string())
+    })?;
     let run = app_state
         .discovery_service
         .get_discovery_run(company_id, &id)

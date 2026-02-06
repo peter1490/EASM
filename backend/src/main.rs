@@ -1,8 +1,9 @@
 use axum::{
     routing::{delete, get, patch, post},
-    Extension, Router,
+    Router,
 };
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::signal;
 
 use rust_backend::{config, handlers, middleware, AppState};
@@ -27,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "CORS allow origins: {:?}",
         settings_snapshot.cors_allow_origins
     );
-    let cors_layer = middleware::create_cors_layer(settings_snapshot.cors_allow_origins.clone());
+    let cors_layer = middleware::create_cors_layer(&settings_snapshot);
 
     // Public routes (Health + Auth)
     let public_routes = Router::new()
@@ -57,12 +58,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/auth/login",
             post(handlers::auth_handlers::login_local),
         )
-        .route("/api/auth/logout", post(handlers::auth_handlers::logout));
+        ;
 
     // Protected routes (require API key or session)
     let protected_routes = Router::new()
         // Me endpoint
         .route("/api/auth/me", get(handlers::auth_handlers::get_me))
+        .route("/api/auth/logout", post(handlers::auth_handlers::logout))
         // Company endpoints
         .route(
             "/api/companies",
@@ -351,13 +353,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .patch(handlers::finding_type_config_handlers::update_finding_type_config),
         )
         // Add auth middleware
+        .route_layer(axum::middleware::from_fn(
+            middleware::csrf::csrf_middleware,
+        ))
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::auth::auth_middleware,
         ));
 
     // Build our application with routes
-    let app = Router::new()
+    let mut app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
         .with_state(app_state)
@@ -373,6 +378,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .layer(middleware::create_logging_layer())
         .layer(cors_layer);
+
+    if settings_snapshot.rate_limit_enabled {
+        let rate_limiter = Arc::new(middleware::create_rate_limiter(&settings_snapshot));
+        let ip_rate_limiter = Arc::new(middleware::IpRateLimiter::new(&settings_snapshot));
+        app = app
+            .layer(axum::middleware::from_fn_with_state(
+                ip_rate_limiter,
+                middleware::ip_rate_limit_middleware,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                rate_limiter,
+                middleware::rate_limit_middleware,
+            ));
+    }
 
     // Run the server with graceful shutdown
     let addr = SocketAddr::from(([0, 0, 0, 0], 8000));

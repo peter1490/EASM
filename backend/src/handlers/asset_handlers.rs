@@ -80,7 +80,9 @@ pub async fn create_seed(
     Extension(user): Extension<UserContext>,
     Json(payload): Json<SeedCreate>,
 ) -> Result<Json<Seed>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for assets".to_string())
+    })?;
     let seed = app_state
         .discovery_service
         .create_seed(payload, company_id)
@@ -92,7 +94,9 @@ pub async fn list_seeds(
     State(app_state): State<AppState>,
     Extension(user): Extension<UserContext>,
 ) -> Result<Json<Vec<Seed>>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for assets".to_string())
+    })?;
     let seeds = app_state.discovery_service.list_seeds(company_id).await?;
     Ok(Json(seeds))
 }
@@ -102,7 +106,9 @@ pub async fn delete_seed(
     Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<()>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for assets".to_string())
+    })?;
     app_state
         .discovery_service
         .delete_seed(company_id, &id)
@@ -117,7 +123,9 @@ pub async fn list_assets(
 ) -> Result<Json<AssetListResponse>, ApiError> {
     let limit = params.limit.unwrap_or(25);
     let offset = params.offset.unwrap_or(0);
-    let company_id = user.company_id.unwrap_or_default(); // Fallback for API keys/Global or handle error
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for assets".to_string())
+    })?;
 
     let assets = app_state
         .discovery_service
@@ -147,7 +155,9 @@ pub async fn get_asset(
     Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Asset>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for assets".to_string())
+    })?;
     let asset = app_state
         .discovery_service
         .get_asset(company_id, &id)
@@ -161,7 +171,9 @@ pub async fn get_asset_path(
     Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<Asset>>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for assets".to_string())
+    })?;
     let path = app_state
         .discovery_service
         .get_asset_path(company_id, &id)
@@ -190,7 +202,9 @@ pub async fn update_asset_importance(
         ));
     }
 
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for assets".to_string())
+    })?;
     let asset = app_state
         .asset_repository
         .update_importance(company_id, &id, payload.importance)
@@ -205,7 +219,9 @@ pub async fn get_asset_evolution(
     Path(id): Path<Uuid>,
     Query(params): Query<AssetEvolutionQuery>,
 ) -> Result<Json<AssetEvolutionResponse>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for assets".to_string())
+    })?;
     let limit = params.limit.unwrap_or(50).min(200);
 
     // Ensure asset exists and is accessible
@@ -263,7 +279,9 @@ pub async fn search_assets(
 ) -> Result<Json<AssetSearchResponse>, ApiError> {
     let limit = params.limit.unwrap_or(25).min(500);
     let offset = params.offset.unwrap_or(0);
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for assets".to_string())
+    })?;
 
     // Parse asset type if provided
     let asset_type = params

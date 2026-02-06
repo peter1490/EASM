@@ -9,6 +9,7 @@ pub struct UserContext {
     pub roles: Vec<Role>,
     pub company_id: Option<Uuid>, // Current active company
     pub is_api_key: bool,
+    pub api_key_id: Option<String>,
 }
 
 impl UserContext {
@@ -24,17 +25,19 @@ impl UserContext {
             roles,
             company_id,
             is_api_key: false,
+            api_key_id: None,
         }
     }
 
-    pub fn new_api_key() -> Self {
+    pub fn new_api_key(role: Role, company_id: Option<Uuid>, api_key_id: Option<String>) -> Self {
         // API Keys treated as Admin for now, or we can have granular scopes later
         Self {
             user_id: None,
             email: None,
-            roles: vec![Role::Admin], // API keys have full access by default in this design
-            company_id: None,         // API keys are global or need a way to specify company
+            roles: vec![role],
+            company_id,
             is_api_key: true,
+            api_key_id,
         }
     }
 

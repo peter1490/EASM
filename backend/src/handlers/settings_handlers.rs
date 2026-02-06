@@ -1,5 +1,6 @@
 use axum::{
     extract::{Query, State},
+    http::HeaderMap,
     Extension, Json,
 };
 use chrono::{DateTime, Utc};
@@ -63,6 +64,8 @@ pub struct SettingsUpdateRequest {
     pub dns_concurrency: Option<u32>,
     pub rdns_concurrency: Option<u32>,
     pub max_concurrent_scans: Option<u32>,
+    pub max_active_scans_per_user: Option<u32>,
+    pub max_active_discovery_per_user: Option<u32>,
     pub block_internal_ip_scans: Option<bool>,
 
     // Evidence storage
@@ -89,6 +92,9 @@ pub struct SettingsUpdateRequest {
     pub min_pivot_confidence: Option<f64>,
     pub max_orgs_per_domain: Option<u32>,
     pub max_domains_per_org: Option<u32>,
+
+    // Search
+    pub reindex_min_interval_seconds: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,6 +147,8 @@ pub struct SettingsView {
     pub dns_concurrency: u32,
     pub rdns_concurrency: u32,
     pub max_concurrent_scans: u32,
+    pub max_active_scans_per_user: u32,
+    pub max_active_discovery_per_user: u32,
     pub block_internal_ip_scans: bool,
 
     // Evidence storage
@@ -167,6 +175,9 @@ pub struct SettingsView {
     pub min_pivot_confidence: f64,
     pub max_orgs_per_domain: u32,
     pub max_domains_per_org: u32,
+
+    // Search
+    pub reindex_min_interval_seconds: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -180,11 +191,19 @@ pub async fn get_settings(
     Extension(user): Extension<UserContext>,
     State(state): State<AppState>,
     Query(query): Query<SettingsQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<SettingsResponse>, ApiError> {
     require_admin(&user)?;
 
     let record = state.settings_service.get_managed().await?;
-    let view = to_view(&record.managed, query.reveal_secrets);
+    let reveal = resolve_break_glass(&user, &state, &headers, query.reveal_secrets)?;
+    if reveal {
+        tracing::warn!(
+            user_id = ?user.user_id,
+            "Break-glass secret reveal via settings API"
+        );
+    }
+    let view = to_view(&record.managed, reveal);
 
     Ok(Json(SettingsResponse {
         settings: view,
@@ -197,19 +216,35 @@ pub async fn update_settings(
     Extension(user): Extension<UserContext>,
     State(state): State<AppState>,
     Query(query): Query<SettingsQuery>,
+    headers: HeaderMap,
     Json(update): Json<SettingsUpdateRequest>,
 ) -> Result<Json<SettingsResponse>, ApiError> {
     require_admin(&user)?;
 
+    let reveal = resolve_break_glass(&user, &state, &headers, query.reveal_secrets)?;
+
     let current = state.settings_service.get_managed().await?;
-    let merged = merge_settings(current.managed, update);
+    let current_managed = current.managed.clone();
+    let merged = merge_settings(current_managed.clone(), update);
     state
         .settings_service
         .update_managed(merged, user.user_id)
         .await?;
 
     let updated = state.settings_service.get_managed().await?;
-    let view = to_view(&updated.managed, query.reveal_secrets);
+    if reveal {
+        tracing::warn!(
+            user_id = ?user.user_id,
+            "Break-glass secret reveal via settings API"
+        );
+    }
+    if has_secret_changes(&updated.managed, &current_managed) {
+        tracing::warn!(
+            user_id = ?user.user_id,
+            "Settings secrets updated"
+        );
+    }
+    let view = to_view(&updated.managed, reveal);
 
     Ok(Json(SettingsResponse {
         settings: view,
@@ -224,6 +259,57 @@ fn require_admin(user: &UserContext) -> Result<(), ApiError> {
     } else {
         Err(ApiError::Authorization("Admin role required".to_string()))
     }
+}
+
+fn resolve_break_glass(
+    user: &UserContext,
+    state: &AppState,
+    headers: &HeaderMap,
+    requested: bool,
+) -> Result<bool, ApiError> {
+    if !requested {
+        return Ok(false);
+    }
+
+    if user.is_api_key {
+        return Err(ApiError::Authorization(
+            "Secret reveal requires session-based authentication".to_string(),
+        ));
+    }
+
+    let expected = state
+        .config
+        .load()
+        .break_glass_token
+        .clone()
+        .ok_or_else(|| {
+            ApiError::Authorization("Break-glass token not configured".to_string())
+        })?;
+
+    let provided = headers
+        .get("x-break-glass-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if provided != expected {
+        return Err(ApiError::Authorization(
+            "Invalid break-glass token".to_string(),
+        ));
+    }
+
+    Ok(true)
+}
+
+fn has_secret_changes(updated: &ManagedSettings, current: &ManagedSettings) -> bool {
+    updated.google_client_secret != current.google_client_secret
+        || updated.keycloak_client_secret != current.keycloak_client_secret
+        || updated.certspotter_api_token != current.certspotter_api_token
+        || updated.virustotal_api_key != current.virustotal_api_key
+        || updated.shodan_api_key != current.shodan_api_key
+        || updated.urlscan_api_key != current.urlscan_api_key
+        || updated.otx_api_key != current.otx_api_key
+        || updated.clearbit_api_key != current.clearbit_api_key
+        || updated.opencorporates_api_token != current.opencorporates_api_token
 }
 
 fn to_view(settings: &ManagedSettings, reveal_secrets: bool) -> SettingsView {
@@ -256,6 +342,8 @@ fn to_view(settings: &ManagedSettings, reveal_secrets: bool) -> SettingsView {
         dns_concurrency: settings.dns_concurrency,
         rdns_concurrency: settings.rdns_concurrency,
         max_concurrent_scans: settings.max_concurrent_scans,
+        max_active_scans_per_user: settings.max_active_scans_per_user,
+        max_active_discovery_per_user: settings.max_active_discovery_per_user,
         block_internal_ip_scans: settings.block_internal_ip_scans,
         max_evidence_bytes: settings.max_evidence_bytes,
         evidence_allowed_types: settings.evidence_allowed_types.clone(),
@@ -274,6 +362,7 @@ fn to_view(settings: &ManagedSettings, reveal_secrets: bool) -> SettingsView {
         min_pivot_confidence: settings.min_pivot_confidence,
         max_orgs_per_domain: settings.max_orgs_per_domain,
         max_domains_per_org: settings.max_domains_per_org,
+        reindex_min_interval_seconds: settings.reindex_min_interval_seconds,
     }
 }
 
@@ -381,6 +470,12 @@ fn merge_settings(mut current: ManagedSettings, update: SettingsUpdateRequest) -
     if let Some(v) = update.max_concurrent_scans {
         current.max_concurrent_scans = v;
     }
+    if let Some(v) = update.max_active_scans_per_user {
+        current.max_active_scans_per_user = v;
+    }
+    if let Some(v) = update.max_active_discovery_per_user {
+        current.max_active_discovery_per_user = v;
+    }
     if let Some(v) = update.block_internal_ip_scans {
         current.block_internal_ip_scans = v;
     }
@@ -440,6 +535,10 @@ fn merge_settings(mut current: ManagedSettings, update: SettingsUpdateRequest) -
     }
     if let Some(v) = update.max_domains_per_org {
         current.max_domains_per_org = v;
+    }
+
+    if let Some(v) = update.reindex_min_interval_seconds {
+        current.reindex_min_interval_seconds = v;
     }
 
     current.normalized()

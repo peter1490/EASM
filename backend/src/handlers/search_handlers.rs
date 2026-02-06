@@ -4,7 +4,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use uuid::Uuid;
+use std::time::Duration;
 
 use crate::{
     auth::context::UserContext,
@@ -36,7 +36,9 @@ pub async fn search_assets(
     Extension(user): Extension<UserContext>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<SearchResponse<IndexedAsset>>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for search".to_string())
+    })?;
     let search_service = app_state
         .search_service
         .as_ref()
@@ -65,7 +67,9 @@ pub async fn search_findings(
     Extension(user): Extension<UserContext>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<SearchResponse<IndexedFinding>>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for search".to_string())
+    })?;
     let search_service = app_state
         .search_service
         .as_ref()
@@ -93,7 +97,17 @@ pub async fn reindex_all(
     State(app_state): State<AppState>,
     Extension(user): Extension<UserContext>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for reindex".to_string())
+    })?;
+    let settings = app_state.config.load();
+    app_state
+        .reindex_limiter
+        .check_and_update(
+            company_id,
+            Duration::from_secs(settings.reindex_min_interval_seconds as u64),
+        )
+        .await?;
     let search_service = app_state
         .search_service
         .as_ref()

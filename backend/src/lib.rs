@@ -27,8 +27,8 @@ use crate::{
     services::external::{DnsResolver, ExternalServicesManager, HttpAnalyzer},
     services::{
         AuthService, DiscoveryScheduleService, DiscoveryService, DriftService, DriftServiceImpl,
-        ElasticsearchService, MetricsService, RiskService, ScanService, SearchService,
-        SecurityScanService, TagService, TaskManager,
+        ElasticsearchService, MetricsService, ReindexLimiter, RiskService, ScanService,
+        SearchService, SecurityScanService, TagService, TaskManager,
     },
 };
 use axum::extract::FromRef;
@@ -59,6 +59,7 @@ pub struct AppState {
     pub drift_service: Arc<dyn DriftService + Send + Sync>,
     pub search_service: Option<Arc<dyn SearchService + Send + Sync>>,
     pub metrics_service: Arc<MetricsService>,
+    pub reindex_limiter: Arc<ReindexLimiter>,
     pub auth_service: Arc<AuthService>,
     pub risk_service: Arc<RiskService>,
     pub tag_service: Arc<TagService>,
@@ -274,6 +275,7 @@ impl AppState {
 
         // Create metrics service
         let metrics_service = Arc::new(MetricsService::new());
+        let reindex_limiter = Arc::new(ReindexLimiter::new());
 
         // Create auth service
         let auth_service = Arc::new(AuthService::new(
@@ -298,6 +300,7 @@ impl AppState {
             drift_service,
             search_service,
             metrics_service,
+            reindex_limiter,
             auth_service,
             risk_service,
             tag_service,

@@ -29,7 +29,9 @@ pub async fn list_tags(
     Extension(user): Extension<UserContext>,
     Query(params): Query<TagListQuery>,
 ) -> Result<Json<TagListResponse>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for tags".to_string())
+    })?;
     let response = app_state
         .tag_service
         .list_tags(company_id, params.limit, params.offset)
@@ -43,7 +45,9 @@ pub async fn get_tag(
     Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Tag>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for tags".to_string())
+    })?;
     let tag = app_state
         .tag_service
         .get_tag(company_id, &id)
@@ -68,7 +72,9 @@ pub async fn create_tag(
         ));
     }
 
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for tags".to_string())
+    })?;
     let tag = app_state.tag_service.create_tag(company_id, payload).await?;
     Ok(Json(tag))
 }
@@ -90,7 +96,9 @@ pub async fn update_tag(
         ));
     }
 
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for tags".to_string())
+    })?;
     let tag = app_state
         .tag_service
         .update_tag(company_id, &id, payload)
@@ -111,7 +119,9 @@ pub async fn delete_tag(
         ));
     }
 
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for tags".to_string())
+    })?;
     app_state.tag_service.delete_tag(company_id, &id).await?;
     Ok(Json(()))
 }
@@ -122,7 +132,9 @@ pub async fn get_asset_tags(
     Extension(user): Extension<UserContext>,
     Path(asset_id): Path<Uuid>,
 ) -> Result<Json<Vec<AssetTagDetail>>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for tags".to_string())
+    })?;
     let tags = app_state
         .tag_service
         .get_asset_tags(company_id, &asset_id)
@@ -152,7 +164,9 @@ pub async fn tag_asset(
         ));
     }
 
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for tags".to_string())
+    })?;
     app_state
         .tag_service
         .tag_asset(company_id, &asset_id, &payload.tag_id)
@@ -176,7 +190,9 @@ pub async fn untag_asset(
         ));
     }
 
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for tags".to_string())
+    })?;
     app_state
         .tag_service
         .untag_asset(company_id, &asset_id, &tag_id)
@@ -197,7 +213,9 @@ pub async fn run_auto_tag_for_tag(
         ));
     }
 
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for tags".to_string())
+    })?;
     let result = app_state
         .tag_service
         .run_auto_tag_for_tag(company_id, &tag_id)
@@ -217,7 +235,9 @@ pub async fn run_auto_tag_all(
         ));
     }
 
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for tags".to_string())
+    })?;
     let result = app_state.tag_service.run_auto_tag_all(company_id).await?;
     Ok(Json(result))
 }

@@ -17,12 +17,7 @@ pub struct User {
     pub password_hash: Option<String>,
     #[serde(default)]
     pub display_name: Option<String>,
-    #[serde(default = "default_is_active")]
     pub is_active: bool,
-}
-
-fn default_is_active() -> bool {
-    true
 }
 
 #[derive(Debug, sqlx::FromRow)]

@@ -63,7 +63,9 @@ pub async fn create_blacklist_entry(
         ));
     }
 
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for blacklist".to_string())
+    })?;
 
     // Create the blacklist entry
     let entry = app_state
@@ -106,7 +108,9 @@ pub async fn list_blacklist(
     Extension(user): Extension<UserContext>,
     Query(query): Query<BlacklistQuery>,
 ) -> Result<Json<BlacklistListResponse>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for blacklist".to_string())
+    })?;
     let object_type = query
         .object_type
         .as_ref()
@@ -137,7 +141,9 @@ pub async fn get_blacklist_entry(
     Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<BlacklistEntry>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for blacklist".to_string())
+    })?;
     let entry = app_state
         .blacklist_repository
         .get_by_id(company_id, &id)
@@ -164,7 +170,9 @@ pub async fn update_blacklist_entry(
         ));
     }
 
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for blacklist".to_string())
+    })?;
     let entry = app_state
         .blacklist_repository
         .update(company_id, &id, &payload)
@@ -189,7 +197,9 @@ pub async fn delete_blacklist_entry(
         ));
     }
 
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for blacklist".to_string())
+    })?;
     app_state.blacklist_repository.delete(company_id, &id).await?;
 
     Ok(Json(json!({
@@ -210,7 +220,9 @@ pub async fn check_blacklist(
     Extension(user): Extension<UserContext>,
     Json(payload): Json<BlacklistCheckRequest>,
 ) -> Result<Json<BlacklistCheckResult>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for blacklist".to_string())
+    })?;
     let object_value = payload.object_value.trim();
 
     match payload.object_type {
@@ -304,7 +316,9 @@ pub async fn blacklist_from_asset(
     }
 
     // Get the asset
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for blacklist".to_string())
+    })?;
     let asset = app_state
         .asset_repository
         .get_by_id(company_id, &asset_id)
@@ -375,7 +389,9 @@ pub async fn get_blacklist_stats(
     State(app_state): State<AppState>,
     Extension(user): Extension<UserContext>,
 ) -> Result<Json<BlacklistStats>, ApiError> {
-    let company_id = user.company_id.unwrap_or_default();
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for blacklist".to_string())
+    })?;
     let total_entries = app_state.blacklist_repository.count(company_id).await?;
 
     // Get counts by type
@@ -388,10 +404,6 @@ pub async fn get_blacklist_stats(
         BlacklistObjectType::Cidr,
         BlacklistObjectType::Certificate,
     ] {
-        let entries = app_state
-            .blacklist_repository
-            .list_by_type(&obj_type, company_id, 0, 0)
-            .await?;
         // This is not efficient but works for now - ideally we'd have a count_by_type method
         let count = app_state
             .blacklist_repository

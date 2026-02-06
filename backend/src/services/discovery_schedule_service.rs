@@ -177,7 +177,12 @@ impl DiscoveryScheduleService {
             let config = Self::parse_config(schedule.config.clone());
             match self
                 .discovery_service
-                .run_discovery_with_trigger(schedule.company_id, config, TriggerType::Scheduled)
+                .run_discovery_with_trigger(
+                    schedule.company_id,
+                    config,
+                    TriggerType::Scheduled,
+                    None,
+                )
                 .await
             {
                 Ok(_) => {

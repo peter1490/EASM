@@ -96,6 +96,28 @@ static COMMON_INFRASTRUCTURE_ORGS: &[&str] = &[
     "co.",
 ];
 
+/// Provider keywords used to classify cloud/WAF infrastructure IPs.
+static KNOWN_CLOUD_PROVIDER_KEYWORDS: &[&str] = &[
+    "amazon",
+    "aws",
+    "cloudfront",
+    "google",
+    "google cloud",
+    "gcp",
+    "cloudflare",
+    "microsoft",
+    "azure",
+    "akamai",
+    "fastly",
+    "digitalocean",
+    "linode",
+    "vultr",
+    "ovh",
+    "hetzner",
+    "incapsula",
+    "imperva",
+];
+
 /// Discovery run status tracking (in-memory for real-time updates)
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryStatus {
@@ -145,6 +167,7 @@ pub struct DiscoveryService {
 
     // State
     status: Arc<Mutex<HashMap<Uuid, DiscoveryStatus>>>,
+    ip_cloud_provider_cache: Arc<Mutex<HashMap<String, bool>>>,
 }
 
 impl DiscoveryService {
@@ -180,6 +203,7 @@ impl DiscoveryService {
             settings,
             confidence_scorer: Arc::new(ConfidenceScorer::new()),
             status: Arc::new(Mutex::new(HashMap::new())),
+            ip_cloud_provider_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -292,10 +316,7 @@ impl DiscoveryService {
 
     pub async fn get_discovery_status(&self, company_id: Uuid) -> DiscoveryStatus {
         let statuses = self.status.lock().await;
-        statuses
-            .get(&company_id)
-            .cloned()
-            .unwrap_or_default()
+        statuses.get(&company_id).cloned().unwrap_or_default()
     }
 
     pub async fn get_discovery_run(
@@ -441,10 +462,7 @@ impl DiscoveryService {
     pub async fn stop_discovery(&self, company_id: Uuid) -> Result<(), ApiError> {
         let (run_id, task_id) = {
             let statuses = self.status.lock().await;
-            let status = statuses
-                .get(&company_id)
-                .cloned()
-                .unwrap_or_default();
+            let status = statuses.get(&company_id).cloned().unwrap_or_default();
             if !status.is_running {
                 return Err(ApiError::Validation("Discovery is not running".to_string()));
             }
@@ -998,6 +1016,9 @@ impl DiscoveryService {
         // Step 1: Subdomain enumeration from multiple sources
         match self.external_services.enumerate_subdomains(domain).await {
             Ok(subdomain_result) => {
+                self.cache_ip_owner_hints(&subdomain_result.shodan_ip_owners)
+                    .await;
+
                 for subdomain in &subdomain_result.subdomains {
                     if subdomain == domain {
                         continue; // Skip the main domain
@@ -1102,20 +1123,8 @@ impl DiscoveryService {
                     )
                     .await?;
 
-                    // Queue IP for further discovery (reverse DNS) if depth allows
-                    // NOTE: Pass domain_asset_id as parent (not the IP's own ID!)
-                    if depth < max_depth {
-                        self.queue_for_discovery(
-                            run_id,
-                            QueueItemType::Ip,
-                            &ip_str,
-                            seed_id,
-                            Some(domain_asset_id),
-                            depth + 1,
-                            2, // Lower priority for IP reverse lookups
-                        )
-                        .await?;
-                    }
+                    // IP recursion is intentionally disabled: discovered IPs are persisted,
+                    // but never enqueued for further recursive discovery.
                 }
             }
             Err(e) => {
@@ -1245,6 +1254,8 @@ impl DiscoveryService {
             .await
         {
             Ok(extracted) => {
+                self.cache_ip_owner_hints(&extracted.ip_owners).await;
+
                 // Process IPs
                 for ip in &extracted.ips {
                     let asset = self
@@ -1415,6 +1426,8 @@ impl DiscoveryService {
             .await
         {
             Ok(extracted) => {
+                self.cache_ip_owner_hints(&extracted.ip_owners).await;
+
                 for ip in &extracted.ips {
                     let asset = self
                         .create_or_update_asset(
@@ -1532,10 +1545,15 @@ impl DiscoveryService {
         ip: &str,
         seed_id: Option<Uuid>,
         parent_asset_id: Option<Uuid>,
-        depth: i32,
-        max_depth: i32,
+        _depth: i32,
+        _max_depth: i32,
     ) -> Result<DiscoveryResult, ApiError> {
         let mut result = DiscoveryResult::default();
+
+        if self.is_item_blacklisted(company_id, "ip", ip).await? {
+            tracing::info!("Skipping blacklisted IP '{}' during discovery", ip);
+            return Ok(result);
+        }
 
         // Create or get IP asset
         let ip_asset = self
@@ -1589,21 +1607,6 @@ impl DiscoveryService {
                             0.7,
                         )
                         .await?;
-
-                        // Queue discovered domain for further discovery if depth allows
-                        // NOTE: Pass ip_asset_id as parent (not the domain's own ID!)
-                        if depth < max_depth {
-                            self.queue_for_discovery(
-                                run_id,
-                                QueueItemType::Domain,
-                                &hostname,
-                                seed_id,
-                                Some(ip_asset_id),
-                                depth + 1,
-                                3, // Lower priority for reverse DNS discovered domains
-                            )
-                            .await?;
-                        }
                     }
                 }
                 Err(e) => {
@@ -1682,6 +1685,7 @@ impl DiscoveryService {
                     .maybe_trigger_auto_scan(
                         company_id,
                         asset.id,
+                        identifier,
                         &asset_type,
                         confidence,
                         Some(auto_scan_threshold),
@@ -1770,6 +1774,65 @@ impl DiscoveryService {
         false
     }
 
+    fn is_known_cloud_provider_name(&self, owner: &str) -> bool {
+        let owner_lower = owner.to_lowercase();
+        KNOWN_CLOUD_PROVIDER_KEYWORDS
+            .iter()
+            .any(|keyword| owner_lower.contains(keyword))
+    }
+
+    async fn cache_ip_owner_hints(&self, ip_owners: &HashMap<String, String>) {
+        if ip_owners.is_empty() {
+            return;
+        }
+
+        let mut cache = self.ip_cloud_provider_cache.lock().await;
+        for (ip, owner) in ip_owners {
+            cache.insert(ip.clone(), self.is_known_cloud_provider_name(owner));
+        }
+    }
+
+    /// Returns true if the IP belongs to known cloud/WAF infrastructure.
+    /// Uses owner hints first, then a Shodan host lookup fallback.
+    async fn is_cloud_or_waf_ip(&self, ip: &str, owner_hint: Option<&str>) -> bool {
+        if let Some(owner) = owner_hint {
+            let is_cloud_provider = self.is_known_cloud_provider_name(owner);
+            let mut cache = self.ip_cloud_provider_cache.lock().await;
+            cache.insert(ip.to_string(), is_cloud_provider);
+            return is_cloud_provider;
+        }
+
+        {
+            let cache = self.ip_cloud_provider_cache.lock().await;
+            if let Some(cached) = cache.get(ip).copied() {
+                return cached;
+            }
+        }
+
+        match self.external_services.get_shodan_host_info(ip).await {
+            Ok(Some(host_info)) => {
+                let owner = host_info.org.or(host_info.isp).unwrap_or_default();
+                let is_cloud_provider = self.is_known_cloud_provider_name(&owner);
+                let mut cache = self.ip_cloud_provider_cache.lock().await;
+                cache.insert(ip.to_string(), is_cloud_provider);
+                is_cloud_provider
+            }
+            Ok(None) => {
+                let mut cache = self.ip_cloud_provider_cache.lock().await;
+                cache.insert(ip.to_string(), false);
+                false
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Shodan host lookup failed for {} while classifying infrastructure IP: {}",
+                    ip,
+                    e
+                );
+                false
+            }
+        }
+    }
+
     /// Calculate confidence for subdomain discovery
     fn calculate_subdomain_confidence(&self, sources: &HashMap<String, Vec<String>>) -> f64 {
         let source_count = sources.len();
@@ -1783,6 +1846,7 @@ impl DiscoveryService {
         &self,
         company_id: Uuid,
         asset_id: Uuid,
+        asset_identifier: &str,
         asset_type: &AssetType,
         confidence: f64,
         auto_scan_threshold: Option<f64>,
@@ -1814,6 +1878,17 @@ impl DiscoveryService {
                 asset_id,
                 confidence,
                 threshold
+            );
+            return Ok(());
+        }
+
+        // Keep discovery auto-scans away from cloud/WAF infrastructure IPs.
+        if matches!(asset_type, AssetType::Ip)
+            && self.is_cloud_or_waf_ip(asset_identifier, None).await
+        {
+            tracing::info!(
+                "Skipping auto-scan for cloud/WAF IP asset {}",
+                asset_identifier
             );
             return Ok(());
         }
@@ -1884,6 +1959,7 @@ impl Clone for DiscoveryService {
             settings: Arc::clone(&self.settings),
             confidence_scorer: Arc::clone(&self.confidence_scorer),
             status: Arc::clone(&self.status),
+            ip_cloud_provider_cache: Arc::clone(&self.ip_cloud_provider_cache),
         }
     }
 }

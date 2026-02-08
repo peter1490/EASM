@@ -13,11 +13,7 @@ pub trait EvidenceRepository {
         evidence: &EvidenceCreate,
         company_id: Uuid,
     ) -> Result<Evidence, ApiError>;
-    async fn get_by_id(
-        &self,
-        id: &Uuid,
-        company_id: Uuid,
-    ) -> Result<Option<Evidence>, ApiError>;
+    async fn get_by_id(&self, id: &Uuid, company_id: Uuid) -> Result<Option<Evidence>, ApiError>;
     async fn list_by_scan(
         &self,
         scan_id: &Uuid,
@@ -121,11 +117,7 @@ impl EvidenceRepository for SqlxEvidenceRepository {
         result.ok_or_else(|| ApiError::NotFound("Scan not found for company".to_string()))
     }
 
-    async fn get_by_id(
-        &self,
-        id: &Uuid,
-        company_id: Uuid,
-    ) -> Result<Option<Evidence>, ApiError> {
+    async fn get_by_id(&self, id: &Uuid, company_id: Uuid) -> Result<Option<Evidence>, ApiError> {
         let result = sqlx::query_as::<_, Evidence>(
             r#"
             SELECT e.id, e.scan_id, e.filename, e.content_type, e.file_size, e.file_path, e.created_at
@@ -492,13 +484,12 @@ mod tests {
 
         let company_a = Uuid::nil();
         let company_b = Uuid::new_v4();
-        let _ = sqlx::query(
-            "INSERT INTO companies (id, name) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        )
-        .bind(company_b)
-        .bind("Company B")
-        .execute(&pool)
-        .await;
+        let _ =
+            sqlx::query("INSERT INTO companies (id, name) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+                .bind(company_b)
+                .bind("Company B")
+                .execute(&pool)
+                .await;
 
         let scan_id = Uuid::new_v4();
         insert_scan(&pool, scan_id, company_a).await;

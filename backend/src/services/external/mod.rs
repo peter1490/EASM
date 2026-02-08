@@ -14,11 +14,13 @@ pub mod integration_tests;
 pub use certspotter::{CertSpotterCertificate, CertSpotterClient, CertSpotterIssuance};
 pub use crtsh::CrtShClient;
 pub use dns::{DnsConfig, DnsResolver, DnsResult, ReverseDnsResult};
-pub use euvd::{EuvdClient, EuvdVulnerability, EuvdSearchParams, EuvdReference};
+pub use euvd::{EuvdClient, EuvdReference, EuvdSearchParams, EuvdVulnerability};
 pub use http::{HttpAnalyzer, HttpConfig, HttpProbeResult, TlsCertificateResult, TlsInfo};
 pub use manager::{ExternalServicesManager, SubdomainEnumerationResult, ThreatIntelligenceResult};
 pub use rate_limited_client::RateLimitedClient;
-pub use shodan::{ShodanCertificateInfo, ShodanClient, ShodanExtractedAssets, ShodanResult};
+pub use shodan::{
+    ShodanCertificateInfo, ShodanClient, ShodanExtractedAssets, ShodanHostInfo, ShodanResult,
+};
 pub use virustotal::{VirusTotalClient, VirusTotalDomainReport, VirusTotalIpReport};
 
 // Type aliases for convenience

@@ -60,6 +60,8 @@ pub struct ShodanHostInfo {
 #[derive(Debug, Clone, Default)]
 pub struct ShodanExtractedAssets {
     pub ips: HashSet<String>,
+    /// IP -> owner hint (org/ISP), used to avoid extra lookups downstream.
+    pub ip_owners: HashMap<String, String>,
     pub domains: HashSet<String>,
     pub asns: HashSet<String>,
     pub organizations: HashSet<String>,
@@ -277,6 +279,27 @@ impl ShodanClient {
         for result in results {
             // Extract IP addresses
             extracted.ips.insert(result.ip_str.clone());
+
+            // Keep a per-IP owner hint for downstream filtering.
+            // Prefer org, fallback to ISP.
+            let owner_hint = result
+                .org
+                .as_ref()
+                .filter(|org| !org.trim().is_empty() && org.trim().len() > 2)
+                .cloned()
+                .or_else(|| {
+                    result
+                        .isp
+                        .as_ref()
+                        .filter(|isp| !isp.trim().is_empty() && isp.trim().len() > 2)
+                        .cloned()
+                });
+            if let Some(owner) = owner_hint {
+                extracted
+                    .ip_owners
+                    .entry(result.ip_str.clone())
+                    .or_insert(owner);
+            }
 
             // Extract hostnames/domains
             if let Some(ref hostnames) = result.hostnames {

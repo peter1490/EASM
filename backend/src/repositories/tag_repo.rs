@@ -62,7 +62,7 @@ pub trait TagRepository: Send + Sync {
         asset_id: &Uuid,
         tag_id: &Uuid,
     ) -> Result<bool, ApiError>;
-    
+
     // Bulk operations for auto-tagging
     async fn bulk_tag_assets(
         &self,
@@ -226,12 +226,10 @@ impl TagRepository for SqlxTagRepository {
     }
 
     async fn count(&self, company_id: Uuid) -> Result<i64, ApiError> {
-        let count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM tags WHERE company_id = $1",
-        )
-        .bind(company_id)
-        .fetch_one(&self.pool)
-        .await?;
+        let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tags WHERE company_id = $1")
+            .bind(company_id)
+            .fetch_one(&self.pool)
+            .await?;
 
         Ok(count)
     }
@@ -245,9 +243,10 @@ impl TagRepository for SqlxTagRepository {
         let now = chrono::Utc::now();
 
         // Get current tag to merge with updates
-        let current = self.get_by_id(company_id, id).await?.ok_or_else(|| {
-            ApiError::NotFound(format!("Tag {} not found", id))
-        })?;
+        let current = self
+            .get_by_id(company_id, id)
+            .await?
+            .ok_or_else(|| ApiError::NotFound(format!("Tag {} not found", id)))?;
 
         let name = update.name.as_ref().unwrap_or(&current.name);
         let description = if update.description.is_some() {
@@ -361,10 +360,10 @@ impl TagRepository for SqlxTagRepository {
             "DELETE FROM asset_tags WHERE company_id = $1 AND asset_id = $2 AND tag_id = $3",
         )
         .bind(company_id)
-            .bind(asset_id)
-            .bind(tag_id)
-            .execute(&self.pool)
-            .await?;
+        .bind(asset_id)
+        .bind(tag_id)
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }

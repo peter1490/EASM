@@ -57,8 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/auth/login",
             post(handlers::auth_handlers::login_local),
-        )
-        ;
+        );
 
     // Protected routes (require API key or session)
     let protected_routes = Router::new()
@@ -353,9 +352,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .patch(handlers::finding_type_config_handlers::update_finding_type_config),
         )
         // Add auth middleware
-        .route_layer(axum::middleware::from_fn(
-            middleware::csrf::csrf_middleware,
-        ))
+        .route_layer(axum::middleware::from_fn(middleware::csrf::csrf_middleware))
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::auth::auth_middleware,

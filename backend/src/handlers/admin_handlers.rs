@@ -123,14 +123,23 @@ pub async fn create_user(
     }
 
     // Check if user already exists
-    if state.user_repository.find_by_email(&req.email).await?.is_some() {
-        return Err(ApiError::Validation("User with this email already exists".to_string()));
+    if state
+        .user_repository
+        .find_by_email(&req.email)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::Validation(
+            "User with this email already exists".to_string(),
+        ));
     }
 
     // Hash password if provided
     let password_hash = if let Some(password) = &req.password {
         if password.len() < 8 {
-            return Err(ApiError::Validation("Password must be at least 8 characters".to_string()));
+            return Err(ApiError::Validation(
+                "Password must be at least 8 characters".to_string(),
+            ));
         }
         Some(hash_password(password)?)
     } else {
@@ -190,7 +199,9 @@ pub async fn update_user(
         // Check if email is taken by another user
         if let Some(existing) = state.user_repository.find_by_email(email).await? {
             if existing.id != user_id {
-                return Err(ApiError::Validation("Email already in use by another user".to_string()));
+                return Err(ApiError::Validation(
+                    "Email already in use by another user".to_string(),
+                ));
             }
         }
     }
@@ -198,10 +209,15 @@ pub async fn update_user(
     // Update password if provided
     if let Some(password) = &req.password {
         if password.len() < 8 {
-            return Err(ApiError::Validation("Password must be at least 8 characters".to_string()));
+            return Err(ApiError::Validation(
+                "Password must be at least 8 characters".to_string(),
+            ));
         }
         let password_hash = hash_password(password)?;
-        state.user_repository.update_password(user_id, &password_hash).await?;
+        state
+            .user_repository
+            .update_password(user_id, &password_hash)
+            .await?;
     }
 
     // Update user fields
@@ -231,7 +247,9 @@ pub async fn delete_user(
 
     // Prevent self-deletion
     if context.user_id == Some(user_id) {
-        return Err(ApiError::Validation("Cannot delete your own account".to_string()));
+        return Err(ApiError::Validation(
+            "Cannot delete your own account".to_string(),
+        ));
     }
 
     // Check if user exists

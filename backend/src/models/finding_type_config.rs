@@ -70,4 +70,3 @@ pub fn get_severity_score(severity: &str) -> f64 {
         .map(|(_, score)| *score)
         .unwrap_or(1.0)
 }
-

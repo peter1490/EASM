@@ -1,6 +1,6 @@
 use crate::auth::context::UserContext;
-use crate::middleware::rate_limit::extract_client_ip;
 use crate::auth::session::UserSession;
+use crate::middleware::rate_limit::extract_client_ip;
 use crate::AppState;
 use axum::{
     extract::{Request, State},
@@ -69,7 +69,12 @@ pub async fn auth_middleware(
             if !settings.api_key_ip_allowlist.is_empty() {
                 let client_ip = extract_client_ip(&headers);
                 let ip_allowed = client_ip
-                    .map(|ip| settings.api_key_ip_allowlist.iter().any(|net| net.contains(&ip)))
+                    .map(|ip| {
+                        settings
+                            .api_key_ip_allowlist
+                            .iter()
+                            .any(|net| net.contains(&ip))
+                    })
                     .unwrap_or(false);
                 if !ip_allowed {
                     tracing::warn!(
@@ -98,11 +103,8 @@ pub async fn auth_middleware(
                 None => Some(scope.company_id),
             };
 
-            let context = UserContext::new_api_key(
-                scope.role.clone(),
-                company_id,
-                Some(scope.key_id()),
-            );
+            let context =
+                UserContext::new_api_key(scope.role.clone(), company_id, Some(scope.key_id()));
             request.extensions_mut().insert(context);
             return Ok(next.run(request).await);
         }

@@ -369,11 +369,7 @@ pub trait SecurityFindingRepository: Send + Sync {
         resolved_by: Uuid,
         company_id: Uuid,
     ) -> Result<SecurityFinding, ApiError>;
-    async fn resolve_by_ids(
-        &self,
-        ids: &[Uuid],
-        company_id: Uuid,
-    ) -> Result<u64, ApiError>;
+    async fn resolve_by_ids(&self, ids: &[Uuid], company_id: Uuid) -> Result<u64, ApiError>;
     async fn count_by_severity(
         &self,
         company_id: Uuid,
@@ -650,11 +646,7 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         Ok(row)
     }
 
-    async fn resolve_by_ids(
-        &self,
-        ids: &[Uuid],
-        company_id: Uuid,
-    ) -> Result<u64, ApiError> {
+    async fn resolve_by_ids(&self, ids: &[Uuid], company_id: Uuid) -> Result<u64, ApiError> {
         if ids.is_empty() {
             return Ok(0);
         }

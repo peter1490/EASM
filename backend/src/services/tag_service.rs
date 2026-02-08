@@ -76,8 +76,7 @@ impl TagService {
         }
 
         // Validate rule if provided
-        if let (Some(rule_type), Some(rule_value)) =
-            (&tag_create.rule_type, &tag_create.rule_value)
+        if let (Some(rule_type), Some(rule_value)) = (&tag_create.rule_type, &tag_create.rule_value)
         {
             self.validate_rule(rule_type, rule_value)?;
         }
@@ -183,12 +182,7 @@ impl TagService {
         }
 
         // Verify tag exists
-        if self
-            .tag_repo
-            .get_by_id(company_id, tag_id)
-            .await?
-            .is_none()
-        {
+        if self.tag_repo.get_by_id(company_id, tag_id).await?.is_none() {
             return Err(ApiError::NotFound(format!("Tag {} not found", tag_id)));
         }
 
@@ -330,7 +324,9 @@ impl TagService {
             for asset in &assets {
                 let matches = match rule_type {
                     "regex" => self.matches_regex(rule_value, &asset.identifier, &asset.asset_type),
-                    "ip_range" => self.matches_ip_range(rule_value, &asset.identifier, &asset.asset_type),
+                    "ip_range" => {
+                        self.matches_ip_range(rule_value, &asset.identifier, &asset.asset_type)
+                    }
                     _ => {
                         errors.push(format!("Unknown rule type: {}", rule_type));
                         continue;
@@ -350,10 +346,7 @@ impl TagService {
                     }
                     Ok(false) => {}
                     Err(e) => {
-                        errors.push(format!(
-                            "Error matching asset {}: {}",
-                            asset.identifier, e
-                        ));
+                        errors.push(format!("Error matching asset {}: {}", asset.identifier, e));
                     }
                 }
             }
@@ -395,9 +388,7 @@ impl TagService {
         for tag in tags_with_rules {
             if let (Some(rule_type), Some(rule_value)) = (&tag.rule_type, &tag.rule_value) {
                 let matches = match rule_type.as_str() {
-                    "regex" => {
-                        self.matches_regex(rule_value, &asset.identifier, &asset.asset_type)
-                    }
+                    "regex" => self.matches_regex(rule_value, &asset.identifier, &asset.asset_type),
                     "ip_range" => {
                         self.matches_ip_range(rule_value, &asset.identifier, &asset.asset_type)
                     }
@@ -436,9 +427,8 @@ impl TagService {
     fn validate_rule(&self, rule_type: &str, rule_value: &str) -> Result<(), ApiError> {
         match rule_type {
             "regex" => {
-                Regex::new(rule_value).map_err(|e| {
-                    ApiError::Validation(format!("Invalid regex pattern: {}", e))
-                })?;
+                Regex::new(rule_value)
+                    .map_err(|e| ApiError::Validation(format!("Invalid regex pattern: {}", e)))?;
             }
             "ip_range" => {
                 // Support multiple CIDR ranges separated by comma
@@ -470,7 +460,10 @@ impl TagService {
     ) -> Result<bool, ApiError> {
         // Only apply regex to string-based assets
         match asset_type {
-            AssetType::Domain | AssetType::Certificate | AssetType::Organization | AssetType::Asn => {
+            AssetType::Domain
+            | AssetType::Certificate
+            | AssetType::Organization
+            | AssetType::Asn => {
                 let regex = Regex::new(pattern)
                     .map_err(|e| ApiError::Validation(format!("Invalid regex: {}", e)))?;
                 Ok(regex.is_match(identifier))
@@ -495,9 +488,9 @@ impl TagService {
         }
 
         // Parse the IP address
-        let ip: IpAddr = identifier
-            .parse()
-            .map_err(|e| ApiError::Validation(format!("Invalid IP address '{}': {}", identifier, e)))?;
+        let ip: IpAddr = identifier.parse().map_err(|e| {
+            ApiError::Validation(format!("Invalid IP address '{}': {}", identifier, e))
+        })?;
 
         // Support multiple CIDR ranges separated by comma
         for cidr in cidr_value.split(',') {

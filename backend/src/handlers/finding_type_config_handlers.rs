@@ -179,4 +179,3 @@ pub async fn get_scoring_map(
 
     Ok(Json(formatted))
 }
-

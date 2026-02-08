@@ -10,8 +10,11 @@ use crate::{
 
 #[async_trait]
 pub trait CompanyRepository: Send + Sync {
-    async fn create(&self, company: &CompanyCreate, owner_user_id: Uuid)
-        -> Result<Company, ApiError>;
+    async fn create(
+        &self,
+        company: &CompanyCreate,
+        owner_user_id: Uuid,
+    ) -> Result<Company, ApiError>;
     async fn get_by_id(&self, id: Uuid) -> Result<Option<Company>, ApiError>;
     async fn list_all(&self) -> Result<Vec<Company>, ApiError>;
     async fn list_for_user(&self, user_id: Uuid) -> Result<Vec<CompanyWithRole>, ApiError>;

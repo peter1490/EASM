@@ -63,10 +63,7 @@ impl DnsResolver {
     pub async fn with_config(config: DnsConfig) -> Result<Self, ApiError> {
         let (resolver_config, mut resolver_opts) =
             trust_dns_resolver::system_conf::read_system_conf().map_err(|e| {
-                ApiError::ExternalService(format!(
-                    "Failed to read system DNS configuration: {}",
-                    e
-                ))
+                ApiError::ExternalService(format!("Failed to read system DNS configuration: {}", e))
             })?;
         resolver_opts.timeout = config.query_timeout;
         resolver_opts.attempts = 2;
@@ -326,10 +323,7 @@ impl DnsResolver {
 
         let result = timeout(query_timeout, async move {
             resolver.ns_lookup(&domain_owned).await.map_err(|e| {
-                ApiError::ExternalService(format!(
-                    "NS lookup failed for {}: {}",
-                    domain_owned, e
-                ))
+                ApiError::ExternalService(format!("NS lookup failed for {}: {}", domain_owned, e))
             })
         })
         .await
@@ -361,7 +355,7 @@ impl DnsResolver {
 
         let result = timeout(query_timeout, async move {
             use trust_dns_resolver::proto::rr::RecordType;
-            
+
             resolver
                 .lookup(&domain_owned, RecordType::CAA)
                 .await
@@ -410,10 +404,7 @@ impl DnsResolver {
 
         let result = timeout(query_timeout, async move {
             resolver.mx_lookup(&domain_owned).await.map_err(|e| {
-                ApiError::ExternalService(format!(
-                    "MX lookup failed for {}: {}",
-                    domain_owned, e
-                ))
+                ApiError::ExternalService(format!("MX lookup failed for {}: {}", domain_owned, e))
             })
         })
         .await

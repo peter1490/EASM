@@ -97,9 +97,10 @@ impl ScanService {
         if settings.scan_allowlist_cidrs.is_empty() {
             return true;
         }
-        settings.scan_allowlist_cidrs.iter().any(|net| {
-            net.contains(&cidr.network()) && net.prefix_len() <= cidr.prefix_len()
-        })
+        settings
+            .scan_allowlist_cidrs
+            .iter()
+            .any(|net| net.contains(&cidr.network()) && net.prefix_len() <= cidr.prefix_len())
     }
 
     fn validate_scan_target(&self, settings: &Settings, target: &str) -> Result<(), ApiError> {
@@ -487,12 +488,7 @@ impl ScanService {
             .await?;
         for (i, (ip, parent_domain_id)) in resolved_ips_with_parent.iter().enumerate() {
             ctx.check_cancellation().await?;
-            self.process_ip_address_with_parent(
-                scan_id,
-                *ip,
-                Some(*parent_domain_id),
-                company_id,
-            )
+            self.process_ip_address_with_parent(scan_id, *ip, Some(*parent_domain_id), company_id)
                 .await?;
 
             // Update progress during IP processing
@@ -564,9 +560,7 @@ impl ScanService {
         if total_ips > max_hosts {
             return Err(ApiError::Validation(format!(
                 "CIDR range {} contains {} hosts, exceeding limit of {}",
-                cidr,
-                total_ips,
-                max_hosts
+                cidr, total_ips, max_hosts
             )));
         }
 
@@ -605,12 +599,7 @@ impl ScanService {
                 let _permit = permit;
                 // Each IP in CIDR is child of the root CIDR asset
                 scan_service
-                    .process_ip_address_with_parent(
-                        scan_id,
-                        ip,
-                        Some(root_asset_id),
-                        company_id,
-                    )
+                    .process_ip_address_with_parent(scan_id, ip, Some(root_asset_id), company_id)
                     .await
             });
 
@@ -691,7 +680,8 @@ impl ScanService {
             for &port in &open_ports {
                 ctx.check_cancellation().await?;
                 if matches!(port, 80 | 443 | 8080 | 8443) {
-                    self.probe_http_service(scan_id, ip, port, company_id).await?;
+                    self.probe_http_service(scan_id, ip, port, company_id)
+                        .await?;
                 }
             }
 
@@ -709,7 +699,7 @@ impl ScanService {
                         ip_asset.id,
                         company_id,
                     )
-                        .await?;
+                    .await?;
                 }
             }
 
@@ -730,7 +720,7 @@ impl ScanService {
                             Some(ip_asset.id),
                             company_id,
                         )
-                            .await?;
+                        .await?;
                     }
                 }
             }
@@ -742,12 +732,7 @@ impl ScanService {
             .get_ip_threat_intel(&ip.to_string())
             .await
         {
-            self.create_threat_intel_finding(
-                scan_id,
-                &ip.to_string(),
-                &threat_intel,
-                company_id,
-            )
+            self.create_threat_intel_finding(scan_id, &ip.to_string(), &threat_intel, company_id)
                 .await?;
         }
 
@@ -784,7 +769,8 @@ impl ScanService {
             // Step 2: HTTP probing for web ports
             for &port in &open_ports {
                 if matches!(port, 80 | 443 | 8080 | 8443) {
-                    self.probe_http_service(scan_id, ip, port, company_id).await?;
+                    self.probe_http_service(scan_id, ip, port, company_id)
+                        .await?;
                 }
             }
 
@@ -798,7 +784,7 @@ impl ScanService {
                         ip_asset.id,
                         company_id,
                     )
-                        .await?;
+                    .await?;
                 }
             }
 
@@ -816,7 +802,7 @@ impl ScanService {
                             Some(ip_asset.id),
                             company_id,
                         )
-                            .await?;
+                        .await?;
                     }
                 }
             }
@@ -828,12 +814,7 @@ impl ScanService {
             .get_ip_threat_intel(&ip.to_string())
             .await
         {
-            self.create_threat_intel_finding(
-                scan_id,
-                &ip.to_string(),
-                &threat_intel,
-                company_id,
-            )
+            self.create_threat_intel_finding(scan_id, &ip.to_string(), &threat_intel, company_id)
                 .await?;
         }
 

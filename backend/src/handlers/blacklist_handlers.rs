@@ -76,24 +76,35 @@ pub async fn create_blacklist_entry(
     // If delete_descendants is true, find the asset and delete all descendants
     let mut descendants_deleted = 0i64;
     if payload.delete_descendants {
-        // Find the asset by type and value
-        if let Some(asset_id) = app_state
-            .blacklist_repository
-            .find_asset_id(&payload.object_type, &payload.object_value, company_id)
-            .await?
-        {
-            descendants_deleted = app_state
-                .blacklist_repository
-                .delete_descendant_assets(company_id, &asset_id)
-                .await?;
-
-            tracing::info!(
-                "Blacklisted {} '{}' and deleted {} descendant assets",
-                payload.object_type,
-                payload.object_value,
-                descendants_deleted
-            );
+        match &payload.object_type {
+            // CIDR is not an asset type, so cascade from all matching IP asset roots.
+            BlacklistObjectType::Cidr => {
+                descendants_deleted = app_state
+                    .blacklist_repository
+                    .delete_descendant_assets_for_cidr(company_id, &payload.object_value)
+                    .await?;
+            }
+            _ => {
+                // Find the asset by type and value.
+                if let Some(asset_id) = app_state
+                    .blacklist_repository
+                    .find_asset_id(&payload.object_type, &payload.object_value, company_id)
+                    .await?
+                {
+                    descendants_deleted = app_state
+                        .blacklist_repository
+                        .delete_descendant_assets(company_id, &asset_id)
+                        .await?;
+                }
+            }
         }
+
+        tracing::info!(
+            "Blacklisted {} '{}' and deleted {} descendant assets",
+            payload.object_type,
+            payload.object_value,
+            descendants_deleted
+        );
     }
 
     Ok(Json(BlacklistResult {
@@ -200,7 +211,10 @@ pub async fn delete_blacklist_entry(
     let company_id = user.company_id.ok_or_else(|| {
         ApiError::Authorization("Company scope required for blacklist".to_string())
     })?;
-    app_state.blacklist_repository.delete(company_id, &id).await?;
+    app_state
+        .blacklist_repository
+        .delete(company_id, &id)
+        .await?;
 
     Ok(Json(json!({
         "message": "Blacklist entry deleted successfully"

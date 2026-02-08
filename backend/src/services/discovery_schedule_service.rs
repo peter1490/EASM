@@ -9,7 +9,10 @@ use uuid::Uuid;
 
 use crate::{
     error::ApiError,
-    models::{DiscoveryConfig, DiscoverySchedule, DiscoveryScheduleCreate, DiscoveryScheduleUpdate, TriggerType},
+    models::{
+        DiscoveryConfig, DiscoverySchedule, DiscoveryScheduleCreate, DiscoveryScheduleUpdate,
+        TriggerType,
+    },
     repositories::DiscoveryScheduleRepository,
     services::DiscoveryService,
 };
@@ -168,10 +171,7 @@ impl DiscoveryScheduleService {
         let next_run_at = Self::compute_next_run(&normalized_cron, now, timezone)?;
         let mut last_run_at = schedule.last_run_at;
 
-        let should_run = schedule
-            .next_run_at
-            .map(|next| next <= now)
-            .unwrap_or(true);
+        let should_run = schedule.next_run_at.map(|next| next <= now).unwrap_or(true);
 
         if should_run {
             let config = Self::parse_config(schedule.config.clone());
@@ -199,12 +199,7 @@ impl DiscoveryScheduleService {
         }
 
         self.schedule_repo
-            .update_run_times(
-                schedule.company_id,
-                &schedule.id,
-                last_run_at,
-                next_run_at,
-            )
+            .update_run_times(schedule.company_id, &schedule.id, last_run_at, next_run_at)
             .await?;
 
         Ok(())
@@ -236,9 +231,7 @@ impl DiscoveryScheduleService {
             }
         }
 
-        Err(ApiError::Validation(
-            "Invalid cron expression".to_string(),
-        ))
+        Err(ApiError::Validation("Invalid cron expression".to_string()))
     }
 
     fn compute_next_run(
@@ -246,9 +239,8 @@ impl DiscoveryScheduleService {
         now: DateTime<Utc>,
         timezone: Tz,
     ) -> Result<Option<DateTime<Utc>>, ApiError> {
-        let schedule = Schedule::from_str(cron).map_err(|e| {
-            ApiError::Validation(format!("Invalid cron expression: {}", e))
-        })?;
+        let schedule = Schedule::from_str(cron)
+            .map_err(|e| ApiError::Validation(format!("Invalid cron expression: {}", e)))?;
 
         let now_tz = now.with_timezone(&timezone);
         Ok(schedule

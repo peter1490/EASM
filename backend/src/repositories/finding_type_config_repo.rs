@@ -8,8 +8,15 @@ use std::collections::HashMap;
 #[async_trait]
 pub trait FindingTypeConfigRepository: Send + Sync {
     async fn list(&self) -> Result<Vec<FindingTypeConfig>, ApiError>;
-    async fn get_by_finding_type(&self, finding_type: &str) -> Result<Option<FindingTypeConfig>, ApiError>;
-    async fn update(&self, finding_type: &str, update: &FindingTypeConfigUpdate) -> Result<FindingTypeConfig, ApiError>;
+    async fn get_by_finding_type(
+        &self,
+        finding_type: &str,
+    ) -> Result<Option<FindingTypeConfig>, ApiError>;
+    async fn update(
+        &self,
+        finding_type: &str,
+        update: &FindingTypeConfigUpdate,
+    ) -> Result<FindingTypeConfig, ApiError>;
     async fn get_scoring_map(&self) -> Result<HashMap<String, (f64, f64)>, ApiError>;
     async fn get_categories(&self) -> Result<Vec<String>, ApiError>;
     async fn reset_to_defaults(&self) -> Result<i64, ApiError>;
@@ -43,7 +50,10 @@ impl FindingTypeConfigRepository for SqlxFindingTypeConfigRepository {
         Ok(configs)
     }
 
-    async fn get_by_finding_type(&self, finding_type: &str) -> Result<Option<FindingTypeConfig>, ApiError> {
+    async fn get_by_finding_type(
+        &self,
+        finding_type: &str,
+    ) -> Result<Option<FindingTypeConfig>, ApiError> {
         let config = sqlx::query_as::<_, FindingTypeConfig>(
             r#"
             SELECT id, finding_type, display_name, category, default_severity,
@@ -60,7 +70,11 @@ impl FindingTypeConfigRepository for SqlxFindingTypeConfigRepository {
         Ok(config)
     }
 
-    async fn update(&self, finding_type: &str, update: &FindingTypeConfigUpdate) -> Result<FindingTypeConfig, ApiError> {
+    async fn update(
+        &self,
+        finding_type: &str,
+        update: &FindingTypeConfigUpdate,
+    ) -> Result<FindingTypeConfig, ApiError> {
         let now = Utc::now();
 
         // Build dynamic update query
@@ -130,13 +144,10 @@ impl FindingTypeConfigRepository for SqlxFindingTypeConfigRepository {
 
     async fn reset_to_defaults(&self) -> Result<i64, ApiError> {
         // This would re-run the default inserts - for now just return count
-        let count = sqlx::query_scalar::<_, i64>(
-            r#"SELECT COUNT(*) FROM finding_type_config"#,
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let count = sqlx::query_scalar::<_, i64>(r#"SELECT COUNT(*) FROM finding_type_config"#)
+            .fetch_one(&self.pool)
+            .await?;
 
         Ok(count)
     }
 }
-

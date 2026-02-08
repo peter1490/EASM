@@ -21,10 +21,7 @@ fn extract_cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<S
 
 /// CSRF middleware: validates X-CSRF-Token header against csrf_token cookie
 /// for state-changing requests using session-based auth.
-pub async fn csrf_middleware(
-    request: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
+pub async fn csrf_middleware(request: Request, next: Next) -> Result<Response, StatusCode> {
     let method = request.method();
     if matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS) {
         return Ok(next.run(request).await);

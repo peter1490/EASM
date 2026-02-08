@@ -1,6 +1,6 @@
 use super::{
     CertSpotterCertificate, CertSpotterClient, CrtShClient, ShodanClient, ShodanExtractedAssets,
-    ShodanResult, VirusTotalClient,
+    ShodanHostInfo, ShodanResult, VirusTotalClient,
 };
 use crate::config::Settings;
 use crate::config::SharedSettings;
@@ -17,6 +17,8 @@ pub struct ExternalServicesManager {
 pub struct SubdomainEnumerationResult {
     pub subdomains: Vec<String>,
     pub sources: HashMap<String, Vec<String>>, // source -> domains found
+    /// IP -> owner hint from the existing Shodan domain query (if available).
+    pub shodan_ip_owners: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +49,7 @@ impl ExternalServicesManager {
     ) -> Result<SubdomainEnumerationResult, ApiError> {
         let mut all_subdomains = std::collections::HashSet::new();
         let mut sources = HashMap::new();
+        let mut shodan_ip_owners = HashMap::new();
         let settings = self.settings.load();
         let shodan_client = self.shodan_client_for(&settings)?;
         let virustotal_client = self.virustotal_client_for(&settings)?;
@@ -69,6 +72,7 @@ impl ExternalServicesManager {
                         sources.insert("shodan".to_string(), shodan_domains.clone());
                         all_subdomains.extend(shodan_domains);
                     }
+                    shodan_ip_owners.extend(extracted.ip_owners.clone());
 
                     // Log additional asset types found (for recursive discovery in parent function)
                     if !extracted.ips.is_empty() {
@@ -169,6 +173,7 @@ impl ExternalServicesManager {
         Ok(SubdomainEnumerationResult {
             subdomains: final_subdomains,
             sources,
+            shodan_ip_owners,
         })
     }
 
@@ -325,6 +330,16 @@ impl ExternalServicesManager {
             None => Err(ApiError::ExternalService(
                 "Shodan API not configured".to_string(),
             )),
+        }
+    }
+
+    /// Get Shodan host information for a specific IP.
+    /// Returns `Ok(None)` when Shodan is not configured.
+    pub async fn get_shodan_host_info(&self, ip: &str) -> Result<Option<ShodanHostInfo>, ApiError> {
+        let settings = self.settings.load();
+        match self.shodan_client_for(&settings)? {
+            Some(client) => client.get_host(ip).await.map(Some),
+            None => Ok(None),
         }
     }
 

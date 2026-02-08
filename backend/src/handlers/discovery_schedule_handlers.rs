@@ -9,7 +9,9 @@ use uuid::Uuid;
 use crate::{
     auth::context::UserContext,
     error::ApiError,
-    models::{DiscoveryConfig, DiscoverySchedule, DiscoveryScheduleCreate, DiscoveryScheduleUpdate},
+    models::{
+        DiscoveryConfig, DiscoverySchedule, DiscoveryScheduleCreate, DiscoveryScheduleUpdate,
+    },
     AppState,
 };
 
@@ -84,10 +86,7 @@ pub async fn update_discovery_schedule(
     let company_id = user.company_id.ok_or_else(|| {
         ApiError::Authorization("Company scope required for schedules".to_string())
     })?;
-    let config_value: Option<Value> = payload
-        .config
-        .map(serde_json::to_value)
-        .transpose()?;
+    let config_value: Option<Value> = payload.config.map(serde_json::to_value).transpose()?;
 
     let update = DiscoveryScheduleUpdate {
         name: payload.name,

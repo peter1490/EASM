@@ -30,9 +30,9 @@ pub async fn get_metrics(
     State(app_state): State<AppState>,
     Extension(user): Extension<UserContext>,
 ) -> Result<Json<DashboardMetrics>, ApiError> {
-    let company_id = user.company_id.ok_or_else(|| {
-        ApiError::Authorization("Company scope required for metrics".to_string())
-    })?;
+    let company_id = user
+        .company_id
+        .ok_or_else(|| ApiError::Authorization("Company scope required for metrics".to_string()))?;
     // Get system performance metrics
     let report = app_state.metrics_service.generate_report();
     let system = report.system;
@@ -43,9 +43,7 @@ pub async fn get_metrics(
         .security_scan_repository
         .count_by_status(company_id)
         .await
-        .map(|counts| {
-            counts.get("running").unwrap_or(&0) + counts.get("pending").unwrap_or(&0)
-        })
+        .map(|counts| counts.get("running").unwrap_or(&0) + counts.get("pending").unwrap_or(&0))
         .unwrap_or(0);
 
     let total_assets = app_state

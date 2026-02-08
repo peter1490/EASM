@@ -197,16 +197,20 @@ export default function DiscoveryPage() {
       if (isRefresh) {
         setRefreshing(true);
       }
-      const [statusData, runsData, seedsData, schedulesData] = await Promise.all([
+      const [statusData, runsData, seedsData, schedulesData, blacklistStatsData] = await Promise.all([
         getDiscoveryStatus(),
         listDiscoveryRuns(50),
         listSeeds(),
         listDiscoverySchedules(),
+        getBlacklistStats().catch(() => null),
       ]);
       setStatus(statusData);
       setRuns(runsData);
       setSeeds(seedsData);
       setSchedules(schedulesData);
+      if (blacklistStatsData) {
+        setBlacklistStats(blacklistStatsData);
+      }
       setError(null);
     } catch (err) {
       setError((err as Error).message);

@@ -54,9 +54,7 @@ where
         .map(|raw| {
             let item = raw.trim();
             if item.is_empty() {
-                return Err(serde::de::Error::custom(
-                    "Empty CIDR entry in allowlist",
-                ));
+                return Err(serde::de::Error::custom("Empty CIDR entry in allowlist"));
             }
             if let Ok(net) = item.parse::<IpNet>() {
                 return Ok(net);
@@ -138,12 +136,8 @@ fn parse_api_key_entry(entry: &str) -> Result<ApiKeyScope, String> {
         )
     })?;
 
-    let role = Role::from_str(role_raw).ok_or_else(|| {
-        format!(
-            "API key entry '{}' has invalid role '{}'",
-            entry, role_raw
-        )
-    })?;
+    let role = Role::from_str(role_raw)
+        .ok_or_else(|| format!("API key entry '{}' has invalid role '{}'", entry, role_raw))?;
 
     let allow_company_override = parts
         .get(3)

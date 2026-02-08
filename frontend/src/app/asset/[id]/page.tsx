@@ -18,6 +18,7 @@ import {
   untagAsset,
   listTags,
   blacklistFromAsset,
+  checkBlacklist,
   type Asset,
   type AssetEvolutionResponse,
   type SecurityFinding,
@@ -25,6 +26,8 @@ import {
   type FindingStatus,
   type AssetTagDetail,
   type TagWithCount,
+  type BlacklistCheckResult,
+  type BlacklistObjectType,
 } from "@/app/api";
 import Header from "@/components/Header";
 import Button from "@/components/ui/Button";
@@ -100,6 +103,23 @@ const SCAN_STATUS_COLORS: Record<string, "error" | "warning" | "info" | "seconda
   cancelled: "secondary",
 };
 
+const toBlacklistObjectType = (assetType: Asset["asset_type"]): BlacklistObjectType | null => {
+  switch (assetType) {
+    case "domain":
+      return "domain";
+    case "ip":
+      return "ip";
+    case "organization":
+      return "organization";
+    case "asn":
+      return "asn";
+    case "certificate":
+      return "certificate";
+    default:
+      return null;
+  }
+};
+
 export default function AssetDetailPage() {
   const params = useParams<{ id: string }>();
   const id = params?.id as string;
@@ -135,6 +155,7 @@ export default function AssetDetailPage() {
   const [blacklistDeleteDescendants, setBlacklistDeleteDescendants] = useState(true);
   const [blacklisting, setBlacklisting] = useState(false);
   const [blacklistResult, setBlacklistResult] = useState<{ descendants_deleted: number } | null>(null);
+  const [blacklistStatus, setBlacklistStatus] = useState<BlacklistCheckResult | null>(null);
   
   const hasInitialLoadRef = useRef(false);
 
@@ -157,6 +178,11 @@ export default function AssetDetailPage() {
         getAssetTags(id).catch(() => []),
         listTags(100, 0).catch(() => ({ tags: [], total_count: 0 })),
       ]);
+
+      const blacklistType = toBlacklistObjectType(assetData.asset_type);
+      const blacklistStatusData = blacklistType
+        ? await checkBlacklist(blacklistType, assetData.value).catch(() => null)
+        : null;
       
       setAsset(assetData);
       setFindings(findingsData);
@@ -164,6 +190,7 @@ export default function AssetDetailPage() {
       setAssetEvolution(evolutionData);
       setAssetTags(assetTagsData);
       setAllTags(allTagsData.tags);
+      setBlacklistStatus(blacklistStatusData);
 
       setError(null);
       hasInitialLoadRef.current = true;
@@ -303,6 +330,12 @@ export default function AssetDetailPage() {
         blacklistDeleteDescendants
       );
       setBlacklistResult({ descendants_deleted: result.descendants_deleted });
+      setBlacklistStatus({
+        is_blacklisted: true,
+        entry: result.entry,
+        parent_blacklisted: false,
+        parent_entry: null,
+      });
     } catch (err) {
       setError((err as Error).message);
       setShowBlacklistModal(false);
@@ -373,6 +406,10 @@ export default function AssetDetailPage() {
     const bySeverity = getFindingsBySeverity(summary);
     return Object.values(bySeverity).reduce((acc, val) => acc + (Number(val) || 0), 0);
   };
+
+  const isExactlyBlacklisted = Boolean(
+    blacklistStatus?.is_blacklisted && !blacklistStatus.parent_blacklisted,
+  );
 
   const tabs: Array<{ id: TabType; label: string; icon: string; badge?: number }> = [
     { id: "overview", label: "Overview", icon: "📊" },
@@ -447,9 +484,10 @@ export default function AssetDetailPage() {
           <Button
             variant="outline"
             onClick={() => setShowBlacklistModal(true)}
+            disabled={isExactlyBlacklisted}
             className="text-destructive hover:bg-destructive/10"
           >
-            🚫 Blacklist
+            {isExactlyBlacklisted ? "Blacklisted" : "🚫 Blacklist"}
           </Button>
           <Button
             variant="outline"
@@ -479,6 +517,28 @@ export default function AssetDetailPage() {
             <div className="text-destructive flex items-center gap-2">
               <span>⚠️</span>
               <span>{error}</span>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {blacklistStatus?.is_blacklisted && (
+        <Card className="border-warning/40 bg-warning/5">
+          <CardContent className="py-4">
+            <div className="flex items-start gap-3 text-warning">
+              <span>🚫</span>
+              <div>
+                <div className="font-medium">
+                  {blacklistStatus.parent_blacklisted
+                    ? "Excluded by parent-domain blacklist"
+                    : "This asset is blacklisted"}
+                </div>
+                <div className="text-sm text-muted-foreground mt-1">
+                  {blacklistStatus.parent_blacklisted
+                    ? `Parent domain '${blacklistStatus.parent_entry?.object_value || "unknown"}' is blacklisted, so this asset is excluded from discovery.`
+                    : `This asset is excluded from discovery${blacklistStatus.entry?.reason ? ` (${blacklistStatus.entry.reason})` : ""}.`}
+                </div>
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -1591,7 +1651,7 @@ export default function AssetDetailPage() {
             )}
 
             <div className="flex justify-end gap-3">
-              <Link href="/blacklist">
+              <Link href="/discovery">
                 <Button variant="outline">View Blacklist</Button>
               </Link>
               <Link href="/assets">

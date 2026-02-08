@@ -73,7 +73,9 @@ pub async fn create_company(
     }
 
     if payload.name.trim().is_empty() {
-        return Err(ApiError::Validation("Company name cannot be empty".to_string()));
+        return Err(ApiError::Validation(
+            "Company name cannot be empty".to_string(),
+        ));
     }
 
     let user_id = user.user_id.ok_or_else(|| {

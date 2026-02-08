@@ -31,13 +31,13 @@ pub struct LocalLoginParams {
 /// Allows HTTP deployments in internal/production environments.
 fn check_uses_https(state: &AppState) -> bool {
     let config = state.config.load();
-    
+
     // Check if any CORS origin uses HTTPS
     let cors_uses_https = config
         .cors_allow_origins
         .iter()
         .any(|origin| origin.starts_with("https://"));
-    
+
     // Check if redirect URIs use HTTPS
     let redirect_uses_https = config
         .google_redirect_uri
@@ -49,7 +49,7 @@ fn check_uses_https(state: &AppState) -> bool {
             .as_ref()
             .map(|u| u.starts_with("https://"))
             .unwrap_or(false);
-    
+
     cors_uses_https || redirect_uses_https
 }
 
@@ -199,9 +199,7 @@ pub async fn callback_keycloak(
     Ok((jar, csrf_jar, Json(session)))
 }
 
-pub async fn logout(
-    jar: PrivateCookieJar,
-) -> (PrivateCookieJar, CookieJar, impl IntoResponse) {
+pub async fn logout(jar: PrivateCookieJar) -> (PrivateCookieJar, CookieJar, impl IntoResponse) {
     let jar = jar.remove(Cookie::from("session"));
     let csrf_jar = CookieJar::new().remove(Cookie::from("csrf_token"));
     (jar, csrf_jar, "Logged out")

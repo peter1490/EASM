@@ -282,9 +282,7 @@ fn resolve_break_glass(
         .load()
         .break_glass_token
         .clone()
-        .ok_or_else(|| {
-            ApiError::Authorization("Break-glass token not configured".to_string())
-        })?;
+        .ok_or_else(|| ApiError::Authorization("Break-glass token not configured".to_string()))?;
 
     let provided = headers
         .get("x-break-glass-token")

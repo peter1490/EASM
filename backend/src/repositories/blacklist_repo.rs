@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use chrono::Utc;
+use ipnet::IpNet;
 use sqlx::PgPool;
+use std::net::IpAddr;
 use uuid::Uuid;
 
 use crate::{
@@ -95,6 +97,14 @@ pub trait BlacklistRepository: Send + Sync {
         asset_id: &Uuid,
     ) -> Result<i64, ApiError>;
 
+    /// Delete descendants for every IP asset that falls inside the given CIDR.
+    /// Returns the count of deleted assets (root IP assets are preserved).
+    async fn delete_descendant_assets_for_cidr(
+        &self,
+        company_id: Uuid,
+        cidr: &str,
+    ) -> Result<i64, ApiError>;
+
     /// Find asset ID by type and identifier
     async fn find_asset_id(
         &self,
@@ -165,10 +175,10 @@ impl BlacklistRepository for SqlxBlacklistRepository {
         let row = sqlx::query_as::<_, BlacklistEntry>(
             "SELECT * FROM blacklist WHERE id = $1 AND company_id = $2",
         )
-            .bind(id)
-            .bind(company_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        .bind(id)
+        .bind(company_id)
+        .fetch_optional(&self.pool)
+        .await?;
 
         Ok(row)
     }
@@ -418,6 +428,76 @@ impl BlacklistRepository for SqlxBlacklistRepository {
             "#,
         )
         .bind(asset_id)
+        .bind(company_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(result)
+    }
+
+    async fn delete_descendant_assets_for_cidr(
+        &self,
+        company_id: Uuid,
+        cidr: &str,
+    ) -> Result<i64, ApiError> {
+        let cidr = cidr.trim();
+        let cidr_net: IpNet = cidr
+            .parse()
+            .map_err(|e| ApiError::Validation(format!("Invalid CIDR format '{}': {}", cidr, e)))?;
+
+        // Load candidate IP assets and validate/parse identifiers in Rust.
+        // This avoids SQL inet-cast failures when data quality is poor.
+        let ip_assets = sqlx::query_as::<_, (Uuid, String)>(
+            r#"
+            SELECT id, identifier
+            FROM assets
+            WHERE company_id = $1
+              AND asset_type::text = 'ip'
+            "#,
+        )
+        .bind(company_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut root_ids = Vec::new();
+        for (id, identifier) in ip_assets {
+            if let Ok(ip) = identifier.parse::<IpAddr>() {
+                if cidr_net.contains(&ip) {
+                    root_ids.push(id);
+                }
+            }
+        }
+
+        if root_ids.is_empty() {
+            return Ok(0);
+        }
+
+        // Recursively delete descendants of matching root IP assets.
+        // Root IP assets are intentionally preserved.
+        let result = sqlx::query_scalar::<_, i64>(
+            r#"
+            WITH RECURSIVE descendants AS (
+                SELECT id, parent_id, 1 as depth
+                FROM assets
+                WHERE company_id = $2
+                  AND parent_id = ANY($1::uuid[])
+
+                UNION ALL
+
+                SELECT a.id, a.parent_id, d.depth + 1
+                FROM assets a
+                INNER JOIN descendants d ON a.parent_id = d.id
+                WHERE d.depth < 100 AND a.company_id = $2
+            ),
+            deleted AS (
+                DELETE FROM assets
+                WHERE id IN (SELECT id FROM descendants) AND company_id = $2
+                RETURNING id
+            )
+            SELECT COUNT(*) FROM deleted
+            "#,
+        )
+        .bind(&root_ids)
         .bind(company_id)
         .fetch_one(&self.pool)
         .await?;

@@ -15,9 +15,9 @@ pub async fn create_scan(
     Extension(user): Extension<UserContext>,
     Json(payload): Json<ScanCreate>,
 ) -> Result<Json<Scan>, ApiError> {
-    let company_id = user.company_id.ok_or_else(|| {
-        ApiError::Authorization("Company scope required for scans".to_string())
-    })?;
+    let company_id = user
+        .company_id
+        .ok_or_else(|| ApiError::Authorization("Company scope required for scans".to_string()))?;
     let scan = app_state
         .scan_service
         .create_scan(payload, company_id, user.user_id)
@@ -30,9 +30,9 @@ pub async fn get_scan(
     Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<crate::models::ScanDetailResponse>, ApiError> {
-    let company_id = user.company_id.ok_or_else(|| {
-        ApiError::Authorization("Company scope required for scans".to_string())
-    })?;
+    let company_id = user
+        .company_id
+        .ok_or_else(|| ApiError::Authorization("Company scope required for scans".to_string()))?;
     let scan = app_state
         .scan_service
         .get_scan_with_findings(company_id, &id)
@@ -45,9 +45,9 @@ pub async fn list_scans(
     State(app_state): State<AppState>,
     Extension(user): Extension<UserContext>,
 ) -> Result<Json<Vec<crate::models::ScanListResponse>>, ApiError> {
-    let company_id = user.company_id.ok_or_else(|| {
-        ApiError::Authorization("Company scope required for scans".to_string())
-    })?;
+    let company_id = user
+        .company_id
+        .ok_or_else(|| ApiError::Authorization("Company scope required for scans".to_string()))?;
     let scans = app_state
         .scan_service
         .list_scans_with_findings_count(company_id)

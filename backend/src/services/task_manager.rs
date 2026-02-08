@@ -263,10 +263,7 @@ impl TaskManager {
             .filter(|task| {
                 task.is_active()
                     && task.task_type == task_type
-                    && task
-                        .metadata
-                        .get("requested_by")
-                        .and_then(|v| v.as_str())
+                    && task.metadata.get("requested_by").and_then(|v| v.as_str())
                         == Some(requester_id)
             })
             .count()

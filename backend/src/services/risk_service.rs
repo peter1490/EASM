@@ -372,10 +372,8 @@ impl RiskService {
         let mut series = Vec::with_capacity(limit as usize);
         for offset in 0..limit {
             let day = start_day + Duration::days(offset);
-            let day_start = DateTime::<Utc>::from_naive_utc_and_offset(
-                day.and_hms_opt(0, 0, 0).unwrap(),
-                Utc,
-            );
+            let day_start =
+                DateTime::<Utc>::from_naive_utc_and_offset(day.and_hms_opt(0, 0, 0).unwrap(), Utc);
             let day_end = day_start + Duration::days(1);
             let active = findings_rows
                 .iter()

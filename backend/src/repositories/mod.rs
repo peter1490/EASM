@@ -25,6 +25,7 @@ pub use discovery_repo::{
 pub use discovery_schedule_repo::{DiscoveryScheduleRepository, SqlxDiscoveryScheduleRepository};
 pub use evidence_repo::EvidenceRepository;
 pub use finding_repo::FindingRepository;
+pub use finding_type_config_repo::{FindingTypeConfigRepository, SqlxFindingTypeConfigRepository};
 pub use scan_repo::ScanRepository;
 pub use security_repo::{
     SecurityFindingRepository, SecurityScanRepository, SqlxSecurityFindingRepository,
@@ -34,4 +35,3 @@ pub use seed_repo::SeedRepository;
 pub use settings_repo::SettingsRepository;
 pub use tag_repo::{SqlxTagRepository, TagRepository};
 pub use user_repo::UserRepository;
-pub use finding_type_config_repo::{FindingTypeConfigRepository, SqlxFindingTypeConfigRepository};

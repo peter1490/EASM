@@ -139,9 +139,10 @@ impl SecurityScanService {
                 }
             }
             AssetType::Ip => {
-                let ip: IpAddr = asset.identifier.parse().map_err(|_| {
-                    ApiError::Validation("Invalid IP asset identifier".to_string())
-                })?;
+                let ip: IpAddr = asset
+                    .identifier
+                    .parse()
+                    .map_err(|_| ApiError::Validation("Invalid IP asset identifier".to_string()))?;
                 if !self.is_ip_allowed(settings, ip) {
                     return Err(ApiError::Validation(
                         "IP target not permitted by scan policy".to_string(),
@@ -466,7 +467,7 @@ impl SecurityScanService {
                     &mut risk_factors,
                     company_id,
                 )
-                    .await?;
+                .await?;
             }
             _ => {
                 tracing::warn!("Scan not supported for asset type {:?}", asset.asset_type);
@@ -1776,7 +1777,8 @@ impl SecurityScanService {
                 let days_until_expiry = (expiry_utc - now).num_days();
 
                 if days_until_expiry < 0 {
-                    let mut data = json!({ "expiry_date": cert_info.not_after, "host": host, "port": port });
+                    let mut data =
+                        json!({ "expiry_date": cert_info.not_after, "host": host, "port": port });
                     if let Some(url) = &ssl_labs_url {
                         data["source_url"] = json!(url);
                         data["source_name"] = json!("SSL Labs");
@@ -1800,15 +1802,13 @@ impl SecurityScanService {
                         factor_type: "certificate".to_string(),
                         name: "Expired certificate".to_string(),
                         severity: "critical".to_string(),
-                        description: format!(
-                            "Certificate expired {} days ago",
-                            -days_until_expiry
-                        ),
+                        description: format!("Certificate expired {} days ago", -days_until_expiry),
                         impact_score: 0.95,
                         data: json!({ "days_expired": -days_until_expiry }),
                     });
                 } else if days_until_expiry < 30 {
-                    let mut data = json!({ "expiry_date": cert_info.not_after, "host": host, "port": port });
+                    let mut data =
+                        json!({ "expiry_date": cert_info.not_after, "host": host, "port": port });
                     if let Some(url) = &ssl_labs_url {
                         data["source_url"] = json!(url);
                         data["source_name"] = json!("SSL Labs");
@@ -1832,15 +1832,13 @@ impl SecurityScanService {
                         factor_type: "certificate".to_string(),
                         name: "Certificate expiring soon".to_string(),
                         severity: "high".to_string(),
-                        description: format!(
-                            "Certificate expires in {} days",
-                            days_until_expiry
-                        ),
+                        description: format!("Certificate expires in {} days", days_until_expiry),
                         impact_score: 0.6,
                         data: json!({ "days_remaining": days_until_expiry }),
                     });
                 } else if days_until_expiry < 90 {
-                    let mut data = json!({ "expiry_date": cert_info.not_after, "host": host, "port": port });
+                    let mut data =
+                        json!({ "expiry_date": cert_info.not_after, "host": host, "port": port });
                     if let Some(url) = &ssl_labs_url {
                         data["source_url"] = json!(url);
                         data["source_name"] = json!("SSL Labs");
@@ -1884,8 +1882,7 @@ impl SecurityScanService {
 
             // Check for self-signed certificate
             if cert_info.subject == cert_info.issuer {
-                let mut data =
-                    json!({ "subject": cert_info.subject, "issuer": cert_info.issuer, "host": host, "port": port });
+                let mut data = json!({ "subject": cert_info.subject, "issuer": cert_info.issuer, "host": host, "port": port });
                 if let Some(url) = &ssl_labs_url {
                     data["source_url"] = json!(url);
                     data["source_name"] = json!("SSL Labs");
@@ -2030,7 +2027,11 @@ impl SecurityScanService {
         host: &str,
         port: u16,
     ) -> Option<TlsCertificateDetails> {
-        let result = self.tls_analyzer.get_tls_certificate_info(host, port).await.ok()?;
+        let result = self
+            .tls_analyzer
+            .get_tls_certificate_info(host, port)
+            .await
+            .ok()?;
 
         let chain: Vec<TlsCertificateInfo> = result
             .certificate_chain
@@ -2124,8 +2125,7 @@ impl SecurityScanService {
         let pattern = pattern.trim_end_matches('.').to_lowercase();
         if pattern.starts_with("*.") {
             let suffix = &pattern[2..];
-            return host.ends_with(suffix)
-                && host.split('.').count() > suffix.split('.').count();
+            return host.ends_with(suffix) && host.split('.').count() > suffix.split('.').count();
         }
 
         host == pattern

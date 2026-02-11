@@ -106,6 +106,8 @@ pub struct Asset {
     pub confidence: f64,
     pub sources: Value,
     pub metadata: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub seed_id: Option<Uuid>,
@@ -148,6 +150,8 @@ pub struct AssetRow {
     pub confidence: f64,
     pub sources: Value,
     pub metadata: Value,
+    #[sqlx(default)]
+    pub comment: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[sqlx(default)]
@@ -193,6 +197,7 @@ impl From<AssetRow> for Asset {
             confidence: row.confidence,
             sources: row.sources,
             metadata: row.metadata,
+            comment: row.comment,
             created_at: row.created_at,
             updated_at: row.updated_at,
             seed_id: row.seed_id,

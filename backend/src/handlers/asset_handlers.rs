@@ -77,6 +77,11 @@ pub struct UpdateImportanceRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct UpdateCommentRequest {
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct AssetEvolutionQuery {
     #[serde(default)]
     pub limit: Option<i64>,
@@ -265,6 +270,45 @@ pub async fn update_asset_importance(
     let asset = app_state
         .asset_repository
         .update_importance(company_id, &id, payload.importance)
+        .await?;
+    Ok(Json(asset))
+}
+
+pub async fn update_asset_comment(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateCommentRequest>,
+) -> Result<Json<Asset>, ApiError> {
+    if !user.has_role(Role::Analyst)
+        && !user.has_role(Role::Operator)
+        && !user.has_role(Role::Admin)
+    {
+        return Err(ApiError::Authorization(
+            "Analyst role or higher required".to_string(),
+        ));
+    }
+
+    let normalized_comment = payload
+        .comment
+        .as_deref()
+        .map(str::trim)
+        .filter(|comment| !comment.is_empty());
+
+    if let Some(comment) = normalized_comment {
+        if comment.chars().count() > 1000 {
+            return Err(ApiError::Validation(
+                "Comment must be at most 1000 characters".to_string(),
+            ));
+        }
+    }
+
+    let company_id = user
+        .company_id
+        .ok_or_else(|| ApiError::Authorization("Company scope required for assets".to_string()))?;
+    let asset = app_state
+        .asset_repository
+        .update_comment(company_id, &id, normalized_comment)
         .await?;
     Ok(Json(asset))
 }

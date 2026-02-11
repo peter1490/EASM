@@ -121,6 +121,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             patch(handlers::asset_handlers::update_asset_importance),
         )
         .route(
+            "/api/assets/:id/comment",
+            patch(handlers::asset_handlers::update_asset_comment),
+        )
+        .route(
             "/api/assets/:id/findings",
             get(handlers::security_handlers::get_asset_findings),
         )

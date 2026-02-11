@@ -53,6 +53,12 @@ pub trait AssetRepository {
         id: &Uuid,
         importance: i32,
     ) -> Result<Asset, ApiError>;
+    async fn update_comment(
+        &self,
+        company_id: Uuid,
+        id: &Uuid,
+        comment: Option<&str>,
+    ) -> Result<Asset, ApiError>;
     async fn update_risk(
         &self,
         company_id: Uuid,
@@ -126,7 +132,7 @@ impl AssetRepository for SqlxAssetRepository {
         // Try to find existing asset with same type and identifier
         let existing = sqlx::query_as::<_, AssetRow>(
             r#"
-            SELECT id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id, company_id,
+            SELECT id, asset_type, identifier, confidence, sources, metadata, comment, created_at, updated_at, seed_id, parent_id, company_id,
                    importance, risk_score, risk_level, last_risk_run
             FROM assets
             WHERE asset_type = $1 AND identifier = $2 AND company_id = $3
@@ -197,7 +203,7 @@ impl AssetRepository for SqlxAssetRepository {
                             ELSE $6  -- Only set if currently NULL
                         END
                     WHERE id = $7 AND company_id = $8
-                    RETURNING id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id, company_id,
+                    RETURNING id, asset_type, identifier, confidence, sources, metadata, comment, created_at, updated_at, seed_id, parent_id, company_id,
                               importance, risk_score, risk_level, last_risk_run
                     "#
                 )
@@ -223,7 +229,7 @@ impl AssetRepository for SqlxAssetRepository {
                     r#"
                     INSERT INTO assets (id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id, company_id)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                    RETURNING id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id, company_id,
+                    RETURNING id, asset_type, identifier, confidence, sources, metadata, comment, created_at, updated_at, seed_id, parent_id, company_id,
                               importance, risk_score, risk_level, last_risk_run
                     "#
                 )
@@ -268,7 +274,7 @@ impl AssetRepository for SqlxAssetRepository {
                         ORDER BY asset_id, created_at DESC
                     )
                     SELECT 
-                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
                         a.importance, a.risk_score, a.risk_level, a.last_risk_run,
                         ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
                     FROM assets a
@@ -296,7 +302,7 @@ impl AssetRepository for SqlxAssetRepository {
                         ORDER BY asset_id, created_at DESC
                     )
                     SELECT 
-                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
                         a.importance, a.risk_score, a.risk_level, a.last_risk_run,
                         ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
                     FROM assets a
@@ -364,7 +370,7 @@ impl AssetRepository for SqlxAssetRepository {
                 ORDER BY asset_id, created_at DESC
             )
             SELECT 
-                a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
                 a.importance, a.risk_score, a.risk_level, a.last_risk_run,
                 ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
             FROM assets a
@@ -399,7 +405,7 @@ impl AssetRepository for SqlxAssetRepository {
                         ORDER BY asset_id, created_at DESC
                     )
                     SELECT 
-                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
                         a.importance, a.risk_score, a.risk_level, a.last_risk_run,
                         ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
                     FROM assets a
@@ -425,7 +431,7 @@ impl AssetRepository for SqlxAssetRepository {
                         ORDER BY asset_id, created_at DESC
                     )
                     SELECT 
-                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
                         a.importance, a.risk_score, a.risk_level, a.last_risk_run,
                         ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
                     FROM assets a
@@ -460,7 +466,7 @@ impl AssetRepository for SqlxAssetRepository {
                 ORDER BY asset_id, created_at DESC
             )
             SELECT 
-                a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
                 a.importance, a.risk_score, a.risk_level, a.last_risk_run,
                 ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
             FROM assets a
@@ -485,7 +491,7 @@ impl AssetRepository for SqlxAssetRepository {
             WITH RECURSIVE asset_path AS (
                 -- Base case: the requested asset
                 SELECT 
-                    id, asset_type, identifier, confidence, sources, metadata, 
+                    id, asset_type, identifier, confidence, sources, metadata, comment,
                     created_at, updated_at, seed_id, parent_id, company_id,
                     importance, risk_score, risk_level, last_risk_run,
                     ARRAY[id] as path_ids,
@@ -497,7 +503,7 @@ impl AssetRepository for SqlxAssetRepository {
                 
                 -- Recursive step: get the parent
                 SELECT 
-                    p.id, p.asset_type, p.identifier, p.confidence, p.sources, p.metadata, 
+                    p.id, p.asset_type, p.identifier, p.confidence, p.sources, p.metadata, p.comment,
                     p.created_at, p.updated_at, p.seed_id, p.parent_id, p.company_id,
                     p.importance, p.risk_score, p.risk_level, p.last_risk_run,
                     ap.path_ids || p.id,
@@ -508,7 +514,7 @@ impl AssetRepository for SqlxAssetRepository {
                   AND ap.depth < 100
             )
             SELECT 
-                id, asset_type, identifier, confidence, sources, metadata, 
+                id, asset_type, identifier, confidence, sources, metadata, comment,
                 created_at, updated_at, seed_id, parent_id, company_id,
                 importance, risk_score, risk_level, last_risk_run,
                 NULL::uuid as last_scan_id,
@@ -543,7 +549,7 @@ impl AssetRepository for SqlxAssetRepository {
             UPDATE assets
             SET confidence = $1, updated_at = $2
             WHERE id = $3 AND company_id = $4
-            RETURNING id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id, company_id,
+            RETURNING id, asset_type, identifier, confidence, sources, metadata, comment, created_at, updated_at, seed_id, parent_id, company_id,
                       importance, risk_score, risk_level, last_risk_run
             "#
         )
@@ -570,11 +576,38 @@ impl AssetRepository for SqlxAssetRepository {
             UPDATE assets
             SET importance = $1, updated_at = $2
             WHERE id = $3 AND company_id = $4
-            RETURNING id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id, company_id,
+            RETURNING id, asset_type, identifier, confidence, sources, metadata, comment, created_at, updated_at, seed_id, parent_id, company_id,
                       importance, risk_score, risk_level, last_risk_run
             "#
         )
         .bind(importance)
+        .bind(now)
+        .bind(id)
+        .bind(company_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(Asset::from(row))
+    }
+
+    async fn update_comment(
+        &self,
+        company_id: Uuid,
+        id: &Uuid,
+        comment: Option<&str>,
+    ) -> Result<Asset, ApiError> {
+        let now = chrono::Utc::now();
+
+        let row = sqlx::query_as::<_, AssetRow>(
+            r#"
+            UPDATE assets
+            SET comment = $1, updated_at = $2
+            WHERE id = $3 AND company_id = $4
+            RETURNING id, asset_type, identifier, confidence, sources, metadata, comment, created_at, updated_at, seed_id, parent_id, company_id,
+                      importance, risk_score, risk_level, last_risk_run
+            "#
+        )
+        .bind(comment)
         .bind(now)
         .bind(id)
         .bind(company_id)
@@ -602,7 +635,7 @@ impl AssetRepository for SqlxAssetRepository {
             UPDATE assets
             SET risk_score = $1, risk_level = $2, last_risk_run = $3, updated_at = $3
             WHERE id = $4 AND company_id = $5
-            RETURNING id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id, company_id,
+            RETURNING id, asset_type, identifier, confidence, sources, metadata, comment, created_at, updated_at, seed_id, parent_id, company_id,
                       importance, risk_score, risk_level, last_risk_run
             "#
         )
@@ -706,7 +739,7 @@ impl AssetRepository for SqlxAssetRepository {
                 ORDER BY asset_id, created_at DESC
             )
             SELECT 
-                a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, 
+                a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment,
                 a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
                 a.importance, a.risk_score, a.risk_level, a.last_risk_run,
                 ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at

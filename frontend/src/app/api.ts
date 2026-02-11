@@ -158,6 +158,7 @@ export type Asset = {
   ownership_confidence: number;
   sources: string[];
   metadata: Record<string, unknown>;
+  comment?: string | null;
   seed_id?: string | null;
   parent_id?: string | null;
   first_seen_at?: string | null;
@@ -592,6 +593,17 @@ export async function updateAssetImportance(assetId: string, importance: number)
     credentials: "include",
   });
   if (!res.ok) throw new Error(`Failed to update asset importance: ${res.status}`);
+  return res.json();
+}
+
+export async function updateAssetComment(assetId: string, comment: string | null): Promise<Asset> {
+  const res = await apiFetch(`${API_BASE}/api/assets/${assetId}/comment`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ comment }),
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to update asset comment: ${res.status}`);
   return res.json();
 }
 

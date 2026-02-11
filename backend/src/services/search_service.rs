@@ -637,6 +637,7 @@ mod tests {
             confidence: 0.95,
             sources: json!({"crt.sh": true}),
             metadata: json!({"organization": "Example Corp"}),
+            comment: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             seed_id: None,

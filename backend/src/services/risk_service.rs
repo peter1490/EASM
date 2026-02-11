@@ -300,7 +300,7 @@ impl RiskService {
         let rows = sqlx::query_as::<_, crate::models::asset::AssetRow>(
             r#"
             SELECT 
-                id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id, company_id,
+                id, asset_type, identifier, confidence, sources, metadata, comment, created_at, updated_at, seed_id, parent_id, company_id,
                 importance, risk_score, risk_level, last_risk_run,
                 NULL::uuid as last_scan_id, NULL::text as last_scan_status, NULL::timestamptz as last_scanned_at
             FROM assets

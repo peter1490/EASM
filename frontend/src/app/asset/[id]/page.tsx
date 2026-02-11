@@ -11,6 +11,7 @@ import {
   recalculateAssetRisk,
   triggerAssetScan,
   updateAssetImportance,
+  updateAssetComment,
   listSecurityScans,
   updateSecurityFinding,
   resolveSecurityFinding,
@@ -142,6 +143,9 @@ export default function AssetDetailPage() {
   const [scanSuccess, setScanSuccess] = useState(false);
   const [recalculating, setRecalculating] = useState(false);
   const [updatingImportance, setUpdatingImportance] = useState(false);
+  const [commentDraft, setCommentDraft] = useState("");
+  const [commentDirty, setCommentDirty] = useState(false);
+  const [updatingComment, setUpdatingComment] = useState(false);
   
   // Finding modal state
   const [selectedFinding, setSelectedFinding] = useState<SecurityFinding | null>(null);
@@ -209,6 +213,11 @@ export default function AssetDetailPage() {
     const interval = setInterval(() => loadData(false), 10000); // Auto-refresh silently in background
     return () => clearInterval(interval);
   }, [loadData]);
+
+  useEffect(() => {
+    if (!asset || commentDirty) return;
+    setCommentDraft(asset.comment ?? "");
+  }, [asset, commentDirty]);
 
   async function handleScan() {
     if (!asset) return;
@@ -278,6 +287,37 @@ export default function AssetDetailPage() {
     } finally {
       setUpdatingImportance(false);
     }
+  }
+
+  function handleCommentChange(value: string) {
+    if (!asset) return;
+    setCommentDraft(value);
+    setCommentDirty(value !== (asset.comment ?? ""));
+  }
+
+  async function handleCommentSave() {
+    if (!asset) return;
+
+    setUpdatingComment(true);
+    setError(null);
+
+    try {
+      const trimmed = commentDraft.trim();
+      const updated = await updateAssetComment(asset.id, trimmed.length > 0 ? trimmed : null);
+      setAsset(updated);
+      setCommentDraft(updated.comment ?? "");
+      setCommentDirty(false);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setUpdatingComment(false);
+    }
+  }
+
+  function handleCommentReset() {
+    if (!asset) return;
+    setCommentDraft(asset.comment ?? "");
+    setCommentDirty(false);
   }
 
   async function handleFindingStatusUpdate(findingId: string, newStatus: FindingStatus) {
@@ -803,6 +843,44 @@ export default function AssetDetailPage() {
               </CardContent>
             </Card>
           </div>
+
+          {/* Analyst Comment */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Asset Comment</CardTitle>
+              <CardDescription>Internal note for this asset (visible to your team)</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <textarea
+                className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring min-h-[96px]"
+                placeholder="Add a short comment about this asset..."
+                value={commentDraft}
+                onChange={(e) => handleCommentChange(e.target.value)}
+                maxLength={1000}
+              />
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-xs text-muted-foreground">{commentDraft.length}/1000</span>
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleCommentReset}
+                    disabled={!commentDirty || updatingComment}
+                  >
+                    Reset
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={handleCommentSave}
+                    disabled={!commentDirty || updatingComment}
+                    loading={updatingComment}
+                  >
+                    {updatingComment ? "Saving..." : "Save Comment"}
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
 
           {/* Discovery Sources */}
           <Card>

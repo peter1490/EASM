@@ -1,8 +1,7 @@
 use crate::error::ApiError;
 use rustls::pki_types::{CertificateDer, ServerName};
-use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpStream;
+use tokio::net::{lookup_host, TcpStream};
 use tokio_rustls::{rustls, TlsConnector};
 use x509_parser::prelude::*;
 // Note: SAN parsing is complex and may require additional dependencies
@@ -106,6 +105,11 @@ pub async fn get_tls_certificate_info(
     hostname: &str,
     port: u16,
 ) -> Result<TlsCertificateInfo, ApiError> {
+    let normalized_hostname = hostname.trim().trim_end_matches('.');
+    if normalized_hostname.is_empty() {
+        return Err(ApiError::Validation("Invalid hostname".to_string()));
+    }
+
     // Create a custom TLS configuration that accepts any certificate
     let mut config = rustls::ClientConfig::builder()
         .with_root_certificates(rustls::RootCertStore::empty())
@@ -184,17 +188,31 @@ pub async fn get_tls_certificate_info(
 
     let connector = TlsConnector::from(Arc::new(config));
 
-    // Connect to the server
-    let socket_addr: SocketAddr = format!("{}:{}", hostname, port)
-        .parse()
-        .map_err(|_| ApiError::Validation("Invalid hostname or port".to_string()))?;
+    // Resolve and connect so domain names work (not just IP literals).
+    let mut resolved_addrs = lookup_host((normalized_hostname, port))
+        .await
+        .map_err(|e| {
+            ApiError::ExternalService(format!(
+                "Failed to resolve {}:{}: {}",
+                normalized_hostname, port, e
+            ))
+        })?;
+    let socket_addr = resolved_addrs.next().ok_or_else(|| {
+        ApiError::ExternalService(format!(
+            "No addresses found for {}:{}",
+            normalized_hostname, port
+        ))
+    })?;
 
     let tcp_stream = TcpStream::connect(socket_addr).await.map_err(|e| {
-        ApiError::ExternalService(format!("Failed to connect to {}:{}: {}", hostname, port, e))
+        ApiError::ExternalService(format!(
+            "Failed to connect to {}:{}: {}",
+            normalized_hostname, port, e
+        ))
     })?;
 
     // Parse hostname for TLS SNI
-    let server_name = ServerName::try_from(hostname.to_string())
+    let server_name = ServerName::try_from(normalized_hostname.to_string())
         .map_err(|e| ApiError::Validation(format!("Invalid hostname for TLS: {}", e)))?;
 
     // Perform TLS handshake

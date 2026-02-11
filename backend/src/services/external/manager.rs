@@ -5,7 +5,8 @@ use super::{
 use crate::config::Settings;
 use crate::config::SharedSettings;
 use crate::error::ApiError;
-use std::collections::HashMap;
+use crate::models::SourceType;
+use std::collections::{HashMap, HashSet};
 
 /// External services manager that coordinates all API integrations
 pub struct ExternalServicesManager {
@@ -17,8 +18,18 @@ pub struct ExternalServicesManager {
 pub struct SubdomainEnumerationResult {
     pub subdomains: Vec<String>,
     pub sources: HashMap<String, Vec<String>>, // source -> domains found
+    pub hostname_sources: HashMap<String, Vec<SourceType>>, // hostname -> ordered sources
+    pub source_execution: Vec<SourceExecutionStatus>,
     /// IP -> owner hint from the existing Shodan domain query (if available).
     pub shodan_ip_owners: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceExecutionStatus {
+    pub source: SourceType,
+    pub status: String, // queried | skipped | failed
+    pub message: Option<String>,
+    pub hostnames_found: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +38,93 @@ pub struct ThreatIntelligenceResult {
     pub reputation_score: Option<i32>,
     pub threat_sources: Vec<String>,
     pub additional_info: HashMap<String, String>,
+}
+
+const DISCOVERY_SOURCE_PRIORITY: [SourceType; 4] = [
+    SourceType::Shodan,
+    SourceType::Virustotal,
+    SourceType::Crtsh,
+    SourceType::Certspotter,
+];
+
+fn source_key(source: &SourceType) -> &'static str {
+    match source {
+        SourceType::Shodan => "shodan",
+        SourceType::Virustotal => "virustotal",
+        SourceType::Crtsh => "crtsh",
+        SourceType::Certspotter => "certspotter",
+        _ => "user_input",
+    }
+}
+
+fn normalize_hostname(hostname: &str) -> Option<String> {
+    let mut normalized = hostname.trim().trim_end_matches('.').to_lowercase();
+    if normalized.starts_with("*.") {
+        normalized = normalized.trim_start_matches("*.").to_string();
+    }
+    if normalized.is_empty()
+        || normalized.len() > 253
+        || normalized.contains(char::is_whitespace)
+        || normalized.contains('/')
+    {
+        return None;
+    }
+
+    let labels: Vec<&str> = normalized.split('.').collect();
+    if labels.is_empty() {
+        return None;
+    }
+
+    for label in labels {
+        if label.is_empty() || label.len() > 63 {
+            return None;
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return None;
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return None;
+        }
+    }
+
+    Some(normalized)
+}
+
+fn is_related_hostname(hostname: &str, base_domain: &str) -> bool {
+    hostname == base_domain || hostname.ends_with(&format!(".{}", base_domain))
+}
+
+fn add_hostnames_for_source(
+    hostname_sources: &mut HashMap<String, Vec<SourceType>>,
+    source_hostnames: &mut HashMap<String, Vec<String>>,
+    source: SourceType,
+    base_domain: &str,
+    hostnames: Vec<String>,
+) -> usize {
+    let mut accepted_for_source: Vec<String> = Vec::new();
+    let mut seen_for_source: HashSet<String> = HashSet::new();
+
+    for hostname in hostnames {
+        let Some(canonical) = normalize_hostname(&hostname) else {
+            continue;
+        };
+        if !is_related_hostname(&canonical, base_domain) {
+            continue;
+        }
+        if !seen_for_source.insert(canonical.clone()) {
+            continue;
+        }
+
+        let entry = hostname_sources.entry(canonical.clone()).or_default();
+        if !entry.contains(&source) {
+            entry.push(source.clone());
+        }
+        accepted_for_source.push(canonical);
+    }
+
+    accepted_for_source.sort();
+    source_hostnames.insert(source_key(&source).to_string(), accepted_for_source.clone());
+    accepted_for_source.len()
 }
 
 impl ExternalServicesManager {
@@ -47,125 +145,222 @@ impl ExternalServicesManager {
         &self,
         domain: &str,
     ) -> Result<SubdomainEnumerationResult, ApiError> {
-        let mut all_subdomains = std::collections::HashSet::new();
-        let mut sources = HashMap::new();
+        let canonical_domain = normalize_hostname(domain)
+            .ok_or_else(|| ApiError::Validation("Domain cannot be empty".to_string()))?;
+        let mut hostname_sources: HashMap<String, Vec<SourceType>> = HashMap::new();
+        let mut sources: HashMap<String, Vec<String>> = HashMap::new();
+        let mut source_execution: Vec<SourceExecutionStatus> = Vec::new();
         let mut shodan_ip_owners = HashMap::new();
+
         let settings = self.settings.load();
         let shodan_client = self.shodan_client_for(&settings)?;
         let virustotal_client = self.virustotal_client_for(&settings)?;
         let certspotter_client = self.certspotter_client_for(&settings)?;
 
-        // PRIORITY 1: Try Shodan first (if configured) as primary source
-        // Use comprehensive search to extract ALL asset types
-        if let Some(ref client) = shodan_client {
-            tracing::info!(
-                "Enumerating subdomains for {} using Shodan (PRIMARY - Comprehensive)",
-                domain
-            );
-            match client.search_domain_comprehensive(domain).await {
-                Ok(extracted) => {
-                    // Add discovered domains
-                    if !extracted.domains.is_empty() {
-                        tracing::info!("✓ Shodan found {} domains", extracted.domains.len());
-                        let shodan_domains: Vec<String> =
-                            extracted.domains.iter().cloned().collect();
-                        sources.insert("shodan".to_string(), shodan_domains.clone());
-                        all_subdomains.extend(shodan_domains);
-                    }
-                    shodan_ip_owners.extend(extracted.ip_owners.clone());
-
-                    // Log additional asset types found (for recursive discovery in parent function)
-                    if !extracted.ips.is_empty() {
+        for source in DISCOVERY_SOURCE_PRIORITY {
+            match source {
+                SourceType::Shodan => {
+                    if let Some(ref client) = shodan_client {
                         tracing::info!(
-                            "✓ Shodan found {} IPs (available for recursive discovery)",
-                            extracted.ips.len()
+                            "Enumerating subdomains for {} using Shodan (priority 1)",
+                            canonical_domain
                         );
-                    }
-                    if !extracted.asns.is_empty() {
-                        tracing::info!(
-                            "✓ Shodan found {} ASNs (available for recursive discovery)",
-                            extracted.asns.len()
-                        );
-                    }
-                    if !extracted.organizations.is_empty() {
-                        tracing::info!(
-                            "✓ Shodan found {} organizations (available for recursive discovery)",
-                            extracted.organizations.len()
-                        );
-                    }
-                    if !extracted.certificates.is_empty() {
-                        tracing::info!(
-                            "✓ Shodan found {} certificates (available for recursive discovery)",
-                            extracted.certificates.len()
-                        );
+                        match client.search_domain_comprehensive(&canonical_domain).await {
+                            Ok(extracted) => {
+                                let ShodanExtractedAssets {
+                                    domains, ip_owners, ..
+                                } = extracted;
+                                let domains: Vec<String> = domains.into_iter().collect();
+                                let discovered = add_hostnames_for_source(
+                                    &mut hostname_sources,
+                                    &mut sources,
+                                    SourceType::Shodan,
+                                    &canonical_domain,
+                                    domains,
+                                );
+                                shodan_ip_owners.extend(ip_owners);
+                                source_execution.push(SourceExecutionStatus {
+                                    source: SourceType::Shodan,
+                                    status: "queried".to_string(),
+                                    message: None,
+                                    hostnames_found: discovered,
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Shodan comprehensive enumeration failed for {}: {}",
+                                    canonical_domain,
+                                    e
+                                );
+                                sources
+                                    .entry(source_key(&SourceType::Shodan).to_string())
+                                    .or_default();
+                                source_execution.push(SourceExecutionStatus {
+                                    source: SourceType::Shodan,
+                                    status: "failed".to_string(),
+                                    message: Some(e.to_string()),
+                                    hostnames_found: 0,
+                                });
+                            }
+                        }
+                    } else {
+                        sources.insert(source_key(&SourceType::Shodan).to_string(), Vec::new());
+                        source_execution.push(SourceExecutionStatus {
+                            source: SourceType::Shodan,
+                            status: "skipped".to_string(),
+                            message: Some("Shodan API not configured".to_string()),
+                            hostnames_found: 0,
+                        });
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "Shodan comprehensive enumeration failed for {}: {}",
-                        domain,
-                        e
-                    );
+                SourceType::Virustotal => {
+                    if let Some(ref client) = virustotal_client {
+                        tracing::info!(
+                            "Enumerating subdomains for {} using VirusTotal (priority 2)",
+                            canonical_domain
+                        );
+                        match client.get_subdomains(&canonical_domain).await {
+                            Ok(domains) => {
+                                let discovered = add_hostnames_for_source(
+                                    &mut hostname_sources,
+                                    &mut sources,
+                                    SourceType::Virustotal,
+                                    &canonical_domain,
+                                    domains,
+                                );
+                                source_execution.push(SourceExecutionStatus {
+                                    source: SourceType::Virustotal,
+                                    status: "queried".to_string(),
+                                    message: None,
+                                    hostnames_found: discovered,
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "VirusTotal enumeration failed for {}: {}",
+                                    canonical_domain,
+                                    e
+                                );
+                                sources
+                                    .entry(source_key(&SourceType::Virustotal).to_string())
+                                    .or_default();
+                                source_execution.push(SourceExecutionStatus {
+                                    source: SourceType::Virustotal,
+                                    status: "failed".to_string(),
+                                    message: Some(e.to_string()),
+                                    hostnames_found: 0,
+                                });
+                            }
+                        }
+                    } else {
+                        sources.insert(source_key(&SourceType::Virustotal).to_string(), Vec::new());
+                        source_execution.push(SourceExecutionStatus {
+                            source: SourceType::Virustotal,
+                            status: "skipped".to_string(),
+                            message: Some("VirusTotal API not configured".to_string()),
+                            hostnames_found: 0,
+                        });
+                    }
                 }
-            }
-        } else {
-            tracing::info!("Shodan not configured");
-        }
-
-        // ALWAYS query additional sources for comprehensive coverage
-        tracing::info!("Querying additional sources for comprehensive coverage");
-
-        // Certificate Transparency (crt.sh) - always available
-        tracing::info!("Enumerating subdomains for {} using crt.sh", domain);
-        match self.crtsh_client.search_domain(domain).await {
-            Ok(crtsh_domains) => {
-                tracing::info!("Found {} domains from crt.sh", crtsh_domains.len());
-                sources.insert("crt.sh".to_string(), crtsh_domains.clone());
-                all_subdomains.extend(crtsh_domains);
-            }
-            Err(e) => {
-                tracing::warn!("crt.sh enumeration failed for {}: {}", domain, e);
-            }
-        }
-
-        // CertSpotter - if configured
-        if let Some(ref client) = certspotter_client {
-            tracing::info!("Enumerating subdomains for {} using CertSpotter", domain);
-            match client.get_subdomains(domain).await {
-                Ok(certspotter_domains) => {
+                SourceType::Crtsh => {
                     tracing::info!(
-                        "Found {} domains from CertSpotter",
-                        certspotter_domains.len()
+                        "Enumerating subdomains for {} using crt.sh (priority 3)",
+                        canonical_domain
                     );
-                    sources.insert("certspotter".to_string(), certspotter_domains.clone());
-                    all_subdomains.extend(certspotter_domains);
+                    match self.crtsh_client.search_domain(&canonical_domain).await {
+                        Ok(domains) => {
+                            let discovered = add_hostnames_for_source(
+                                &mut hostname_sources,
+                                &mut sources,
+                                SourceType::Crtsh,
+                                &canonical_domain,
+                                domains,
+                            );
+                            source_execution.push(SourceExecutionStatus {
+                                source: SourceType::Crtsh,
+                                status: "queried".to_string(),
+                                message: None,
+                                hostnames_found: discovered,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "crt.sh enumeration failed for {}: {}",
+                                canonical_domain,
+                                e
+                            );
+                            sources
+                                .entry(source_key(&SourceType::Crtsh).to_string())
+                                .or_default();
+                            source_execution.push(SourceExecutionStatus {
+                                source: SourceType::Crtsh,
+                                status: "failed".to_string(),
+                                message: Some(e.to_string()),
+                                hostnames_found: 0,
+                            });
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("CertSpotter enumeration failed for {}: {}", domain, e);
+                SourceType::Certspotter => {
+                    if let Some(ref client) = certspotter_client {
+                        tracing::info!(
+                            "Enumerating subdomains for {} using CertSpotter (priority 4)",
+                            canonical_domain
+                        );
+                        match client.get_subdomains(&canonical_domain).await {
+                            Ok(domains) => {
+                                let discovered = add_hostnames_for_source(
+                                    &mut hostname_sources,
+                                    &mut sources,
+                                    SourceType::Certspotter,
+                                    &canonical_domain,
+                                    domains,
+                                );
+                                source_execution.push(SourceExecutionStatus {
+                                    source: SourceType::Certspotter,
+                                    status: "queried".to_string(),
+                                    message: None,
+                                    hostnames_found: discovered,
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "CertSpotter enumeration failed for {}: {}",
+                                    canonical_domain,
+                                    e
+                                );
+                                sources
+                                    .entry(source_key(&SourceType::Certspotter).to_string())
+                                    .or_default();
+                                source_execution.push(SourceExecutionStatus {
+                                    source: SourceType::Certspotter,
+                                    status: "failed".to_string(),
+                                    message: Some(e.to_string()),
+                                    hostnames_found: 0,
+                                });
+                            }
+                        }
+                    } else {
+                        sources
+                            .insert(source_key(&SourceType::Certspotter).to_string(), Vec::new());
+                        source_execution.push(SourceExecutionStatus {
+                            source: SourceType::Certspotter,
+                            status: "skipped".to_string(),
+                            message: Some("CertSpotter API not configured".to_string()),
+                            hostnames_found: 0,
+                        });
+                    }
                 }
+                _ => {}
             }
         }
 
-        // VirusTotal - if configured
-        if let Some(ref client) = virustotal_client {
-            tracing::info!("Enumerating subdomains for {} using VirusTotal", domain);
-            match client.get_subdomains(domain).await {
-                Ok(vt_domains) => {
-                    tracing::info!("Found {} domains from VirusTotal", vt_domains.len());
-                    sources.insert("virustotal".to_string(), vt_domains.clone());
-                    all_subdomains.extend(vt_domains);
-                }
-                Err(e) => {
-                    tracing::warn!("VirusTotal enumeration failed for {}: {}", domain, e);
-                }
-            }
-        }
-
-        let final_subdomains: Vec<String> = all_subdomains.into_iter().collect();
+        let mut final_subdomains: Vec<String> = hostname_sources.keys().cloned().collect();
+        final_subdomains.sort();
 
         tracing::info!(
             "Subdomain enumeration complete for {}: {} unique domains from {} sources",
-            domain,
+            canonical_domain,
             final_subdomains.len(),
             sources.len()
         );
@@ -173,6 +368,8 @@ impl ExternalServicesManager {
         Ok(SubdomainEnumerationResult {
             subdomains: final_subdomains,
             sources,
+            hostname_sources,
+            source_execution,
             shodan_ip_owners,
         })
     }
@@ -508,6 +705,7 @@ fn has_value(opt: &Option<String>) -> bool {
 mod tests {
     use super::*;
     use crate::config::Settings;
+    use crate::models::SourceType;
     use arc_swap::ArcSwap;
     use std::sync::Arc;
 
@@ -547,5 +745,84 @@ mod tests {
             .unwrap();
         assert!(!result.is_malicious);
         assert!(result.threat_sources.is_empty());
+    }
+
+    #[test]
+    fn test_normalize_hostname_canonicalization() {
+        assert_eq!(
+            normalize_hostname(" WWW.Example.com. "),
+            Some("www.example.com".to_string())
+        );
+        assert_eq!(
+            normalize_hostname("*.Api.Example.com"),
+            Some("api.example.com".to_string())
+        );
+        assert_eq!(normalize_hostname(""), None);
+        assert_eq!(normalize_hostname("bad host"), None);
+    }
+
+    #[test]
+    fn test_add_hostnames_for_source_deduplicates_and_tracks_sources() {
+        let mut hostname_sources: HashMap<String, Vec<SourceType>> = HashMap::new();
+        let mut source_hostnames: HashMap<String, Vec<String>> = HashMap::new();
+
+        let shodan_count = add_hostnames_for_source(
+            &mut hostname_sources,
+            &mut source_hostnames,
+            SourceType::Shodan,
+            "example.com",
+            vec![
+                "WWW.Example.com.".to_string(),
+                "api.example.com".to_string(),
+                "irrelevant.org".to_string(),
+            ],
+        );
+        assert_eq!(shodan_count, 2);
+
+        let vt_count = add_hostnames_for_source(
+            &mut hostname_sources,
+            &mut source_hostnames,
+            SourceType::Virustotal,
+            "example.com",
+            vec![
+                "www.example.com".to_string(),
+                "mail.example.com".to_string(),
+                "mail.example.com".to_string(),
+            ],
+        );
+        assert_eq!(vt_count, 2);
+
+        let www_sources = hostname_sources
+            .get("www.example.com")
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            www_sources,
+            vec![SourceType::Shodan, SourceType::Virustotal]
+        );
+        assert!(hostname_sources.contains_key("api.example.com"));
+        assert!(hostname_sources.contains_key("mail.example.com"));
+        assert!(!hostname_sources.contains_key("irrelevant.org"));
+
+        let shodan_hosts = source_hostnames.get("shodan").cloned().unwrap_or_default();
+        let vt_hosts = source_hostnames
+            .get("virustotal")
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(shodan_hosts, vec!["api.example.com", "www.example.com"]);
+        assert_eq!(vt_hosts, vec!["mail.example.com", "www.example.com"]);
+    }
+
+    #[test]
+    fn test_source_priority_order_is_fixed() {
+        assert_eq!(
+            DISCOVERY_SOURCE_PRIORITY,
+            [
+                SourceType::Shodan,
+                SourceType::Virustotal,
+                SourceType::Crtsh,
+                SourceType::Certspotter
+            ]
+        );
     }
 }

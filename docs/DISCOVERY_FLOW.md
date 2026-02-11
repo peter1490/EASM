@@ -26,7 +26,7 @@ This document provides a comprehensive overview of the EASM discovery system arc
 │  User Seeds → Discovery Engine → Asset Extraction → Database    │
 │                                                                  │
 │  Supports: Domains, Organizations, ASNs, CIDRs, Keywords        │
-│  Sources: Shodan, crt.sh, CertSpotter, VirusTotal, DNS          │
+│  Sources: Shodan, VirusTotal, crt.sh, CertSpotter, DNS          │
 │  Assets: IPs, Domains, Certificates, All stored with metadata   │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -138,11 +138,12 @@ discover_from_domain_recursive(domain)
          │  ┌────────────────────────────────────┐     │
          │  │ enumerate_subdomains()              │     │
          │  │  → Shodan (PRIMARY)                 │     │
+         │  │  → VirusTotal (if configured)       │     │
          │  │  → crt.sh (ALWAYS)                  │     │
          │  │  → CertSpotter (if configured)      │     │
-         │  │  → VirusTotal (if configured)       │     │
          │  │                                     │     │
-         │  │ Result: Merged unique subdomains    │     │
+         │  │ Result: canonical dedup hostnames   │     │
+         │  │ with per-host source attribution    │     │
          │  └────────────────────────────────────┘     │
          │                                              │
          │  STEP 3: DNS Resolution                     │
@@ -565,8 +566,8 @@ discover_from_keyword(keyword)
         │                │                │                 │
         ▼                ▼                ▼                 ▼
 ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-│   Shodan     │ │   crt.sh     │ │ CertSpotter  │ │ VirusTotal   │
-│  (PRIMARY)   │ │   (ALWAYS)   │ │ (if config)  │ │ (if config)  │
+│   Shodan     │ │ VirusTotal   │ │   crt.sh     │ │ CertSpotter  │
+│  (PRIORITY1) │ │ (PRIORITY2)  │ │ (PRIORITY3)  │ │ (PRIORITY4)  │
 │              │ │              │ │              │ │              │
 │ Comprehensive│ │ CT Logs      │ │ CT Logs      │ │ Passive DNS  │
 │ Extraction:  │ │ Search       │ │ Search       │ │ Subdomains   │
@@ -617,8 +618,8 @@ discover_from_keyword(keyword)
   Legend:
   ━━━━━ Primary data flow
   ┄┄┄┄┄ Optional/conditional flow
-  (PRIMARY) - First priority source
-  (ALWAYS) - Always queried for comprehensive coverage
+  (PRIORITYn) - Strict source execution order
+  best effort - continue when a source is unavailable/failed
   (if config) - Only if API key configured
 ```
 
@@ -809,7 +810,7 @@ GET /api/discovery/status
 ```
 INFO  - Major steps, asset counts, source usage
 DEBUG - Detailed extraction, intermediate results
-WARN  - API failures, fallbacks triggered
+WARN  - API failures, fallbacks triggered (best effort continues)
 ERROR - Critical failures, task panics
 ```
 
@@ -828,6 +829,7 @@ ERROR - Critical failures, task panics
 - **Always configure Shodan** - Primary source for comprehensive extraction
 - **Add VirusTotal** for additional subdomain coverage
 - **Consider CertSpotter** for real-time CT monitoring
+- Canonical source names in storage are `shodan`, `virustotal`, `crtsh`, `certspotter`
 
 ### 3. Performance Tuning
 - Adjust `max_concurrent_scans` based on API limits and memory
@@ -853,4 +855,3 @@ ERROR - Critical failures, task panics
 **Last Updated:** 2024-11-20  
 **Version:** 1.0  
 **Maintained by:** EASM Development Team
-

@@ -118,6 +118,14 @@ static KNOWN_CLOUD_PROVIDER_KEYWORDS: &[&str] = &[
     "imperva",
 ];
 
+/// Discovery source priority for canonical ordering and primary discovery method selection.
+static DISCOVERY_SOURCE_PRIORITY: &[SourceType] = &[
+    SourceType::Shodan,
+    SourceType::Virustotal,
+    SourceType::Crtsh,
+    SourceType::Certspotter,
+];
+
 /// Discovery run status tracking (in-memory for real-time updates)
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryStatus {
@@ -629,11 +637,17 @@ impl DiscoveryService {
                 SeedType::Cidr => QueueItemType::Cidr,
                 SeedType::Keyword => QueueItemType::Domain, // Keywords search for domains
             };
+            let item_value = if seed.seed_type == SeedType::Domain {
+                Self::normalize_discovery_hostname(&seed.value)
+                    .unwrap_or_else(|| seed.value.trim().trim_end_matches('.').to_lowercase())
+            } else {
+                seed.value.clone()
+            };
 
             let item = DiscoveryQueueItemCreate {
                 discovery_run_id: run_id,
                 item_type,
-                item_value: seed.value.clone(),
+                item_value,
                 parent_asset_id: None,
                 seed_id: Some(seed.id),
                 depth: 0,
@@ -988,6 +1002,11 @@ impl DiscoveryService {
         max_depth: i32,
     ) -> Result<DiscoveryResult, ApiError> {
         let mut result = DiscoveryResult::default();
+        let canonical_domain = Self::normalize_discovery_hostname(domain)
+            .unwrap_or_else(|| domain.trim().trim_end_matches('.').to_lowercase());
+        if canonical_domain.is_empty() {
+            return Err(ApiError::Validation("Invalid domain format".to_string()));
+        }
 
         // Create the domain asset first (if it's not from a seed)
         let domain_asset = self
@@ -995,7 +1014,7 @@ impl DiscoveryService {
                 run_id,
                 company_id,
                 AssetType::Domain,
-                domain,
+                &canonical_domain,
                 SourceType::Seed,
                 1.0, // Full confidence for seed domains
                 seed_id,
@@ -1014,31 +1033,55 @@ impl DiscoveryService {
         let domain_asset_id = domain_asset.0;
 
         // Step 1: Subdomain enumeration from multiple sources
-        match self.external_services.enumerate_subdomains(domain).await {
+        match self
+            .external_services
+            .enumerate_subdomains(&canonical_domain)
+            .await
+        {
             Ok(subdomain_result) => {
                 self.cache_ip_owner_hints(&subdomain_result.shodan_ip_owners)
                     .await;
 
+                for execution in &subdomain_result.source_execution {
+                    if execution.status == "failed" {
+                        result.warnings.push(format!(
+                            "{} enumeration failed: {}",
+                            execution.source,
+                            execution
+                                .message
+                                .clone()
+                                .unwrap_or_else(|| "unknown error".to_string())
+                        ));
+                    }
+                }
+
                 for subdomain in &subdomain_result.subdomains {
-                    if subdomain == domain {
+                    if subdomain == &canonical_domain {
                         continue; // Skip the main domain
                     }
 
-                    let confidence = self.calculate_subdomain_confidence(&subdomain_result.sources);
+                    let source_types = subdomain_result
+                        .hostname_sources
+                        .get(subdomain)
+                        .cloned()
+                        .unwrap_or_else(|| vec![SourceType::UserInput]);
+                    let source_names: Vec<String> =
+                        source_types.iter().map(|s| s.to_string()).collect();
+                    let confidence = self.calculate_subdomain_confidence(source_types.len());
 
                     let asset = self
-                        .create_or_update_asset(
+                        .create_or_update_asset_with_sources(
                             run_id,
                             company_id,
                             AssetType::Domain,
                             subdomain,
-                            SourceType::Shodan, // Primary source
+                            source_types,
                             confidence,
                             seed_id,
                             Some(domain_asset_id),
                             Some(json!({
-                                "parent_domain": domain,
-                                "sources": subdomain_result.sources.keys().collect::<Vec<_>>()
+                                "parent_domain": canonical_domain.clone(),
+                                "discovered_by_sources": source_names,
                             })),
                         )
                         .await?;
@@ -1085,7 +1128,7 @@ impl DiscoveryService {
         }
 
         // Step 2: DNS resolution
-        match self.dns_resolver.resolve_hostname(domain).await {
+        match self.dns_resolver.resolve_hostname(&canonical_domain).await {
             Ok(ips) => {
                 for ip in ips {
                     let ip_str = ip.to_string();
@@ -1103,7 +1146,7 @@ impl DiscoveryService {
                             confidence,
                             seed_id,
                             Some(domain_asset_id),
-                            Some(json!({ "resolved_from": domain })),
+                            Some(json!({ "resolved_from": canonical_domain.clone() })),
                         )
                         .await?;
 
@@ -1128,14 +1171,14 @@ impl DiscoveryService {
                 }
             }
             Err(e) => {
-                tracing::debug!("DNS resolution failed for {}: {}", domain, e);
+                tracing::debug!("DNS resolution failed for {}: {}", canonical_domain, e);
             }
         }
 
         // Step 3: TLS Certificate analysis (for pivoting)
         match self
             .http_analyzer
-            .get_tls_certificate_info(domain, 443)
+            .get_tls_certificate_info(&canonical_domain, 443)
             .await
         {
             Ok(cert_result) => {
@@ -1198,7 +1241,11 @@ impl DiscoveryService {
                 }
             }
             Err(e) => {
-                tracing::debug!("TLS certificate analysis failed for {}: {}", domain, e);
+                tracing::debug!(
+                    "TLS certificate analysis failed for {}: {}",
+                    canonical_domain,
+                    e
+                );
             }
         }
 
@@ -1246,8 +1293,9 @@ impl DiscoveryService {
         }
 
         let org_asset_id = org_asset.0;
+        let mut discovered_domains: HashMap<String, Vec<SourceType>> = HashMap::new();
 
-        // Search Shodan for organization
+        // Source order 1: Shodan (direct-capable)
         match self
             .external_services
             .search_shodan_org_comprehensive(org)
@@ -1286,51 +1334,13 @@ impl DiscoveryService {
                     .await?;
                 }
 
-                // Process domains - queue for further discovery
+                // Collect domains from Shodan, then process all domains in source-priority order.
                 for domain in &extracted.domains {
-                    let asset = self
-                        .create_or_update_asset(
-                            run_id,
-                            company_id,
-                            AssetType::Domain,
-                            domain,
-                            SourceType::Shodan,
-                            0.6,
-                            seed_id,
-                            Some(org_asset_id),
-                            Some(json!({ "organization": org })),
-                        )
-                        .await?;
-
-                    if asset.1 {
-                        result.assets_created.push(asset.0);
-                    }
-
-                    // Queue for deeper discovery if within depth limit
-                    // Queue regardless of whether asset was just created - this allows
-                    // re-running discovery with increased depth to explore deeper
-                    // NOTE: Pass org_asset_id as parent (not the domain's own ID!)
-                    if depth < max_depth {
-                        self.queue_for_discovery(
-                            run_id,
-                            QueueItemType::Domain,
-                            domain,
-                            seed_id,
-                            Some(org_asset_id),
-                            depth + 1,
-                            3,
-                        )
-                        .await?;
-                    }
-
-                    self.create_relationship(
-                        run_id,
-                        org_asset_id,
-                        asset.0,
-                        RelationshipType::BelongsToOrg,
-                        0.6,
-                    )
-                    .await?;
+                    Self::record_discovered_domain_source(
+                        &mut discovered_domains,
+                        domain,
+                        SourceType::Shodan,
+                    );
                 }
             }
             Err(e) => {
@@ -1340,45 +1350,89 @@ impl DiscoveryService {
             }
         }
 
-        // Also search crt.sh for domains
+        // Source order 2: VirusTotal has no direct organization endpoint (pivot-only via domain flow).
+        tracing::debug!(
+            "Skipping direct VirusTotal organization discovery for '{}' (pivot-only)",
+            org
+        );
+
+        // Source order 3: crt.sh (direct-capable)
         match self
             .external_services
             .search_crtsh_by_organization(org)
             .await
         {
             Ok(domains) => {
-                for domain in domains.iter().take(50) {
-                    // Limit to prevent explosion
-                    let asset = self
-                        .create_or_update_asset(
-                            run_id,
-                            company_id,
-                            AssetType::Domain,
-                            domain,
-                            SourceType::Crtsh,
-                            0.6,
-                            seed_id,
-                            Some(org_asset_id),
-                            Some(json!({ "organization": org, "source": "crt.sh" })),
-                        )
-                        .await?;
-
-                    if asset.1 {
-                        result.assets_created.push(asset.0);
-                    }
-
-                    self.create_relationship(
-                        run_id,
-                        org_asset_id,
-                        asset.0,
-                        RelationshipType::BelongsToOrg,
-                        0.6,
-                    )
-                    .await?;
+                for domain in &domains {
+                    Self::record_discovered_domain_source(
+                        &mut discovered_domains,
+                        domain,
+                        SourceType::Crtsh,
+                    );
                 }
             }
             Err(e) => {
                 tracing::debug!("crt.sh org search failed: {}", e);
+            }
+        }
+
+        // Source order 4: CertSpotter has no direct organization endpoint (pivot-only via domain flow).
+        tracing::debug!(
+            "Skipping direct CertSpotter organization discovery for '{}' (pivot-only)",
+            org
+        );
+
+        let mut ordered_domains: Vec<String> = discovered_domains.keys().cloned().collect();
+        ordered_domains.sort();
+
+        for domain in ordered_domains {
+            let source_types = discovered_domains.remove(&domain).unwrap_or_default();
+            let source_names: Vec<String> = source_types.iter().map(|s| s.to_string()).collect();
+            let confidence = self.calculate_multi_source_confidence(0.6, source_types.len());
+
+            let asset = self
+                .create_or_update_asset_with_sources(
+                    run_id,
+                    company_id,
+                    AssetType::Domain,
+                    &domain,
+                    source_types,
+                    confidence,
+                    seed_id,
+                    Some(org_asset_id),
+                    Some(json!({
+                        "organization": org,
+                        "discovered_by_sources": source_names,
+                    })),
+                )
+                .await?;
+
+            if asset.1 {
+                result.assets_created.push(asset.0);
+            } else {
+                result.assets_updated.push(asset.0);
+            }
+
+            self.create_relationship(
+                run_id,
+                org_asset_id,
+                asset.0,
+                RelationshipType::BelongsToOrg,
+                confidence,
+            )
+            .await?;
+
+            if depth < max_depth {
+                self.queue_for_discovery(
+                    run_id,
+                    QueueItemType::Domain,
+                    &domain,
+                    seed_id,
+                    Some(org_asset_id),
+                    depth + 1,
+                    3,
+                )
+                .await?;
             }
         }
 
@@ -1394,7 +1448,7 @@ impl DiscoveryService {
         seed_id: Option<Uuid>,
         parent_asset_id: Option<Uuid>,
         depth: i32,
-        _max_depth: i32,
+        max_depth: i32,
     ) -> Result<DiscoveryResult, ApiError> {
         let mut result = DiscoveryResult::default();
 
@@ -1418,8 +1472,9 @@ impl DiscoveryService {
         }
 
         let asn_asset_id = asn_asset.0;
+        let mut discovered_domains: HashMap<String, Vec<SourceType>> = HashMap::new();
 
-        // Search Shodan for ASN
+        // Source order 1: Shodan (direct-capable)
         match self
             .external_services
             .search_shodan_asn_comprehensive(asn)
@@ -1458,29 +1513,77 @@ impl DiscoveryService {
                 }
 
                 for domain in &extracted.domains {
-                    let asset = self
-                        .create_or_update_asset(
-                            run_id,
-                            company_id,
-                            AssetType::Domain,
-                            domain,
-                            SourceType::Shodan,
-                            0.7,
-                            seed_id,
-                            Some(asn_asset_id),
-                            Some(json!({ "asn": asn })),
-                        )
-                        .await?;
-
-                    if asset.1 {
-                        result.assets_created.push(asset.0);
-                    }
+                    Self::record_discovered_domain_source(
+                        &mut discovered_domains,
+                        domain,
+                        SourceType::Shodan,
+                    );
                 }
             }
             Err(e) => {
                 result
                     .warnings
                     .push(format!("Shodan ASN search failed: {}", e));
+            }
+        }
+
+        // Source order 2-4: no direct ASN queries for VirusTotal/crt.sh/CertSpotter (pivot-only).
+        tracing::debug!(
+            "Skipping direct VirusTotal/crt.sh/CertSpotter ASN discovery for '{}' (pivot-only)",
+            asn
+        );
+
+        let mut ordered_domains: Vec<String> = discovered_domains.keys().cloned().collect();
+        ordered_domains.sort();
+
+        for domain in ordered_domains {
+            let source_types = discovered_domains.remove(&domain).unwrap_or_default();
+            let source_names: Vec<String> = source_types.iter().map(|s| s.to_string()).collect();
+            let confidence = self.calculate_multi_source_confidence(0.7, source_types.len());
+
+            let asset = self
+                .create_or_update_asset_with_sources(
+                    run_id,
+                    company_id,
+                    AssetType::Domain,
+                    &domain,
+                    source_types,
+                    confidence,
+                    seed_id,
+                    Some(asn_asset_id),
+                    Some(json!({
+                        "asn": asn,
+                        "discovered_by_sources": source_names,
+                    })),
+                )
+                .await?;
+
+            if asset.1 {
+                result.assets_created.push(asset.0);
+            } else {
+                result.assets_updated.push(asset.0);
+            }
+
+            self.create_relationship(
+                run_id,
+                asn_asset_id,
+                asset.0,
+                RelationshipType::BelongsToAsn,
+                confidence,
+            )
+            .await?;
+
+            if depth < max_depth {
+                self.queue_for_discovery(
+                    run_id,
+                    QueueItemType::Domain,
+                    &domain,
+                    seed_id,
+                    Some(asn_asset_id),
+                    depth + 1,
+                    3,
+                )
+                .await?;
             }
         }
 
@@ -1635,23 +1738,66 @@ impl DiscoveryService {
         parent_id: Option<Uuid>,
         metadata: Option<serde_json::Value>,
     ) -> Result<(Uuid, bool), ApiError> {
+        self.create_or_update_asset_with_sources(
+            run_id,
+            company_id,
+            asset_type,
+            identifier,
+            vec![source_type],
+            confidence,
+            seed_id,
+            parent_id,
+            metadata,
+        )
+        .await
+    }
+
+    async fn create_or_update_asset_with_sources(
+        &self,
+        run_id: Uuid,
+        company_id: Uuid,
+        asset_type: AssetType,
+        identifier: &str,
+        source_types: Vec<SourceType>,
+        confidence: f64,
+        seed_id: Option<Uuid>,
+        parent_id: Option<Uuid>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<(Uuid, bool), ApiError> {
         // Returns (asset_id, was_created)
+        let normalized_identifier = if matches!(asset_type, AssetType::Domain) {
+            Self::normalize_discovery_hostname(identifier)
+                .ok_or_else(|| ApiError::Validation("Invalid domain format".to_string()))?
+        } else {
+            identifier.to_string()
+        };
+
+        let mut ordered_sources = Self::order_source_types(source_types);
+        if ordered_sources.is_empty() {
+            ordered_sources.push(SourceType::UserInput);
+        }
+        let source_strings: Vec<String> = ordered_sources.iter().map(|s| s.to_string()).collect();
+        let primary_source = ordered_sources
+            .first()
+            .cloned()
+            .unwrap_or(SourceType::UserInput);
+
         let asset_create = AssetCreate {
             asset_type: asset_type.clone(),
-            identifier: identifier.to_string(),
+            identifier: normalized_identifier.clone(),
             confidence,
-            sources: json!([source_type.to_string()]),
+            sources: json!(source_strings),
             metadata: metadata.unwrap_or(json!({})),
             seed_id,
             parent_id,
             discovery_run_id: Some(run_id),
-            discovery_method: Some(source_type.to_string()),
+            discovery_method: Some(primary_source.to_string()),
         };
 
         // Check if asset exists
         let existing = self
             .asset_repo
-            .get_by_identifier(company_id, asset_type.clone(), identifier)
+            .get_by_identifier(company_id, asset_type.clone(), &normalized_identifier)
             .await?;
         let was_created = existing.is_none();
 
@@ -1660,15 +1806,17 @@ impl DiscoveryService {
             .create_or_merge(&asset_create, company_id)
             .await?;
 
-        // Record the source
-        let source_create = AssetSourceCreate {
-            asset_id: asset.id,
-            discovery_run_id: Some(run_id),
-            source_type,
-            source_confidence: confidence,
-            raw_data: None,
-        };
-        self.asset_source_repo.create(&source_create).await?;
+        // Record all contributing sources for this asset.
+        for source_type in ordered_sources {
+            let source_create = AssetSourceCreate {
+                asset_id: asset.id,
+                discovery_run_id: Some(run_id),
+                source_type,
+                source_confidence: confidence,
+                raw_data: None,
+            };
+            self.asset_source_repo.create(&source_create).await?;
+        }
 
         // Auto-scan high confidence newly created assets
         if was_created {
@@ -1685,14 +1833,18 @@ impl DiscoveryService {
                     .maybe_trigger_auto_scan(
                         company_id,
                         asset.id,
-                        identifier,
+                        &normalized_identifier,
                         &asset_type,
                         confidence,
                         Some(auto_scan_threshold),
                     )
                     .await
                 {
-                    tracing::warn!("Failed to trigger auto-scan for {}: {}", identifier, e);
+                    tracing::warn!(
+                        "Failed to trigger auto-scan for {}: {}",
+                        normalized_identifier,
+                        e
+                    );
                 } else if confidence >= auto_scan_threshold {
                     // Increment counter if scan was likely queued
                     let mut statuses = self.status.lock().await;
@@ -1743,10 +1895,17 @@ impl DiscoveryService {
         depth: i32,
         priority: i32,
     ) -> Result<(), ApiError> {
+        let normalized_item_value = if item_type == QueueItemType::Domain {
+            Self::normalize_discovery_hostname(item_value)
+                .unwrap_or_else(|| item_value.trim().trim_end_matches('.').to_lowercase())
+        } else {
+            item_value.to_string()
+        };
+
         let item = DiscoveryQueueItemCreate {
             discovery_run_id: run_id,
             item_type,
-            item_value: item_value.to_string(),
+            item_value: normalized_item_value,
             parent_asset_id,
             seed_id,
             depth,
@@ -1772,6 +1931,70 @@ impl DiscoveryService {
         }
 
         false
+    }
+
+    fn normalize_discovery_hostname(hostname: &str) -> Option<String> {
+        let normalized = hostname.trim().trim_end_matches('.').to_lowercase();
+        if normalized.is_empty()
+            || normalized.len() > 253
+            || normalized.contains(char::is_whitespace)
+            || normalized.contains('/')
+        {
+            return None;
+        }
+
+        let labels: Vec<&str> = normalized.split('.').collect();
+        if labels.is_empty() {
+            return None;
+        }
+
+        for label in labels {
+            if label.is_empty() || label.len() > 63 {
+                return None;
+            }
+            if label.starts_with('-') || label.ends_with('-') {
+                return None;
+            }
+            if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                return None;
+            }
+        }
+
+        Some(normalized)
+    }
+
+    fn record_discovered_domain_source(
+        domain_sources: &mut HashMap<String, Vec<SourceType>>,
+        domain: &str,
+        source: SourceType,
+    ) {
+        let Some(canonical_domain) = Self::normalize_discovery_hostname(domain) else {
+            return;
+        };
+        let entry = domain_sources.entry(canonical_domain).or_default();
+        if !entry.contains(&source) {
+            entry.push(source);
+        }
+        let ordered = Self::order_source_types(entry.clone());
+        *entry = ordered;
+    }
+
+    fn source_priority(source: &SourceType) -> usize {
+        DISCOVERY_SOURCE_PRIORITY
+            .iter()
+            .position(|ordered| ordered == source)
+            .unwrap_or(usize::MAX)
+    }
+
+    fn order_source_types(source_types: Vec<SourceType>) -> Vec<SourceType> {
+        let mut deduped: Vec<SourceType> = Vec::new();
+        for source in source_types {
+            if !deduped.contains(&source) {
+                deduped.push(source);
+            }
+        }
+        deduped.sort_by_key(Self::source_priority);
+        deduped
     }
 
     fn is_known_cloud_provider_name(&self, owner: &str) -> bool {
@@ -1834,10 +2057,13 @@ impl DiscoveryService {
     }
 
     /// Calculate confidence for subdomain discovery
-    fn calculate_subdomain_confidence(&self, sources: &HashMap<String, Vec<String>>) -> f64 {
-        let source_count = sources.len();
-        let base = 0.5;
-        let boost = (source_count as f64 - 1.0) * 0.1;
+    fn calculate_subdomain_confidence(&self, source_count: usize) -> f64 {
+        self.calculate_multi_source_confidence(0.5, source_count)
+    }
+
+    fn calculate_multi_source_confidence(&self, base: f64, source_count: usize) -> f64 {
+        let effective_source_count = source_count.max(1);
+        let boost = ((effective_source_count as f64) - 1.0) * 0.1;
         (base + boost).min(0.9)
     }
 
@@ -1961,5 +2187,66 @@ impl Clone for DiscoveryService {
             status: Arc::clone(&self.status),
             ip_cloud_provider_cache: Arc::clone(&self.ip_cloud_provider_cache),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_discovery_hostname() {
+        assert_eq!(
+            DiscoveryService::normalize_discovery_hostname(" WWW.Example.com. "),
+            Some("www.example.com".to_string())
+        );
+        assert_eq!(
+            DiscoveryService::normalize_discovery_hostname("api.example.com"),
+            Some("api.example.com".to_string())
+        );
+        assert_eq!(
+            DiscoveryService::normalize_discovery_hostname("bad host"),
+            None
+        );
+        assert_eq!(DiscoveryService::normalize_discovery_hostname(""), None);
+    }
+
+    #[test]
+    fn test_order_source_types_uses_priority_and_dedupes() {
+        let ordered = DiscoveryService::order_source_types(vec![
+            SourceType::Crtsh,
+            SourceType::Shodan,
+            SourceType::Crtsh,
+            SourceType::Virustotal,
+        ]);
+        assert_eq!(
+            ordered,
+            vec![
+                SourceType::Shodan,
+                SourceType::Virustotal,
+                SourceType::Crtsh
+            ]
+        );
+    }
+
+    #[test]
+    fn test_record_discovered_domain_source_canonicalizes() {
+        let mut domain_sources: HashMap<String, Vec<SourceType>> = HashMap::new();
+        DiscoveryService::record_discovered_domain_source(
+            &mut domain_sources,
+            "WWW.Example.com.",
+            SourceType::Shodan,
+        );
+        DiscoveryService::record_discovered_domain_source(
+            &mut domain_sources,
+            "www.example.com",
+            SourceType::Virustotal,
+        );
+
+        let sources = domain_sources
+            .get("www.example.com")
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(sources, vec![SourceType::Shodan, SourceType::Virustotal]);
     }
 }

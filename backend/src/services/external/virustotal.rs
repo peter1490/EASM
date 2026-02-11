@@ -1,7 +1,7 @@
 use super::rate_limited_client::RateLimitedClient;
 use crate::error::ApiError;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VirusTotalDomainReport {
@@ -93,6 +93,8 @@ pub struct VirusTotalClient {
     client: RateLimitedClient,
     api_key: Option<String>,
 }
+
+const MAX_SUBDOMAIN_PAGES: usize = 100;
 
 impl VirusTotalClient {
     /// Create a new VirusTotal client with rate limiting (4 requests per minute for free tier)
@@ -187,7 +189,7 @@ impl VirusTotalClient {
             return Err(ApiError::Validation("Domain cannot be empty".to_string()));
         }
 
-        let url = format!(
+        let initial_url = format!(
             "https://www.virustotal.com/api/v3/domains/{}/subdomains",
             domain
         );
@@ -201,27 +203,58 @@ impl VirusTotalClient {
                 .map_err(|e| ApiError::Validation(format!("Invalid API key format: {}", e)))?,
         );
 
-        let response = self.client.get_with_headers(&url, headers).await?;
-        let response_text = response.text().await?;
+        let mut subdomains: HashSet<String> = HashSet::new();
+        let mut seen_urls: HashSet<String> = HashSet::new();
+        let mut next_url: Option<String> = Some(initial_url);
+        let mut page_count: usize = 0;
 
-        let vt_response: VirusTotalListResponse<VirusTotalDomainReport> =
-            serde_json::from_str(&response_text).map_err(|e| {
-                ApiError::ExternalService(format!(
-                    "Failed to parse VirusTotal subdomains response: {}",
-                    e
-                ))
-            })?;
+        while let Some(url) = next_url.take() {
+            if !seen_urls.insert(url.clone()) {
+                tracing::warn!(
+                    "Detected repeated VirusTotal subdomain page URL for {}. Stopping pagination.",
+                    domain
+                );
+                break;
+            }
 
-        let subdomains: Vec<String> = vt_response
-            .data
-            .into_iter()
-            .map(|report| report.id)
-            .collect();
+            if page_count >= MAX_SUBDOMAIN_PAGES {
+                tracing::warn!(
+                    "Reached VirusTotal subdomain pagination limit ({}) for {}. Stopping early.",
+                    MAX_SUBDOMAIN_PAGES,
+                    domain
+                );
+                break;
+            }
+
+            let response = self.client.get_with_headers(&url, headers.clone()).await?;
+            let response_text = response.text().await?;
+
+            let vt_response: VirusTotalListResponse<VirusTotalDomainReport> =
+                serde_json::from_str(&response_text).map_err(|e| {
+                    ApiError::ExternalService(format!(
+                        "Failed to parse VirusTotal subdomains response: {}",
+                        e
+                    ))
+                })?;
+
+            for report in vt_response.data {
+                if !report.id.is_empty() {
+                    subdomains.insert(report.id);
+                }
+            }
+
+            next_url = vt_response.links.and_then(|links| links.next);
+            page_count += 1;
+        }
+
+        let mut subdomains: Vec<String> = subdomains.into_iter().collect();
+        subdomains.sort();
 
         tracing::info!(
-            "Found {} subdomains for {} from VirusTotal",
+            "Found {} subdomains for {} from VirusTotal ({} pages)",
             subdomains.len(),
-            domain
+            domain,
+            page_count
         );
         Ok(subdomains)
     }

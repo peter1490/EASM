@@ -613,7 +613,9 @@ export default function SecurityScanDetailPage() {
         <Card>
           <CardHeader>
             <CardTitle>Vulnerabilities ({summary.vulnerabilities_found?.length || 0})</CardTitle>
-            <CardDescription>Known CVEs detected based on service versions</CardDescription>
+            <CardDescription>
+              Known CVEs detected from service and web technology version fingerprinting
+            </CardDescription>
           </CardHeader>
           <CardContent>
             {summary.vulnerabilities_found && summary.vulnerabilities_found.length > 0 ? (

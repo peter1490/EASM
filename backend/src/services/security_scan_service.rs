@@ -37,11 +37,30 @@ use crate::{
     utils::{
         crypto::get_tls_certificate_info,
         network::{
-            get_known_vulnerabilities, is_internal_ip, scan_ports_with_services, CDN_SIGNATURES,
-            EXTENDED_PORTS, PROXY_HEADERS, SECURITY_HEADERS, WAF_SIGNATURES,
+            get_known_vulnerabilities, is_internal_ip, scan_ports, scan_ports_with_services,
+            CDN_SIGNATURES, EXTENDED_PORTS, PROXY_HEADERS, SECURITY_HEADERS, WAF_SIGNATURES,
         },
     },
 };
+
+const DEFAULT_IP_HTTP_FALLBACK_PORTS: [u16; 4] = [443, 8443, 80, 8080];
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HttpTechnologyFingerprint {
+    product: String,
+    version: Option<String>,
+    header_name: String,
+    raw_evidence: String,
+    confidence: u8,
+}
+
+#[derive(Debug, Default)]
+struct HttpSecurityAnalysisOutcome {
+    security_headers: SecurityHeadersResult,
+    proxy_detection: ProxyDetectionResult,
+    vulnerabilities: Vec<VulnerabilityResult>,
+    technology_stack: Vec<String>,
+}
 
 pub struct SecurityScanService {
     // Repositories
@@ -572,14 +591,21 @@ impl SecurityScanService {
                     ) {
                         ctx.update_progress(0.5, Some("Analyzing HTTP security".to_string()))
                             .await?;
-                        let (http_result, proxy_result) = self
+                        let http_outcome = self
                             .analyze_http_security(scan_id, asset, domain, risk_factors, company_id)
                             .await?;
-                        summary.security_headers = Some(http_result);
-                        summary.proxy_detection = Some(proxy_result);
+                        summary.security_headers = Some(http_outcome.security_headers);
+                        summary.proxy_detection = Some(http_outcome.proxy_detection);
                         summary.http_status =
                             summary.security_headers.as_ref().and_then(|_| Some(200));
-                        // Placeholder
+                        summary.vulnerabilities_found = Self::merge_vulnerability_results(
+                            summary.vulnerabilities_found.take(),
+                            http_outcome.vulnerabilities,
+                        );
+                        summary.technology_stack = Self::merge_technology_stack(
+                            summary.technology_stack.take(),
+                            http_outcome.technology_stack,
+                        );
                     }
                 }
             }
@@ -681,6 +707,8 @@ impl SecurityScanService {
             return Ok(());
         }
 
+        let mut discovered_open_ports = Vec::new();
+
         // Port scan with service detection
         if matches!(
             scan_type,
@@ -694,36 +722,41 @@ impl SecurityScanService {
             let (open_ports, services, vulns) = self
                 .scan_ports_with_service_detection(scan_id, asset, ip, risk_factors, company_id)
                 .await?;
+            discovered_open_ports = open_ports.clone();
             summary.open_ports = Some(open_ports.clone());
             summary.services_detected = Some(services);
-            if !vulns.is_empty() {
-                summary.vulnerabilities_found = Some(vulns);
-            }
+            summary.vulnerabilities_found =
+                Self::merge_vulnerability_results(summary.vulnerabilities_found.take(), vulns);
+        }
 
-            // HTTP probing on web ports
-            if matches!(
-                scan_type,
-                SecurityScanType::HttpProbe | SecurityScanType::Full
-            ) {
-                ctx.update_progress(0.5, Some("Analyzing HTTP security".to_string()))
+        // HTTP probing on web ports
+        if matches!(
+            scan_type,
+            SecurityScanType::HttpProbe | SecurityScanType::Full
+        ) {
+            ctx.update_progress(0.5, Some("Analyzing HTTP security".to_string()))
+                .await?;
+
+            if let Some(target) = self
+                .select_http_target_for_ip(ip, &discovered_open_ports)
+                .await
+            {
+                let http_outcome = self
+                    .analyze_http_security(scan_id, asset, &target, risk_factors, company_id)
                     .await?;
-                for port in &open_ports {
-                    if matches!(port, 80 | 443 | 8080 | 8443 | 8000 | 8888 | 9000) {
-                        let target = format!("{}:{}", ip, port);
-                        let (http_result, proxy_result) = self
-                            .analyze_http_security(
-                                scan_id,
-                                asset,
-                                &target,
-                                risk_factors,
-                                company_id,
-                            )
-                            .await?;
-                        summary.security_headers = Some(http_result);
-                        summary.proxy_detection = Some(proxy_result);
-                        break; // Only analyze first web port for now
-                    }
-                }
+                summary.security_headers = Some(http_outcome.security_headers);
+                summary.proxy_detection = Some(http_outcome.proxy_detection);
+                summary.http_status = summary.security_headers.as_ref().map(|_| 200);
+                summary.vulnerabilities_found = Self::merge_vulnerability_results(
+                    summary.vulnerabilities_found.take(),
+                    http_outcome.vulnerabilities,
+                );
+                summary.technology_stack = Self::merge_technology_stack(
+                    summary.technology_stack.take(),
+                    http_outcome.technology_stack,
+                );
+            } else {
+                tracing::debug!("No HTTP port found for IP target {}", ip);
             }
         }
 
@@ -767,6 +800,98 @@ impl SecurityScanService {
         }
 
         Ok(())
+    }
+
+    async fn select_http_target_for_ip(
+        &self,
+        ip: IpAddr,
+        discovered_ports: &[u16],
+    ) -> Option<String> {
+        if let Some(target) = Self::resolve_http_target_from_ports(ip, discovered_ports, &[]) {
+            return Some(target);
+        }
+
+        let settings = self.current_settings();
+        let timeout = Duration::from_secs_f64(settings.tcp_scan_timeout.max(0.2));
+        for port in DEFAULT_IP_HTTP_FALLBACK_PORTS {
+            let open = scan_ports(ip, &[port], timeout).await;
+            if open.contains(&port) {
+                return Some(format!("{}:{}", ip, port));
+            }
+        }
+
+        None
+    }
+
+    fn resolve_http_target_from_ports(
+        ip: IpAddr,
+        discovered_ports: &[u16],
+        fallback_ports: &[u16],
+    ) -> Option<String> {
+        discovered_ports
+            .iter()
+            .copied()
+            .find(|port| Self::is_web_port(*port))
+            .or_else(|| {
+                fallback_ports
+                    .iter()
+                    .copied()
+                    .find(|port| Self::is_web_port(*port))
+            })
+            .map(|port| format!("{}:{}", ip, port))
+    }
+
+    fn is_web_port(port: u16) -> bool {
+        matches!(port, 80 | 443 | 8080 | 8443 | 8000 | 8888 | 9000)
+    }
+
+    fn merge_vulnerability_results(
+        existing: Option<Vec<VulnerabilityResult>>,
+        additional: Vec<VulnerabilityResult>,
+    ) -> Option<Vec<VulnerabilityResult>> {
+        let mut merged = existing.unwrap_or_default();
+        merged.extend(additional);
+        let deduped = Self::dedupe_vulnerability_results(merged);
+        if deduped.is_empty() {
+            None
+        } else {
+            Some(deduped)
+        }
+    }
+
+    fn merge_technology_stack(
+        existing: Option<Vec<String>>,
+        additional: Vec<String>,
+    ) -> Option<Vec<String>> {
+        let mut seen = std::collections::BTreeSet::new();
+        for value in existing.unwrap_or_default().into_iter().chain(additional) {
+            if !value.trim().is_empty() {
+                seen.insert(value);
+            }
+        }
+        if seen.is_empty() {
+            None
+        } else {
+            Some(seen.into_iter().collect())
+        }
+    }
+
+    fn dedupe_vulnerability_results(
+        mut vulnerabilities: Vec<VulnerabilityResult>,
+    ) -> Vec<VulnerabilityResult> {
+        vulnerabilities.sort_by_cached_key(|v| {
+            (
+                v.cve_id.to_ascii_lowercase(),
+                v.affected_service.to_ascii_lowercase(),
+                v.affected_version.to_ascii_lowercase(),
+            )
+        });
+        vulnerabilities.dedup_by(|a, b| {
+            a.cve_id.eq_ignore_ascii_case(&b.cve_id)
+                && a.affected_service.eq_ignore_ascii_case(&b.affected_service)
+                && a.affected_version.eq_ignore_ascii_case(&b.affected_version)
+        });
+        vulnerabilities
     }
 
     // ========================================================================
@@ -1066,6 +1191,7 @@ impl SecurityScanService {
                             "affected_version": vuln.affected_versions,
                             "exploitable": vuln.exploitable,
                             "has_public_exploit": vuln.has_public_exploit,
+                            "detection_method": "port_service_detection",
                             "references": vuln.references,
                             "source_url": euvd_url,
                             "source_name": "EUVD (ENISA)",
@@ -1119,7 +1245,11 @@ impl SecurityScanService {
             }
         }
 
-        Ok((open_ports, services, vulnerabilities))
+        Ok((
+            open_ports,
+            services,
+            Self::dedupe_vulnerability_results(vulnerabilities),
+        ))
     }
 
     fn categorize_port(
@@ -1226,9 +1356,11 @@ impl SecurityScanService {
         target: &str,
         risk_factors: &mut Vec<RiskFactor>,
         company_id: Uuid,
-    ) -> Result<(SecurityHeadersResult, ProxyDetectionResult), ApiError> {
+    ) -> Result<HttpSecurityAnalysisOutcome, ApiError> {
         let mut security_result = SecurityHeadersResult::default();
         let mut proxy_result = ProxyDetectionResult::default();
+        let mut vulnerabilities = Vec::new();
+        let mut technology_stack = Vec::new();
 
         // Build URL
         let url = if target.contains("://") {
@@ -1263,7 +1395,12 @@ impl SecurityScanService {
             Ok(resp) => resp,
             Err(e) => {
                 tracing::debug!("Failed to fetch headers for {}: {}", url, e);
-                return Ok((security_result, proxy_result));
+                return Ok(HttpSecurityAnalysisOutcome {
+                    security_headers: security_result,
+                    proxy_detection: proxy_result,
+                    vulnerabilities,
+                    technology_stack,
+                });
             }
         };
 
@@ -1278,6 +1415,153 @@ impl SecurityScanService {
                 )
             })
             .collect();
+
+        let fingerprints = Self::extract_http_technology_fingerprints(&headers_map);
+        technology_stack = Self::technology_stack_from_fingerprints(&fingerprints);
+
+        let mut looked_up_versions: HashSet<(String, String)> = HashSet::new();
+        let mut unknown_version_disclosures: HashSet<String> = HashSet::new();
+
+        for fingerprint in &fingerprints {
+            if let Some(version) = &fingerprint.version {
+                let lookup_key = (
+                    fingerprint.product.to_ascii_lowercase(),
+                    version.to_ascii_lowercase(),
+                );
+                if !looked_up_versions.insert(lookup_key) {
+                    continue;
+                }
+
+                let euvd_vulns = self
+                    .lookup_vulnerabilities_from_euvd(&fingerprint.product, version)
+                    .await;
+
+                let matched_vulns = if euvd_vulns.is_empty() {
+                    get_known_vulnerabilities(&fingerprint.product, version)
+                } else {
+                    euvd_vulns
+                };
+
+                for vuln in matched_vulns {
+                    let vuln_severity = match vuln.severity.as_str() {
+                        "critical" => FindingSeverity::Critical,
+                        "high" => FindingSeverity::High,
+                        "medium" => FindingSeverity::Medium,
+                        _ => FindingSeverity::Low,
+                    };
+
+                    let euvd_url = EuvdClient::get_vulnerability_url(&vuln.cve_id);
+
+                    self.create_finding_with_cvss(
+                        scan_id,
+                        asset.id,
+                        "known_cve",
+                        vuln_severity,
+                        &format!("{}: {}", vuln.cve_id, vuln.title),
+                        Some(&vuln.description),
+                        json!({
+                            "cve_id": vuln.cve_id,
+                            "cvss_score": vuln.cvss_score,
+                            "cvss_vector": vuln.cvss_vector,
+                            "affected_service": fingerprint.product.clone(),
+                            "affected_version": vuln.affected_versions,
+                            "exploitable": vuln.exploitable,
+                            "has_public_exploit": vuln.has_public_exploit,
+                            "detection_method": "http_header_fingerprint",
+                            "fingerprint_header": fingerprint.header_name.clone(),
+                            "fingerprint_value": fingerprint.raw_evidence.clone(),
+                            "detected_version": version,
+                            "references": vuln.references,
+                            "source_url": euvd_url,
+                            "source_name": "EUVD (ENISA)",
+                        }),
+                        vuln.cvss_score,
+                        Some(vec![vuln.cve_id.clone()]),
+                        company_id,
+                    )
+                    .await?;
+
+                    vulnerabilities.push(VulnerabilityResult {
+                        cve_id: vuln.cve_id.clone(),
+                        title: vuln.title.clone(),
+                        severity: vuln.severity.clone(),
+                        cvss_score: vuln.cvss_score,
+                        affected_service: fingerprint.product.clone(),
+                        affected_version: vuln.affected_versions.join(", "),
+                        exploitable: vuln.exploitable,
+                        has_public_exploit: vuln.has_public_exploit,
+                        description: vuln.description.clone(),
+                        remediation: Some(format!(
+                            "Update {} to the latest version",
+                            fingerprint.product
+                        )),
+                        references: vuln.references.clone(),
+                    });
+
+                    let impact = if vuln.exploitable { 0.9 } else { 0.5 };
+                    risk_factors.push(RiskFactor {
+                        factor_type: "vulnerability".to_string(),
+                        name: format!("Known vulnerability: {}", vuln.cve_id),
+                        severity: vuln.severity.clone(),
+                        description: vuln.description.clone(),
+                        impact_score: impact,
+                        data: json!({
+                            "cve_id": vuln.cve_id,
+                            "cvss_score": vuln.cvss_score,
+                            "detection_method": "http_header_fingerprint",
+                            "product": fingerprint.product.clone(),
+                            "version": version,
+                            "euvd_url": euvd_url,
+                        }),
+                    });
+                }
+            } else {
+                let product_key = fingerprint.product.to_ascii_lowercase();
+                if !unknown_version_disclosures.insert(product_key) {
+                    continue;
+                }
+
+                self.create_finding(
+                    scan_id,
+                    asset.id,
+                    "server_version_exposed",
+                    FindingSeverity::Low,
+                    &format!(
+                        "Web Technology Fingerprint Exposed: {}",
+                        fingerprint.product
+                    ),
+                    Some(&format!(
+                        "Detected '{}' via HTTP header '{}' but no precise version was exposed.",
+                        fingerprint.product, fingerprint.header_name
+                    )),
+                    json!({
+                        "header": fingerprint.header_name.clone(),
+                        "value": fingerprint.raw_evidence.clone(),
+                        "technology": fingerprint.product.clone(),
+                        "detection_method": "http_header_fingerprint",
+                        "url": url,
+                    }),
+                    company_id,
+                )
+                .await?;
+
+                risk_factors.push(RiskFactor {
+                    factor_type: "information_disclosure".to_string(),
+                    name: format!("{} fingerprint exposed", fingerprint.product),
+                    severity: "low".to_string(),
+                    description: format!(
+                        "Header '{}' reveals use of {}",
+                        fingerprint.header_name, fingerprint.product
+                    ),
+                    impact_score: 0.1,
+                    data: json!({
+                        "technology": fingerprint.product.clone(),
+                        "header": fingerprint.header_name.clone(),
+                        "detection_method": "http_header_fingerprint",
+                    }),
+                });
+            }
+        }
 
         // Check for security headers
         let mut missing_headers = Vec::new();
@@ -1466,7 +1750,131 @@ impl SecurityScanService {
             });
         }
 
-        Ok((security_result, proxy_result))
+        Ok(HttpSecurityAnalysisOutcome {
+            security_headers: security_result,
+            proxy_detection: proxy_result,
+            vulnerabilities: Self::dedupe_vulnerability_results(vulnerabilities),
+            technology_stack,
+        })
+    }
+
+    fn extract_http_technology_fingerprints(
+        headers_map: &HashMap<String, String>,
+    ) -> Vec<HttpTechnologyFingerprint> {
+        let mut fingerprints = Vec::new();
+        let mut seen: HashSet<(String, Option<String>, String)> = HashSet::new();
+
+        for header_name in ["server", "x-powered-by", "x-generator"] {
+            if let Some(value) = headers_map.get(header_name) {
+                Self::push_fingerprints_from_value(
+                    header_name,
+                    value,
+                    &mut fingerprints,
+                    &mut seen,
+                );
+            }
+        }
+
+        for marker in ["x-nextjs-cache", "x-nextjs-data", "x-nextjs-matched-path"] {
+            if let Some(value) = headers_map.get(marker) {
+                let product = "next.js".to_string();
+                let key = (product.clone(), None, marker.to_string());
+                if seen.insert(key) {
+                    fingerprints.push(HttpTechnologyFingerprint {
+                        product,
+                        version: None,
+                        header_name: marker.to_string(),
+                        raw_evidence: value.clone(),
+                        confidence: 80,
+                    });
+                }
+            }
+        }
+
+        fingerprints
+    }
+
+    fn push_fingerprints_from_value(
+        header_name: &str,
+        header_value: &str,
+        fingerprints: &mut Vec<HttpTechnologyFingerprint>,
+        seen: &mut HashSet<(String, Option<String>, String)>,
+    ) {
+        let patterns = [
+            (
+                "next.js",
+                r"(?i)\bnext(?:\.| )?js(?:[/\s]+v?([0-9][0-9A-Za-z._-]*))?",
+                95,
+            ),
+            ("nginx", r"(?i)\bnginx(?:/([0-9][0-9A-Za-z._-]*))?", 90),
+            ("apache", r"(?i)\bapache(?:/([0-9][0-9A-Za-z._-]*))?", 90),
+            (
+                "iis",
+                r"(?i)\b(?:microsoft-)?iis(?:/([0-9][0-9A-Za-z._-]*))?",
+                90,
+            ),
+            ("express", r"(?i)\bexpress(?:/([0-9][0-9A-Za-z._-]*))?", 85),
+            ("php", r"(?i)\bphp(?:/([0-9][0-9A-Za-z._-]*))?", 85),
+            (
+                "wordpress",
+                r"(?i)\bwordpress(?:[/\s]+v?([0-9][0-9A-Za-z._-]*))?",
+                85,
+            ),
+            (
+                "asp.net",
+                r"(?i)\basp\.?net(?:[/\s]+v?([0-9][0-9A-Za-z._-]*))?",
+                85,
+            ),
+        ];
+
+        for (product, pattern, confidence) in patterns {
+            let Ok(regex) = regex::Regex::new(pattern) else {
+                continue;
+            };
+
+            for captures in regex.captures_iter(header_value) {
+                let version = captures
+                    .get(1)
+                    .and_then(|m| Self::normalize_fingerprint_version(m.as_str()));
+                let key = (
+                    product.to_string(),
+                    version.clone(),
+                    header_name.to_string(),
+                );
+                if seen.insert(key) {
+                    fingerprints.push(HttpTechnologyFingerprint {
+                        product: product.to_string(),
+                        version,
+                        header_name: header_name.to_string(),
+                        raw_evidence: header_value.to_string(),
+                        confidence,
+                    });
+                }
+            }
+        }
+    }
+
+    fn normalize_fingerprint_version(version: &str) -> Option<String> {
+        let normalized = version.trim().trim_start_matches('v').trim().to_string();
+        if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized)
+        }
+    }
+
+    fn technology_stack_from_fingerprints(
+        fingerprints: &[HttpTechnologyFingerprint],
+    ) -> Vec<String> {
+        let mut stack = std::collections::BTreeSet::new();
+        for fingerprint in fingerprints {
+            if let Some(version) = &fingerprint.version {
+                stack.insert(format!("{} {}", fingerprint.product, version));
+            } else {
+                stack.insert(fingerprint.product.clone());
+            }
+        }
+        stack.into_iter().collect()
     }
 
     async fn detect_proxy_waf_cdn(
@@ -2490,6 +2898,11 @@ impl SecurityScanService {
         let current_findings = self.finding_repo.list_by_scan(&scan_id, company_id).await?;
         let mut seen_keys: HashSet<(String, String)> = HashSet::new();
         for finding in current_findings {
+            if finding.finding_type == "known_cve"
+                && !Self::is_known_cve_in_scope(scan_type, &finding.data)
+            {
+                continue;
+            }
             seen_keys.insert((finding.finding_type, finding.title));
         }
 
@@ -2501,6 +2914,11 @@ impl SecurityScanService {
         let mut stale_ids = Vec::new();
         for finding in asset_findings {
             if !type_set.contains(finding.finding_type.as_str()) {
+                continue;
+            }
+            if finding.finding_type == "known_cve"
+                && !Self::is_known_cve_in_scope(scan_type, &finding.data)
+            {
                 continue;
             }
             if finding.status == "resolved" || finding.status == "false_positive" {
@@ -2520,6 +2938,25 @@ impl SecurityScanService {
         self.finding_repo
             .resolve_by_ids(&stale_ids, company_id)
             .await
+    }
+
+    fn is_known_cve_in_scope(scan_type: &SecurityScanType, finding_data: &Value) -> bool {
+        if !matches!(
+            scan_type,
+            SecurityScanType::PortScan | SecurityScanType::HttpProbe
+        ) {
+            return true;
+        }
+
+        let detection_method = finding_data
+            .get("detection_method")
+            .and_then(|value| value.as_str());
+
+        match scan_type {
+            SecurityScanType::PortScan => detection_method != Some("http_header_fingerprint"),
+            SecurityScanType::HttpProbe => detection_method == Some("http_header_fingerprint"),
+            _ => true,
+        }
     }
 
     fn finding_types_for_scan(scan_type: &SecurityScanType) -> Vec<&'static str> {
@@ -2570,6 +3007,7 @@ impl SecurityScanService {
             }
             SecurityScanType::HttpProbe => {
                 types.extend_from_slice(&HTTP_TYPES);
+                types.push("known_cve");
                 types.push("dns_resolution_failed");
             }
             SecurityScanType::TlsAnalysis => {
@@ -2721,5 +3159,130 @@ fn get_remediation(finding_type: &str) -> Option<String> {
         "weak_dmarc_policy" => Some("Upgrade your DMARC policy from 'none' to 'quarantine' or 'reject' to actively block fraudulent emails.".to_string()),
         "known_cve" => Some("Update the affected software to the latest version to patch the known vulnerability.".to_string()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_vuln(cve_id: &str, service: &str, version: &str) -> VulnerabilityResult {
+        VulnerabilityResult {
+            cve_id: cve_id.to_string(),
+            title: format!("{} test vuln", cve_id),
+            severity: "high".to_string(),
+            cvss_score: Some(8.5),
+            affected_service: service.to_string(),
+            affected_version: version.to_string(),
+            exploitable: true,
+            has_public_exploit: false,
+            description: "test".to_string(),
+            remediation: None,
+            references: vec![],
+        }
+    }
+
+    #[test]
+    fn extracts_nextjs_version_from_powered_by_header() {
+        let mut headers = HashMap::new();
+        headers.insert("x-powered-by".to_string(), "Next.js 14.2.3".to_string());
+
+        let fingerprints = SecurityScanService::extract_http_technology_fingerprints(&headers);
+
+        assert!(fingerprints.iter().any(|f| {
+            f.product == "next.js"
+                && f.version.as_deref() == Some("14.2.3")
+                && f.header_name == "x-powered-by"
+        }));
+    }
+
+    #[test]
+    fn extracts_nextjs_marker_without_version() {
+        let mut headers = HashMap::new();
+        headers.insert("x-nextjs-cache".to_string(), "HIT".to_string());
+
+        let fingerprints = SecurityScanService::extract_http_technology_fingerprints(&headers);
+
+        assert!(fingerprints.iter().any(|f| {
+            f.product == "next.js" && f.version.is_none() && f.header_name == "x-nextjs-cache"
+        }));
+    }
+
+    #[test]
+    fn extracts_common_server_tokens() {
+        let mut headers = HashMap::new();
+        headers.insert("server".to_string(), "nginx/1.25.3".to_string());
+        headers.insert("x-generator".to_string(), "WordPress 6.5.3".to_string());
+
+        let fingerprints = SecurityScanService::extract_http_technology_fingerprints(&headers);
+
+        assert!(fingerprints.iter().any(|f| {
+            f.product == "nginx"
+                && f.version.as_deref() == Some("1.25.3")
+                && f.header_name == "server"
+        }));
+        assert!(fingerprints.iter().any(|f| {
+            f.product == "wordpress"
+                && f.version.as_deref() == Some("6.5.3")
+                && f.header_name == "x-generator"
+        }));
+    }
+
+    #[test]
+    fn dedupes_vulnerabilities_deterministically() {
+        let vulns = vec![
+            sample_vuln("CVE-2024-1234", "next.js", "14.2.3"),
+            sample_vuln("cve-2024-1234", "Next.js", "14.2.3"),
+            sample_vuln("CVE-2023-9999", "nginx", "1.25.3"),
+        ];
+
+        let deduped = SecurityScanService::dedupe_vulnerability_results(vulns);
+
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].cve_id, "CVE-2023-9999");
+        assert_eq!(deduped[1].cve_id, "CVE-2024-1234");
+    }
+
+    #[test]
+    fn known_cve_scope_filtering_is_source_aware() {
+        let header_data = json!({ "detection_method": "http_header_fingerprint" });
+        let port_data = json!({ "detection_method": "port_service_detection" });
+        let legacy_data = json!({});
+
+        assert!(SecurityScanService::is_known_cve_in_scope(
+            &SecurityScanType::Full,
+            &header_data
+        ));
+        assert!(!SecurityScanService::is_known_cve_in_scope(
+            &SecurityScanType::PortScan,
+            &header_data
+        ));
+        assert!(SecurityScanService::is_known_cve_in_scope(
+            &SecurityScanType::PortScan,
+            &port_data
+        ));
+        assert!(SecurityScanService::is_known_cve_in_scope(
+            &SecurityScanType::PortScan,
+            &legacy_data
+        ));
+        assert!(SecurityScanService::is_known_cve_in_scope(
+            &SecurityScanType::HttpProbe,
+            &header_data
+        ));
+        assert!(!SecurityScanService::is_known_cve_in_scope(
+            &SecurityScanType::HttpProbe,
+            &port_data
+        ));
+        assert!(!SecurityScanService::is_known_cve_in_scope(
+            &SecurityScanType::HttpProbe,
+            &legacy_data
+        ));
+    }
+
+    #[test]
+    fn resolves_ip_http_target_from_fallback_ports() {
+        let ip: IpAddr = "127.0.0.1".parse().expect("valid localhost IP");
+        let target = SecurityScanService::resolve_http_target_from_ports(ip, &[], &[8080]);
+        assert_eq!(target, Some("127.0.0.1:8080".to_string()));
     }
 }

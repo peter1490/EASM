@@ -2,7 +2,16 @@
 
 import { useState, useEffect } from "react";
 import Modal from "@/components/ui/Modal";
-import { Asset, getAsset, triggerAssetScan, listSecurityScans, SecurityScan, getAssetTags, AssetTagDetail } from "@/app/api";
+import {
+  Asset,
+  getAsset,
+  triggerAssetScan,
+  listSecurityScans,
+  SecurityScan,
+  getAssetTags,
+  AssetTagDetail,
+  getAssetPdfReport,
+} from "@/app/api";
 import Button from "@/components/ui/Button";
 import Badge from "@/components/ui/Badge";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
@@ -23,6 +32,7 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
   const [relatedScans, setRelatedScans] = useState<SecurityScan[]>([]);
   const [assetTags, setAssetTags] = useState<AssetTagDetail[]>([]);
   const [scanningNow, setScanningNow] = useState(false);
+  const [downloadingReport, setDownloadingReport] = useState(false);
   const [scanSuccess, setScanSuccess] = useState(false);
 
   useEffect(() => {
@@ -69,6 +79,27 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
       setError((e as Error).message);
     } finally {
       setScanningNow(false);
+    }
+  };
+
+  const handleDownloadReport = async () => {
+    if (!asset) return;
+
+    setDownloadingReport(true);
+    setError(null);
+
+    try {
+      const { blob, filename } = await getAssetPdfReport(asset.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setDownloadingReport(false);
     }
   };
 
@@ -308,14 +339,21 @@ export default function AssetDetailModal({ assetId, onClose }: AssetDetailModalP
 
           {/* Actions */}
           <div className="flex justify-between gap-3 pt-4 border-t border-border">
-            <Link href={`/asset/${asset.id}`}>
-              <Button variant="primary" onClick={onClose}>
-                View Full Asset Page →
+            <div className="flex gap-3">
+              <Button
+                variant="outline"
+                onClick={handleDownloadReport}
+                disabled={downloadingReport}
+              >
+                {downloadingReport ? "Generating PDF..." : "Download PDF Report"}
               </Button>
-            </Link>
-            <Button variant="outline" onClick={onClose}>
-              Close
-            </Button>
+              <Link href={`/asset/${asset.id}`}>
+                <Button variant="primary" onClick={onClose}>
+                  View Full Asset Page →
+                </Button>
+              </Link>
+            </div>
+            <Button variant="outline" onClick={onClose}>Close</Button>
           </div>
         </div>
       ) : null}

@@ -66,6 +66,8 @@ export default function AssetsPage() {
   const [selectedAssets, setSelectedAssets] = useState<Set<string>>(new Set());
   const [bulkScanning, setBulkScanning] = useState(false);
   const [bulkScanMessage, setBulkScanMessage] = useState<string | null>(null);
+  const [exportingAll, setExportingAll] = useState<"csv" | "json" | null>(null);
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
 
   // Debounced search query
   const debouncedQuery = useDebounce(searchQuery, 300);
@@ -73,6 +75,18 @@ export default function AssetsPage() {
 
   // Ref for tracking search requests
   const searchAbortController = useRef<AbortController | null>(null);
+
+  const buildSearchParams = useCallback((customLimit: number, customOffset: number): AssetSearchParams => ({
+    q: debouncedQuery || undefined,
+    asset_type: assetType,
+    min_confidence: debouncedConfidence > 0 ? debouncedConfidence : undefined,
+    scan_status: scanStatus,
+    source: sourceFilter !== "all" ? sourceFilter : undefined,
+    sort_by: sortBy,
+    sort_dir: sortDir,
+    limit: customLimit,
+    offset: customOffset,
+  }), [debouncedQuery, assetType, debouncedConfidence, scanStatus, sourceFilter, sortBy, sortDir]);
 
   // Search function
   const performSearch = useCallback(async (isInitial = false) => {
@@ -88,19 +102,7 @@ export default function AssetsPage() {
     setError(null);
 
     try {
-      const params: AssetSearchParams = {
-        q: debouncedQuery || undefined,
-        asset_type: assetType,
-        min_confidence: debouncedConfidence > 0 ? debouncedConfidence : undefined,
-        scan_status: scanStatus,
-        source: sourceFilter !== "all" ? sourceFilter : undefined,
-        sort_by: sortBy,
-        sort_dir: sortDir,
-        limit,
-        offset: (currentPage - 1) * limit,
-      };
-
-      const response = await searchAssetsAdvanced(params);
+      const response = await searchAssetsAdvanced(buildSearchParams(limit, (currentPage - 1) * limit));
       setSearchResponse(response);
 
       if (isInitial) {
@@ -113,7 +115,7 @@ export default function AssetsPage() {
     } finally {
       setSearching(false);
     }
-  }, [debouncedQuery, assetType, debouncedConfidence, scanStatus, sourceFilter, sortBy, sortDir, limit, currentPage]);
+  }, [buildSearchParams, limit, currentPage]);
 
   // Fetch discovery status
   const fetchDiscoveryStatus = useCallback(async () => {
@@ -158,6 +160,10 @@ export default function AssetsPage() {
   };
 
   // Bulk scan handler
+  const getSelectedAssetList = () => Array.from(selectedAssets)
+    .map(id => assets.find(a => a.id === id))
+    .filter((a): a is Asset => !!a);
+
   const handleBulkScan = async () => {
     if (selectedAssets.size === 0) return;
 
@@ -165,9 +171,7 @@ export default function AssetsPage() {
     setBulkScanMessage(null);
 
     try {
-      const selectedAssetList = Array.from(selectedAssets)
-        .map(id => assets.find(a => a.id === id))
-        .filter((a): a is Asset => !!a);
+      const selectedAssetList = getSelectedAssetList();
 
       for (const asset of selectedAssetList) {
         await triggerAssetScan(asset.id, "full", `Bulk scan from assets page`);
@@ -183,9 +187,18 @@ export default function AssetsPage() {
   };
 
   // Export functions
-  const exportToCSV = () => {
+  const downloadBlob = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportAssetsToCSV = (records: Asset[], filenamePrefix: string) => {
     const headers = ["ID", "Type", "Value", "Confidence", "Sources", "Last Scanned", "Created"];
-    const rows = assets.map(a => [
+    const rows = records.map(a => [
       a.id,
       a.asset_type,
       a.value,
@@ -197,23 +210,58 @@ export default function AssetsPage() {
 
     const csv = [headers, ...rows].map(row => row.map(cell => `"${cell}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `assets-${new Date().toISOString().split('T')[0]}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, `${filenamePrefix}-${new Date().toISOString().split('T')[0]}.csv`);
   };
 
-  const exportToJSON = () => {
-    const json = JSON.stringify(assets, null, 2);
+  const exportAssetsToJSON = (records: Asset[], filenamePrefix: string) => {
+    const json = JSON.stringify(records, null, 2);
     const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `assets-${new Date().toISOString().split('T')[0]}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, `${filenamePrefix}-${new Date().toISOString().split('T')[0]}.json`);
+  };
+
+  const fetchAllMatchingAssets = useCallback(async (): Promise<Asset[]> => {
+    const allAssets: Asset[] = [];
+    let offset = 0;
+    const pageSize = 500;
+    let totalCountFromApi = Number.POSITIVE_INFINITY;
+
+    while (allAssets.length < totalCountFromApi) {
+      const response = await searchAssetsAdvanced(buildSearchParams(pageSize, offset));
+      allAssets.push(...response.assets);
+      totalCountFromApi = response.total_count;
+
+      if (response.assets.length === 0) {
+        break;
+      }
+      offset += response.assets.length;
+    }
+
+    return allAssets;
+  }, [buildSearchParams]);
+
+  const exportAllAssets = async (format: "csv" | "json") => {
+    setExportingAll(format);
+    setExportMessage(null);
+
+    try {
+      const allAssets = await fetchAllMatchingAssets();
+      if (allAssets.length === 0) {
+        setExportMessage("No assets available for export with current filters.");
+        return;
+      }
+
+      const prefix = hasActiveFilters ? "assets-all-filtered" : "assets-all";
+      if (format === "csv") {
+        exportAssetsToCSV(allAssets, prefix);
+      } else {
+        exportAssetsToJSON(allAssets, prefix);
+      }
+      setExportMessage(`Exported ${allAssets.length.toLocaleString()} assets.`);
+    } catch (e) {
+      setExportMessage(`Error: ${(e as Error).message}`);
+    } finally {
+      setExportingAll(null);
+    }
   };
 
   // Selection handlers
@@ -473,11 +521,19 @@ export default function AssetsPage() {
                 >
                   {bulkScanning ? "Scanning..." : `Scan ${selectedAssets.size} Asset(s)`}
                 </Button>
-                <Button variant="outline" size="sm" onClick={exportToCSV}>
-                  Export CSV
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => exportAssetsToCSV(getSelectedAssetList(), "assets-selected")}
+                >
+                  Export Selected CSV
                 </Button>
-                <Button variant="outline" size="sm" onClick={exportToJSON}>
-                  Export JSON
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => exportAssetsToJSON(getSelectedAssetList(), "assets-selected")}
+                >
+                  Export Selected JSON
                 </Button>
               </div>
             </div>
@@ -504,16 +560,48 @@ export default function AssetsPage() {
               </CardDescription>
             </div>
             <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={exportToCSV}>
-                Export CSV
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => exportAssetsToCSV(assets, "assets-page")}
+              >
+                Export Page CSV
               </Button>
-              <Button variant="outline" size="sm" onClick={exportToJSON}>
-                Export JSON
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => exportAssetsToJSON(assets, "assets-page")}
+              >
+                Export Page JSON
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => exportAllAssets("csv")}
+                disabled={exportingAll !== null}
+              >
+                {exportingAll === "csv" ? "Exporting..." : "Export All CSV"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => exportAllAssets("json")}
+                disabled={exportingAll !== null}
+              >
+                {exportingAll === "json" ? "Exporting..." : "Export All JSON"}
               </Button>
             </div>
           </div>
         </CardHeader>
         <CardContent>
+          {exportMessage && (
+            <div className={`mb-4 p-3 rounded text-sm ${exportMessage.startsWith("Error")
+              ? "bg-destructive/10 text-destructive border border-destructive/20"
+              : "bg-info/10 text-info border border-info/20"
+            }`}>
+              {exportMessage}
+            </div>
+          )}
           {loading ? (
             <div className="py-12 flex flex-col items-center gap-4">
               <LoadingSpinner size="lg" />

@@ -7,6 +7,7 @@ import {
   getAsset,
   getAssetFindings,
   getAssetEvolution,
+  getAssetPdfReport,
   recalculateAssetRisk,
   triggerAssetScan,
   updateAssetImportance,
@@ -137,6 +138,7 @@ export default function AssetDetailPage() {
   
   // Action states
   const [scanning, setScanning] = useState(false);
+  const [downloadingReport, setDownloadingReport] = useState(false);
   const [scanSuccess, setScanSuccess] = useState(false);
   const [recalculating, setRecalculating] = useState(false);
   const [updatingImportance, setUpdatingImportance] = useState(false);
@@ -239,6 +241,26 @@ export default function AssetDetailPage() {
       setError((err as Error).message);
     } finally {
       setRecalculating(false);
+    }
+  }
+
+  async function handleDownloadReport() {
+    if (!asset) return;
+
+    setDownloadingReport(true);
+    setError(null);
+    try {
+      const { blob, filename } = await getAssetPdfReport(asset.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setDownloadingReport(false);
     }
   }
 
@@ -480,6 +502,14 @@ export default function AssetDetailPage() {
             loading={scanning}
           >
             {scanning ? "Scanning..." : "Run Security Scan"}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={handleDownloadReport}
+            disabled={downloadingReport}
+            loading={downloadingReport}
+          >
+            {downloadingReport ? "Generating PDF..." : "Download PDF Report"}
           </Button>
           <Button
             variant="outline"

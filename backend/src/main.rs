@@ -105,6 +105,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/assets/:id", get(handlers::asset_handlers::get_asset))
         .route(
+            "/api/assets/:id/report",
+            get(handlers::asset_handlers::download_asset_report),
+        )
+        .route(
             "/api/assets/:id/path",
             get(handlers::asset_handlers::get_asset_path),
         )

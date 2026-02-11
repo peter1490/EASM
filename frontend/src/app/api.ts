@@ -93,6 +93,26 @@ async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
   return fetch(input, { ...init, headers, credentials });
 }
 
+function parseContentDispositionFilename(contentDisposition: string | null): string | null {
+  if (!contentDisposition) return null;
+
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      // ignore malformed encoding and fall through
+    }
+  }
+
+  const basicMatch = contentDisposition.match(/filename="?([^"]+)"?/i);
+  if (basicMatch?.[1]) {
+    return basicMatch[1];
+  }
+
+  return null;
+}
+
 // ============================================================================
 // COMMON TYPES
 // ============================================================================
@@ -577,6 +597,23 @@ export async function updateAssetImportance(assetId: string, importance: number)
 
 export function getAssetPathUrl(assetId: string): string {
   return `${API_BASE}/api/assets/${assetId}/path`;
+}
+
+export async function getAssetPdfReport(
+  assetId: string
+): Promise<{ blob: Blob; filename: string }> {
+  const res = await apiFetch(`${API_BASE}/api/assets/${assetId}/report`, {
+    cache: "no-store",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to download asset report: ${res.status}`);
+
+  const blob = await res.blob();
+  const filename =
+    parseContentDispositionFilename(res.headers.get("content-disposition")) ||
+    `asset-security-risk-overview-${assetId}.pdf`;
+
+  return { blob, filename };
 }
 
 // ============================================================================

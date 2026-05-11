@@ -166,12 +166,29 @@ mod tests {
     use crate::database::create_connection_pool;
     use crate::models::ScanStatus;
 
+    /// Company UUID used by every scan_repo test. Inserted in `setup_test_db`
+    /// so the foreign key `fk_scans_company` is satisfied.
+    fn test_company_id() -> Uuid {
+        Uuid::nil()
+    }
+
     async fn setup_test_db() -> DatabasePool {
         let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
         let pool = create_connection_pool(&db_url).await.unwrap();
         let _ = sqlx::query("TRUNCATE TABLE scans RESTART IDENTITY CASCADE")
             .execute(&pool)
             .await;
+        // Ensure the test company exists — scans have a FK to companies(id).
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO companies (id, name, created_at, updated_at)
+            VALUES ($1, 'scan_repo test company', NOW(), NOW())
+            ON CONFLICT (id) DO NOTHING
+            "#,
+        )
+        .bind(test_company_id())
+        .execute(&pool)
+        .await;
         pool
     }
 
@@ -185,7 +202,7 @@ mod tests {
             note: Some("Test scan".to_string()),
         };
 
-        let company_id = Uuid::new_v4();
+        let company_id = test_company_id();
         let result = repo.create(&scan_create, company_id).await;
         assert!(result.is_ok());
 
@@ -205,7 +222,7 @@ mod tests {
             note: None,
         };
 
-        let company_id = Uuid::new_v4();
+        let company_id = test_company_id();
         let created_scan = repo.create(&scan_create, company_id).await.unwrap();
         let retrieved_scan = repo.get_by_id(company_id, &created_scan.id).await.unwrap();
 
@@ -221,7 +238,7 @@ mod tests {
         let repo = SqlxScanRepository::new(pool);
 
         let nonexistent_id = Uuid::new_v4();
-        let company_id = Uuid::new_v4();
+        let company_id = test_company_id();
         let result = repo.get_by_id(company_id, &nonexistent_id).await.unwrap();
         assert!(result.is_none());
     }
@@ -241,7 +258,7 @@ mod tests {
             note: Some("Test".to_string()),
         };
 
-        let company_id = Uuid::new_v4();
+        let company_id = test_company_id();
         repo.create(&scan1, company_id).await.unwrap();
         repo.create(&scan2, company_id).await.unwrap();
 
@@ -259,7 +276,7 @@ mod tests {
             note: None,
         };
 
-        let company_id = Uuid::new_v4();
+        let company_id = test_company_id();
         let created_scan = repo.create(&scan_create, company_id).await.unwrap();
         assert_eq!(created_scan.status, ScanStatus::Queued);
 
@@ -283,7 +300,7 @@ mod tests {
         let repo = SqlxScanRepository::new(pool);
 
         let nonexistent_id = Uuid::new_v4();
-        let company_id = Uuid::new_v4();
+        let company_id = test_company_id();
         let result = repo
             .update_status(company_id, &nonexistent_id, ScanStatus::Running)
             .await;
@@ -300,7 +317,7 @@ mod tests {
         let pool = setup_test_db().await;
         let repo = SqlxScanRepository::new(pool);
 
-        let company_id = Uuid::new_v4();
+        let company_id = test_company_id();
         // Create scans with different statuses
         let scan1 = repo
             .create(

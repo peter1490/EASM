@@ -233,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_evidence() {
         let pool = setup_test_db().await;
-        let repo = SqlxEvidenceRepository::new(pool);
+        let repo = SqlxEvidenceRepository::new(pool.clone());
 
         let scan_id = Uuid::new_v4();
         let company_id = Uuid::nil();
@@ -259,7 +259,7 @@ mod tests {
     #[tokio::test]
     async fn test_evidence_validation() {
         let pool = setup_test_db().await;
-        let repo = SqlxEvidenceRepository::new(pool);
+        let repo = SqlxEvidenceRepository::new(pool.clone());
 
         let scan_id = Uuid::new_v4();
         let company_id = Uuid::nil();
@@ -313,7 +313,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_by_id() {
         let pool = setup_test_db().await;
-        let repo = SqlxEvidenceRepository::new(pool);
+        let repo = SqlxEvidenceRepository::new(pool.clone());
 
         let scan_id = Uuid::new_v4();
         let company_id = Uuid::nil();
@@ -343,7 +343,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_by_scan() {
         let pool = setup_test_db().await;
-        let repo = SqlxEvidenceRepository::new(pool);
+        let repo = SqlxEvidenceRepository::new(pool.clone());
 
         let scan_id = Uuid::new_v4();
         let other_scan_id = Uuid::new_v4();
@@ -390,7 +390,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_by_content_type() {
         let pool = setup_test_db().await;
-        let repo = SqlxEvidenceRepository::new(pool);
+        let repo = SqlxEvidenceRepository::new(pool.clone());
 
         let scan_id = Uuid::new_v4();
         let company_id = Uuid::nil();
@@ -445,7 +445,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_evidence() {
         let pool = setup_test_db().await;
-        let repo = SqlxEvidenceRepository::new(pool);
+        let repo = SqlxEvidenceRepository::new(pool.clone());
 
         let scan_id = Uuid::new_v4();
         let company_id = Uuid::nil();

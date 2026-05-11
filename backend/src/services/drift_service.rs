@@ -381,6 +381,7 @@ mod tests {
         ) {
             self.scans.push(Scan {
                 id,
+                company_id: Uuid::nil(),
                 target: target.to_string(),
                 note: None,
                 status,
@@ -392,9 +393,10 @@ mod tests {
 
     #[async_trait]
     impl ScanRepository for MockScanRepository {
-        async fn create(&self, _scan: &ScanCreate, _company_id: Uuid) -> Result<Scan, ApiError> {
+        async fn create(&self, _scan: &ScanCreate, company_id: Uuid) -> Result<Scan, ApiError> {
             Ok(Scan {
                 id: Uuid::new_v4(),
+                company_id,
                 target: "test".to_string(),
                 note: None,
                 status: ScanStatus::Queued,
@@ -437,7 +439,7 @@ mod tests {
 
         let current_scan_id = Uuid::new_v4();
         let drifts = service
-            .detect_port_drift(&current_scan_id, "example.com")
+            .detect_port_drift(&current_scan_id, "example.com", Uuid::nil())
             .await
             .unwrap();
 
@@ -470,7 +472,7 @@ mod tests {
 
         let service = DriftServiceImpl::new(Arc::new(finding_repo), Arc::new(scan_repo));
         let drifts = service
-            .detect_port_drift(&current_scan_id, target)
+            .detect_port_drift(&current_scan_id, target, Uuid::nil())
             .await
             .unwrap();
 
@@ -507,7 +509,7 @@ mod tests {
 
         let service = DriftServiceImpl::new(Arc::new(finding_repo), Arc::new(scan_repo));
         let drifts = service
-            .detect_port_drift(&current_scan_id, target)
+            .detect_port_drift(&current_scan_id, target, Uuid::nil())
             .await
             .unwrap();
 
@@ -527,7 +529,10 @@ mod tests {
         finding_repo.add_port_finding(scan_id, "192.168.1.2", 22);
 
         let service = DriftServiceImpl::new(Arc::new(finding_repo), Arc::new(scan_repo));
-        let states = service.extract_port_states(&scan_id).await.unwrap();
+        let states = service
+            .extract_port_states(&scan_id, Uuid::nil())
+            .await
+            .unwrap();
 
         assert_eq!(states.len(), 2);
 

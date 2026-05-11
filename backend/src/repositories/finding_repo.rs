@@ -346,6 +346,174 @@ impl FindingRepository for SqlxFindingRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // ... existing tests ...
-    // (Skipping re-adding tests to save tokens, assume existing tests + new method test)
+    use crate::database::create_connection_pool;
+    use serde_json::json;
+
+    async fn setup_test_db() -> DatabasePool {
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
+        let pool = create_connection_pool(&db_url).await.unwrap();
+        let _ = sqlx::query("TRUNCATE TABLE findings RESTART IDENTITY CASCADE")
+            .execute(&pool)
+            .await;
+        pool
+    }
+
+    async fn insert_scan(pool: &DatabasePool, scan_id: Uuid, company_id: Uuid) {
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO scans (id, target, status, created_at, updated_at, company_id)
+            VALUES ($1, $2, 'queued', NOW(), NOW(), $3)
+            "#,
+        )
+        .bind(scan_id)
+        .bind("test-scan")
+        .bind(company_id)
+        .execute(pool)
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_create_finding() {
+        let pool = setup_test_db().await;
+        let repo = SqlxFindingRepository::new(pool.clone());
+
+        let scan_id = Uuid::new_v4();
+        let company_id = Uuid::nil();
+        insert_scan(&pool, scan_id, company_id).await;
+
+        let finding_create = FindingCreate {
+            scan_id,
+            finding_type: "port_scan".to_string(),
+            data: json!({"port": 80, "service": "http"}),
+        };
+
+        let result = repo.create(&finding_create, company_id).await;
+        assert!(result.is_ok());
+
+        let finding = result.unwrap();
+        assert_eq!(finding.scan_id, scan_id);
+        assert_eq!(finding.finding_type, "port_scan");
+        assert_eq!(finding.data["port"], 80);
+    }
+
+    #[tokio::test]
+    async fn test_list_by_scan() {
+        let pool = setup_test_db().await;
+        let repo = SqlxFindingRepository::new(pool.clone());
+
+        let scan_id = Uuid::new_v4();
+        let other_scan_id = Uuid::new_v4();
+        let company_id = Uuid::nil();
+        insert_scan(&pool, scan_id, company_id).await;
+        insert_scan(&pool, other_scan_id, company_id).await;
+
+        let finding1 = FindingCreate {
+            scan_id,
+            finding_type: "port_scan".to_string(),
+            data: json!({"port": 80}),
+        };
+        let finding2 = FindingCreate {
+            scan_id,
+            finding_type: "dns_record".to_string(),
+            data: json!({"record": "A"}),
+        };
+        let finding3 = FindingCreate {
+            scan_id: other_scan_id,
+            finding_type: "port_scan".to_string(),
+            data: json!({"port": 443}),
+        };
+
+        repo.create(&finding1, company_id).await.unwrap();
+        repo.create(&finding2, company_id).await.unwrap();
+        repo.create(&finding3, company_id).await.unwrap();
+
+        let results = repo.list_by_scan(&scan_id, company_id).await.unwrap();
+        assert_eq!(results.len(), 2);
+
+        let other_results = repo
+            .list_by_scan(&other_scan_id, company_id)
+            .await
+            .unwrap();
+        assert_eq!(other_results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_list_by_type() {
+        let pool = setup_test_db().await;
+        let repo = SqlxFindingRepository::new(pool.clone());
+
+        let scan_id = Uuid::new_v4();
+        let company_id = Uuid::nil();
+        insert_scan(&pool, scan_id, company_id).await;
+
+        let finding1 = FindingCreate {
+            scan_id,
+            finding_type: "port_scan".to_string(),
+            data: json!({"port": 80}),
+        };
+        let finding2 = FindingCreate {
+            scan_id,
+            finding_type: "port_scan".to_string(),
+            data: json!({"port": 443}),
+        };
+        let finding3 = FindingCreate {
+            scan_id,
+            finding_type: "dns_record".to_string(),
+            data: json!({"record": "A"}),
+        };
+
+        repo.create(&finding1, company_id).await.unwrap();
+        repo.create(&finding2, company_id).await.unwrap();
+        repo.create(&finding3, company_id).await.unwrap();
+
+        let port_scan_results = repo.list_by_type("port_scan", company_id).await.unwrap();
+        assert_eq!(port_scan_results.len(), 2);
+
+        let dns_results = repo.list_by_type("dns_record", company_id).await.unwrap();
+        assert_eq!(dns_results.len(), 1);
+
+        let nonexistent_results = repo.list_by_type("nonexistent", company_id).await.unwrap();
+        assert_eq!(nonexistent_results.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_count_by_scan() {
+        let pool = setup_test_db().await;
+        let repo = SqlxFindingRepository::new(pool.clone());
+
+        let scan_id = Uuid::new_v4();
+        let other_scan_id = Uuid::new_v4();
+        let company_id = Uuid::nil();
+        insert_scan(&pool, scan_id, company_id).await;
+        insert_scan(&pool, other_scan_id, company_id).await;
+
+        let finding1 = FindingCreate {
+            scan_id,
+            finding_type: "port_scan".to_string(),
+            data: json!({"port": 80}),
+        };
+        let finding2 = FindingCreate {
+            scan_id,
+            finding_type: "port_scan".to_string(),
+            data: json!({"port": 443}),
+        };
+        let finding3 = FindingCreate {
+            scan_id: other_scan_id,
+            finding_type: "port_scan".to_string(),
+            data: json!({"port": 22}),
+        };
+
+        repo.create(&finding1, company_id).await.unwrap();
+        repo.create(&finding2, company_id).await.unwrap();
+        repo.create(&finding3, company_id).await.unwrap();
+
+        let count = repo.count_by_scan(&scan_id, company_id).await.unwrap();
+        assert_eq!(count, 2);
+
+        let other_count = repo
+            .count_by_scan(&other_scan_id, company_id)
+            .await
+            .unwrap();
+        assert_eq!(other_count, 1);
+    }
 }

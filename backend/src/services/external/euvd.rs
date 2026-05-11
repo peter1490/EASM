@@ -429,11 +429,15 @@ impl EuvdClient {
 
         // if end as comparator and can parse start as version
         // exemple "1.11.4 <*" or "5.3.0 <5.3.1"
+        // In EUVD product_version syntax the leading version is the *inclusive* lower
+        // bound; the operator describes only the upper bound. So "X <*" means
+        // [X, ∞) and "X <Y" means [X, Y).
         if let Some(bound_ver) = version_rs::Version::from(start_str) {
             return match end_part {
                 ">" | ">*" => bound_ver > service_version,
                 ">=" | "≥" => bound_ver >= service_version,
-                "<" | "<*" => bound_ver < service_version,
+                "<*" => bound_ver <= service_version,
+                "<" => bound_ver < service_version,
                 "<=" | "≤" => bound_ver <= service_version,
                 _ => {
                     let (operator, end_ver_str) = if end_part.starts_with("≤") {
@@ -450,7 +454,7 @@ impl EuvdClient {
                             "≤" | "<=" => {
                                 bound_ver <= service_version && service_version <= end_ver
                             }
-                            "<" => bound_ver < service_version && service_version < end_ver,
+                            "<" => bound_ver <= service_version && service_version < end_ver,
                             _ => true, // Unknown operator
                         };
                     }

@@ -655,7 +655,14 @@ fn identify_service(port: u16, banner: Option<&str>) -> ServiceInfo {
         for (category, signatures) in SERVICE_SIGNATURES.iter() {
             for sig in signatures {
                 if banner.to_lowercase().contains(&sig.pattern.to_lowercase()) {
-                    service_info.name = sig.name.to_string();
+                    // When the signature identifies a specific product (e.g. "OpenSSH",
+                    // "nginx"), use the lowercased product as the service name so it
+                    // matches the keys used by `get_known_vulnerabilities`. Fall back
+                    // to the category name for generic signatures (e.g. bare "SSH-").
+                    service_info.name = match sig.product {
+                        Some(product) => product.to_lowercase(),
+                        None => sig.name.to_string(),
+                    };
                     service_info.product = sig.product.map(|p| p.to_string()); // Set the product!
                     service_info.confidence = if sig.product.is_some() { 85 } else { 60 };
 
@@ -984,138 +991,141 @@ pub struct VulnerabilityInfo {
 /// Known vulnerable versions (simplified - in production, use a proper CVE database)
 pub fn get_known_vulnerabilities(product: &str, version: &str) -> Vec<VulnerabilityInfo> {
     let mut vulns = Vec::new();
+    let product_lower = product.to_lowercase();
+    let p = product_lower.as_str();
+    let v = version;
 
-    // These are examples - in production, integrate with NVD/CVE database
-    match (product.to_lowercase().as_str(), version) {
-        ("openssh", v) if version_compare(v, "8.3") < 0 => {
-            vulns.push(VulnerabilityInfo {
-                cve_id: "CVE-2020-15778".to_string(),
-                title: "OpenSSH Command Injection".to_string(),
-                description: "scp allows command injection via the username".to_string(),
-                severity: "high".to_string(),
-                cvss_score: Some(7.8),
-                cvss_vector: Some("CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H".to_string()),
-                affected_versions: vec!["< 8.3".to_string()],
-                references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2020-15778".to_string()],
-                exploitable: true,
-                has_public_exploit: true,
-            });
-        }
-        ("openssh", v) if version_compare(v, "7.7") < 0 => {
-            vulns.push(VulnerabilityInfo {
-                cve_id: "CVE-2018-15473".to_string(),
-                title: "OpenSSH User Enumeration".to_string(),
-                description: "User enumeration via malformed authentication request".to_string(),
-                severity: "medium".to_string(),
-                cvss_score: Some(5.3),
-                cvss_vector: Some("CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N".to_string()),
-                affected_versions: vec!["< 7.7".to_string()],
-                references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2018-15473".to_string()],
-                exploitable: true,
-                has_public_exploit: true,
-            });
-        }
-        ("apache", v) if version_compare(v, "2.4.50") < 0 && version_compare(v, "2.4.49") >= 0 => {
-            vulns.push(VulnerabilityInfo {
-                cve_id: "CVE-2021-41773".to_string(),
-                title: "Apache Path Traversal".to_string(),
-                description: "Path traversal and file disclosure vulnerability".to_string(),
-                severity: "critical".to_string(),
-                cvss_score: Some(9.8),
-                cvss_vector: Some("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H".to_string()),
-                affected_versions: vec!["2.4.49".to_string()],
-                references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2021-41773".to_string()],
-                exploitable: true,
-                has_public_exploit: true,
-            });
-        }
-        ("nginx", v) if version_compare(v, "1.20.1") < 0 => {
-            vulns.push(VulnerabilityInfo {
-                cve_id: "CVE-2021-23017".to_string(),
-                title: "nginx DNS Resolver Off-by-One".to_string(),
-                description: "1-byte memory overwrite in resolver".to_string(),
-                severity: "high".to_string(),
-                cvss_score: Some(7.7),
-                cvss_vector: Some("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:L".to_string()),
-                affected_versions: vec!["< 1.20.1".to_string()],
-                references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2021-23017".to_string()],
-                exploitable: true,
-                has_public_exploit: false,
-            });
-        }
-        ("redis", v) if version_compare(v, "6.2.6") < 0 => {
-            vulns.push(VulnerabilityInfo {
-                cve_id: "CVE-2021-32761".to_string(),
-                title: "Redis Integer Overflow".to_string(),
-                description: "Integer overflow in BITFIELD command".to_string(),
-                severity: "high".to_string(),
-                cvss_score: Some(7.5),
-                cvss_vector: Some("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H".to_string()),
-                affected_versions: vec!["< 6.2.6".to_string()],
-                references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2021-32761".to_string()],
-                exploitable: true,
-                has_public_exploit: false,
-            });
-        }
-        ("mysql", v) | ("mariadb", v) if version_compare(v, "8.0.23") < 0 => {
-            vulns.push(VulnerabilityInfo {
-                cve_id: "CVE-2021-2154".to_string(),
-                title: "MySQL Server Vulnerability".to_string(),
-                description: "Vulnerability in MySQL Server product".to_string(),
-                severity: "medium".to_string(),
-                cvss_score: Some(4.9),
-                cvss_vector: Some("CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:H".to_string()),
-                affected_versions: vec!["< 8.0.23".to_string()],
-                references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2021-2154".to_string()],
-                exploitable: false,
-                has_public_exploit: false,
-            });
-        }
-        ("postgresql", v) if version_compare(v, "13.3") < 0 => {
-            vulns.push(VulnerabilityInfo {
-                cve_id: "CVE-2021-32027".to_string(),
-                title: "PostgreSQL Buffer Overrun".to_string(),
-                description: "Buffer overrun from integer overflow in array subscripting"
-                    .to_string(),
-                severity: "high".to_string(),
-                cvss_score: Some(8.8),
-                cvss_vector: Some("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H".to_string()),
-                affected_versions: vec!["< 13.3".to_string()],
-                references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2021-32027".to_string()],
-                exploitable: true,
-                has_public_exploit: false,
-            });
-        }
-        ("vsftpd", "2.3.4") => {
-            vulns.push(VulnerabilityInfo {
-                cve_id: "CVE-2011-2523".to_string(),
-                title: "vsftpd Backdoor".to_string(),
-                description: "vsftpd 2.3.4 contains a backdoor that opens a shell on port 6200"
-                    .to_string(),
-                severity: "critical".to_string(),
-                cvss_score: Some(10.0),
-                cvss_vector: Some("CVSS:2.0/AV:N/AC:L/Au:N/C:C/I:C/A:C".to_string()),
-                affected_versions: vec!["2.3.4".to_string()],
-                references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2011-2523".to_string()],
-                exploitable: true,
-                has_public_exploit: true,
-            });
-        }
-        ("proftpd", v) if version_compare(v, "1.3.7a") < 0 => {
-            vulns.push(VulnerabilityInfo {
-                cve_id: "CVE-2020-9273".to_string(),
-                title: "ProFTPD Use-After-Free".to_string(),
-                description: "Use-after-free vulnerability in ProFTPD".to_string(),
-                severity: "high".to_string(),
-                cvss_score: Some(8.8),
-                cvss_vector: Some("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H".to_string()),
-                affected_versions: vec!["< 1.3.7a".to_string()],
-                references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2020-9273".to_string()],
-                exploitable: true,
-                has_public_exploit: true,
-            });
-        }
-        _ => {}
+    // Sequential `if` checks (rather than a `match`) so multiple
+    // version-range matches accumulate. Each check is independent.
+    //
+    // These are examples - in production, integrate with NVD/CVE database.
+    if p == "openssh" && version_compare(v, "8.3") < 0 {
+        vulns.push(VulnerabilityInfo {
+            cve_id: "CVE-2020-15778".to_string(),
+            title: "OpenSSH Command Injection".to_string(),
+            description: "scp allows command injection via the username".to_string(),
+            severity: "high".to_string(),
+            cvss_score: Some(7.8),
+            cvss_vector: Some("CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H".to_string()),
+            affected_versions: vec!["< 8.3".to_string()],
+            references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2020-15778".to_string()],
+            exploitable: true,
+            has_public_exploit: true,
+        });
+    }
+    if p == "openssh" && version_compare(v, "7.7") < 0 {
+        vulns.push(VulnerabilityInfo {
+            cve_id: "CVE-2018-15473".to_string(),
+            title: "OpenSSH User Enumeration".to_string(),
+            description: "User enumeration via malformed authentication request".to_string(),
+            severity: "medium".to_string(),
+            cvss_score: Some(5.3),
+            cvss_vector: Some("CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N".to_string()),
+            affected_versions: vec!["< 7.7".to_string()],
+            references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2018-15473".to_string()],
+            exploitable: true,
+            has_public_exploit: true,
+        });
+    }
+    if p == "apache" && version_compare(v, "2.4.50") < 0 && version_compare(v, "2.4.49") >= 0 {
+        vulns.push(VulnerabilityInfo {
+            cve_id: "CVE-2021-41773".to_string(),
+            title: "Apache Path Traversal".to_string(),
+            description: "Path traversal and file disclosure vulnerability".to_string(),
+            severity: "critical".to_string(),
+            cvss_score: Some(9.8),
+            cvss_vector: Some("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H".to_string()),
+            affected_versions: vec!["2.4.49".to_string()],
+            references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2021-41773".to_string()],
+            exploitable: true,
+            has_public_exploit: true,
+        });
+    }
+    if p == "nginx" && version_compare(v, "1.20.1") < 0 {
+        vulns.push(VulnerabilityInfo {
+            cve_id: "CVE-2021-23017".to_string(),
+            title: "nginx DNS Resolver Off-by-One".to_string(),
+            description: "1-byte memory overwrite in resolver".to_string(),
+            severity: "high".to_string(),
+            cvss_score: Some(7.7),
+            cvss_vector: Some("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:L".to_string()),
+            affected_versions: vec!["< 1.20.1".to_string()],
+            references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2021-23017".to_string()],
+            exploitable: true,
+            has_public_exploit: false,
+        });
+    }
+    if p == "redis" && version_compare(v, "6.2.6") < 0 {
+        vulns.push(VulnerabilityInfo {
+            cve_id: "CVE-2021-32761".to_string(),
+            title: "Redis Integer Overflow".to_string(),
+            description: "Integer overflow in BITFIELD command".to_string(),
+            severity: "high".to_string(),
+            cvss_score: Some(7.5),
+            cvss_vector: Some("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H".to_string()),
+            affected_versions: vec!["< 6.2.6".to_string()],
+            references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2021-32761".to_string()],
+            exploitable: true,
+            has_public_exploit: false,
+        });
+    }
+    if (p == "mysql" || p == "mariadb") && version_compare(v, "8.0.23") < 0 {
+        vulns.push(VulnerabilityInfo {
+            cve_id: "CVE-2021-2154".to_string(),
+            title: "MySQL Server Vulnerability".to_string(),
+            description: "Vulnerability in MySQL Server product".to_string(),
+            severity: "medium".to_string(),
+            cvss_score: Some(4.9),
+            cvss_vector: Some("CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:H".to_string()),
+            affected_versions: vec!["< 8.0.23".to_string()],
+            references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2021-2154".to_string()],
+            exploitable: false,
+            has_public_exploit: false,
+        });
+    }
+    if p == "postgresql" && version_compare(v, "13.3") < 0 {
+        vulns.push(VulnerabilityInfo {
+            cve_id: "CVE-2021-32027".to_string(),
+            title: "PostgreSQL Buffer Overrun".to_string(),
+            description: "Buffer overrun from integer overflow in array subscripting"
+                .to_string(),
+            severity: "high".to_string(),
+            cvss_score: Some(8.8),
+            cvss_vector: Some("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H".to_string()),
+            affected_versions: vec!["< 13.3".to_string()],
+            references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2021-32027".to_string()],
+            exploitable: true,
+            has_public_exploit: false,
+        });
+    }
+    if p == "vsftpd" && v == "2.3.4" {
+        vulns.push(VulnerabilityInfo {
+            cve_id: "CVE-2011-2523".to_string(),
+            title: "vsftpd Backdoor".to_string(),
+            description: "vsftpd 2.3.4 contains a backdoor that opens a shell on port 6200"
+                .to_string(),
+            severity: "critical".to_string(),
+            cvss_score: Some(10.0),
+            cvss_vector: Some("CVSS:2.0/AV:N/AC:L/Au:N/C:C/I:C/A:C".to_string()),
+            affected_versions: vec!["2.3.4".to_string()],
+            references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2011-2523".to_string()],
+            exploitable: true,
+            has_public_exploit: true,
+        });
+    }
+    if p == "proftpd" && version_compare(v, "1.3.7a") < 0 {
+        vulns.push(VulnerabilityInfo {
+            cve_id: "CVE-2020-9273".to_string(),
+            title: "ProFTPD Use-After-Free".to_string(),
+            description: "Use-after-free vulnerability in ProFTPD".to_string(),
+            severity: "high".to_string(),
+            cvss_score: Some(8.8),
+            cvss_vector: Some("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H".to_string()),
+            affected_versions: vec!["< 1.3.7a".to_string()],
+            references: vec!["https://nvd.nist.gov/vuln/detail/CVE-2020-9273".to_string()],
+            exploitable: true,
+            has_public_exploit: true,
+        });
     }
 
     vulns
@@ -1123,8 +1133,15 @@ pub fn get_known_vulnerabilities(product: &str, version: &str) -> Vec<Vulnerabil
 
 /// Simple version comparison (returns -1, 0, or 1)
 fn version_compare(v1: &str, v2: &str) -> i32 {
+    // Parse "major.minor.patch" segments, stopping at the first non-digit,
+    // non-dot character. This keeps OpenSSH-style patch suffixes from
+    // promoting to extra components, e.g. "8.3p1" → [8, 3] (same as "8.3"),
+    // while still letting "7.6p1" compare correctly against "7.7".
     let parse_version = |v: &str| -> Vec<u32> {
-        v.split(|c: char| !c.is_ascii_digit())
+        v.chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect::<String>()
+            .split('.')
             .filter(|s| !s.is_empty())
             .filter_map(|s| s.parse().ok())
             .collect()

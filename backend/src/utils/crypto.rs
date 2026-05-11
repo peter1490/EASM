@@ -22,14 +22,19 @@ pub struct TlsCertificateInfo {
     pub public_key_bits: Option<u32>,
 }
 
-/// Extract organization name from certificate subject or issuer
+/// Extract organization name from certificate subject or issuer.
+///
+/// Uses `AttributeTypeAndValue::as_str()` (not `attr_value().as_str()`) because
+/// the latter goes through `asn1_rs::Any::as_str()` which only decodes
+/// `UTF8String`. `O` is commonly encoded as `PrintableString`, which the
+/// `AttributeTypeAndValue` impl handles correctly.
 fn extract_organization(name: &X509Name) -> Option<String> {
     for rdn in name.iter() {
         for attr in rdn.iter() {
             let oid = attr.attr_type().to_id_string();
             // OID for Organization (O)
             if oid == "2.5.4.10" {
-                if let Ok(org_name) = attr.attr_value().as_str() {
+                if let Ok(org_name) = attr.as_str() {
                     return Some(org_name.to_string());
                 }
             }
@@ -38,14 +43,16 @@ fn extract_organization(name: &X509Name) -> Option<String> {
     None
 }
 
-/// Extract common name from certificate subject
+/// Extract common name from certificate subject.
+///
+/// See `extract_organization` for the rationale behind using `attr.as_str()`.
 fn extract_common_name(name: &X509Name) -> Option<String> {
     for rdn in name.iter() {
         for attr in rdn.iter() {
             let oid = attr.attr_type().to_id_string();
             // OID for Common Name (CN)
             if oid == "2.5.4.3" {
-                if let Ok(cn) = attr.attr_value().as_str() {
+                if let Ok(cn) = attr.as_str() {
                     return Some(cn.to_string());
                 }
             }
@@ -83,7 +90,10 @@ fn format_x509_name(name: &X509Name) -> String {
     for rdn in name.iter() {
         for attr in rdn.iter() {
             let oid = attr.attr_type().to_id_string();
-            if let Ok(value) = attr.attr_value().as_str() {
+            // Use AttributeTypeAndValue::as_str which decodes the common
+            // string types (UTF8/Printable/IA5/Numeric), not Any::as_str
+            // which is UTF8-only.
+            if let Ok(value) = attr.as_str() {
                 let field_name = match oid.as_str() {
                     "2.5.4.3" => "CN",
                     "2.5.4.10" => "O",
@@ -302,7 +312,7 @@ mod tests {
                 assert!(!cert_info.not_before.is_empty());
                 assert!(!cert_info.not_after.is_empty());
 
-                // Google should have organization info
+                // Google should have organization info (typically on the issuer).
                 assert!(cert_info.organization.is_some());
 
                 // Should have SAN domains

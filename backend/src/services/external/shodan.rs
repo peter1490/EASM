@@ -3,6 +3,11 @@ use crate::error::ApiError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+const SHODAN_PAGE_SIZE: usize = 100;
+/// Each page past the 1st costs 1 Shodan query credit, so keep this small by default.
+const MAX_SHODAN_PAGES: u32 = 10;
+const MAX_SHODAN_DNS_PAGES: u32 = 50;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShodanResult {
     pub ip_str: String,
@@ -56,6 +61,24 @@ pub struct ShodanHostInfo {
     pub city: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ShodanDnsDomainResponse {
+    #[serde(default)]
+    pub subdomains: Vec<String>,
+    #[serde(default)]
+    pub data: Vec<ShodanDnsRecord>,
+    #[serde(default)]
+    pub more: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ShodanDnsRecord {
+    #[serde(default)]
+    pub subdomain: String,
+    #[serde(default, rename = "type")]
+    pub record_type: String,
+}
+
 /// Comprehensive asset extraction from Shodan results
 #[derive(Debug, Clone, Default)]
 pub struct ShodanExtractedAssets {
@@ -103,28 +126,93 @@ impl ShodanClient {
             ));
         }
 
-        let url = format!(
-            "https://api.shodan.io/shodan/host/search?key={}&query={}",
-            api_key,
-            urlencoding::encode(query)
-        );
-
         tracing::debug!("Querying Shodan: {}", query);
 
-        let response = self.client.get(&url).await?;
-        let response_text = response.text().await?;
+        let mut page: u32 = 1;
+        let mut processed_pages: u32 = 0;
+        let mut all_results = Vec::new();
+        let mut seen_result_keys: HashSet<String> = HashSet::new();
+        let mut total_announced: Option<u64> = None;
 
-        let search_response: ShodanSearchResponse =
-            serde_json::from_str(&response_text).map_err(|e| {
-                ApiError::ExternalService(format!("Failed to parse Shodan response: {}", e))
-            })?;
+        loop {
+            let url = format!(
+                "https://api.shodan.io/shodan/host/search?key={}&query={}&page={}",
+                api_key,
+                urlencoding::encode(query),
+                page
+            );
+
+            let response = self.client.get(&url).await?;
+            let response_text = response.text().await?;
+
+            let search_response: ShodanSearchResponse = serde_json::from_str(&response_text)
+                .map_err(|e| {
+                    ApiError::ExternalService(format!("Failed to parse Shodan response: {}", e))
+                })?;
+
+            if total_announced.is_none() {
+                total_announced = search_response.total;
+            }
+
+            let page_results = search_response.matches;
+            let page_result_count = page_results.len();
+            if page_result_count == 0 {
+                break;
+            }
+            processed_pages += 1;
+
+            let mut newly_added = 0usize;
+            for result in page_results {
+                let key = Self::stable_result_key(&result);
+                if seen_result_keys.insert(key) {
+                    all_results.push(result);
+                    newly_added += 1;
+                }
+            }
+
+            if newly_added == 0 {
+                tracing::warn!(
+                    "Shodan returned a repeated/duplicate page for query '{}' at page {}. Stopping pagination.",
+                    query,
+                    page
+                );
+                break;
+            }
+
+            // Stop once we've collected everything Shodan claims exists.
+            if let Some(total) = total_announced {
+                if (all_results.len() as u64) >= total {
+                    break;
+                }
+            }
+
+            if page >= MAX_SHODAN_PAGES {
+                tracing::warn!(
+                    "Reached Shodan pagination cap ({}) for query '{}'. Returning {} of {} announced results.",
+                    MAX_SHODAN_PAGES,
+                    query,
+                    all_results.len(),
+                    total_announced
+                        .map(|t| t.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                );
+                break;
+            }
+
+            if page_result_count < SHODAN_PAGE_SIZE {
+                break;
+            }
+
+            page += 1;
+        }
 
         tracing::info!(
-            "Found {} Shodan results for query: {}",
-            search_response.matches.len(),
-            query
+            "Found {} unique Shodan results for query '{}' after {} page(s)",
+            all_results.len(),
+            query,
+            processed_pages
         );
-        Ok(search_response.matches)
+        Ok(all_results)
     }
 
     /// Get detailed information about a specific host
@@ -225,6 +313,99 @@ impl ShodanClient {
         Ok(subdomain_list)
     }
 
+    /// Fetches passive DNS subdomains from Shodan DNS domain endpoint.
+    pub async fn search_dns_domain_subdomains(
+        &self,
+        domain: &str,
+    ) -> Result<Vec<String>, ApiError> {
+        let api_key = self.api_key.as_ref().ok_or_else(|| {
+            ApiError::ExternalService("Shodan API key not configured".to_string())
+        })?;
+
+        if domain.trim().is_empty() {
+            return Err(ApiError::Validation("Domain cannot be empty".to_string()));
+        }
+
+        let canonical_domain = domain.trim().trim_end_matches('.').to_lowercase();
+        tracing::debug!(
+            "Querying Shodan DNS domain endpoint for subdomains: {}",
+            canonical_domain
+        );
+
+        let mut hostnames: HashSet<String> = HashSet::new();
+        let mut page: u32 = 1;
+        let mut pages_fetched: u32 = 0;
+
+        loop {
+            let url = format!(
+                "https://api.shodan.io/dns/domain/{}?key={}&page={}",
+                urlencoding::encode(&canonical_domain),
+                api_key,
+                page
+            );
+
+            let response = self.client.get(&url).await?;
+            let response_text = response.text().await?;
+
+            let dns_response: ShodanDnsDomainResponse = serde_json::from_str(&response_text)
+                .map_err(|e| {
+                    ApiError::ExternalService(format!(
+                        "Failed to parse Shodan DNS domain response: {}",
+                        e
+                    ))
+                })?;
+
+            pages_fetched += 1;
+
+            for subdomain in &dns_response.subdomains {
+                if let Some(hostname) = Self::compose_dns_hostname(&canonical_domain, subdomain) {
+                    hostnames.insert(hostname);
+                }
+            }
+            for record in &dns_response.data {
+                if !Self::is_hostname_dns_type(&record.record_type) {
+                    continue;
+                }
+                if let Some(hostname) =
+                    Self::compose_dns_hostname(&canonical_domain, &record.subdomain)
+                {
+                    hostnames.insert(hostname);
+                }
+            }
+
+            if !dns_response.more {
+                break;
+            }
+            if page >= MAX_SHODAN_DNS_PAGES {
+                tracing::warn!(
+                    "Reached Shodan DNS-domain pagination cap ({}) for {}; further pages skipped.",
+                    MAX_SHODAN_DNS_PAGES,
+                    canonical_domain
+                );
+                break;
+            }
+            page += 1;
+        }
+
+        let mut subdomain_list: Vec<String> = hostnames.into_iter().collect();
+        subdomain_list.sort();
+        tracing::info!(
+            "Found {} unique subdomains from Shodan DNS domain endpoint for {} ({} page(s))",
+            subdomain_list.len(),
+            canonical_domain,
+            pages_fetched
+        );
+        Ok(subdomain_list)
+    }
+
+    /// Restrict DNS-domain records to types whose `subdomain` field names a hostname.
+    fn is_hostname_dns_type(record_type: &str) -> bool {
+        matches!(
+            record_type.to_ascii_uppercase().as_str(),
+            "" | "A" | "AAAA" | "CNAME" | "NS"
+        )
+    }
+
     /// Comprehensive search that extracts ALL asset types from Shodan results
     /// Returns IPs, domains, ASNs, organizations, and certificate information
     pub async fn search_comprehensive(
@@ -245,7 +426,37 @@ impl ShodanClient {
         domain: &str,
     ) -> Result<ShodanExtractedAssets, ApiError> {
         let query = format!("hostname:{}", domain);
-        self.search_comprehensive(&query).await
+        let host_search_result = self.search_comprehensive(&query).await;
+        let dns_subdomain_result = self.search_dns_domain_subdomains(domain).await;
+
+        match (host_search_result, dns_subdomain_result) {
+            (Ok(mut extracted), Ok(subdomains)) => {
+                extracted.domains.extend(subdomains);
+                Ok(extracted)
+            }
+            (Ok(extracted), Err(dns_error)) => {
+                tracing::warn!(
+                    "Shodan DNS domain endpoint failed for {}: {}",
+                    domain,
+                    dns_error
+                );
+                Ok(extracted)
+            }
+            (Err(host_search_error), Ok(subdomains)) => {
+                tracing::warn!(
+                    "Shodan hostname search failed for {}: {}. Returning DNS-domain-only results.",
+                    domain,
+                    host_search_error
+                );
+                let mut extracted = ShodanExtractedAssets::default();
+                extracted.domains.extend(subdomains);
+                Ok(extracted)
+            }
+            (Err(host_search_error), Err(dns_error)) => Err(ApiError::ExternalService(format!(
+                "Shodan hostname and DNS-domain queries both failed for '{}': hostname={}, dns={}",
+                domain, host_search_error, dns_error
+            ))),
+        }
     }
 
     /// Search by organization and extract all related assets
@@ -430,6 +641,35 @@ impl ShodanClient {
             None
         }
     }
+
+    fn stable_result_key(result: &ShodanResult) -> String {
+        let ts = result.timestamp.as_deref().unwrap_or("");
+        format!("{}:{}:{}", result.ip_str, result.port, ts)
+    }
+
+    fn compose_dns_hostname(base_domain: &str, subdomain: &str) -> Option<String> {
+        let canonical_base = base_domain.trim().trim_end_matches('.').to_lowercase();
+        if canonical_base.is_empty() {
+            return None;
+        }
+
+        let mut normalized = subdomain.trim().trim_end_matches('.').to_lowercase();
+        if normalized.starts_with("*.") {
+            normalized = normalized.trim_start_matches("*.").to_string();
+        }
+        if normalized.is_empty() || normalized == "@" {
+            return Some(canonical_base);
+        }
+        if normalized.contains('*') {
+            return None;
+        }
+
+        if normalized == canonical_base || normalized.ends_with(&format!(".{}", canonical_base)) {
+            return Some(normalized);
+        }
+
+        Some(format!("{}.{}", normalized, canonical_base))
+    }
 }
 
 #[cfg(test)]
@@ -519,5 +759,90 @@ mod tests {
         let _client = ShodanClient::new(Some("test_key".to_string())).unwrap();
         // This would normally make a real request, but we're just testing the query construction
         // The actual search method would be called with org:"Example Corp"
+    }
+
+    #[test]
+    fn test_stable_result_key() {
+        let result = ShodanResult {
+            ip_str: "203.0.113.10".to_string(),
+            port: 443,
+            data: "tls".to_string(),
+            timestamp: Some("2024-01-01T00:00:00".to_string()),
+            transport: None,
+            product: None,
+            version: None,
+            hostnames: None,
+            location: None,
+            org: None,
+            isp: None,
+            asn: None,
+            domains: None,
+        };
+        assert_eq!(
+            ShodanClient::stable_result_key(&result),
+            "203.0.113.10:443:2024-01-01T00:00:00".to_string()
+        );
+    }
+
+    #[test]
+    fn test_compose_dns_hostname() {
+        assert_eq!(
+            ShodanClient::compose_dns_hostname("example.com", "www"),
+            Some("www.example.com".to_string())
+        );
+        assert_eq!(
+            ShodanClient::compose_dns_hostname("example.com", "WWW.Example.com."),
+            Some("www.example.com".to_string())
+        );
+        assert_eq!(
+            ShodanClient::compose_dns_hostname("example.com", "*.api"),
+            Some("api.example.com".to_string())
+        );
+        assert_eq!(
+            ShodanClient::compose_dns_hostname("example.com", "a*pi"),
+            None
+        );
+        assert_eq!(
+            ShodanClient::compose_dns_hostname("example.com", ""),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            ShodanClient::compose_dns_hostname("example.com", "@"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(ShodanClient::compose_dns_hostname("", "www"), None);
+    }
+
+    #[test]
+    fn test_shodan_dns_domain_response_deserialization() {
+        let payload = r#"{
+            "domain":"example.com",
+            "subdomains":["www","api.internal","www.example.com"],
+            "data":[
+                {"subdomain":"mail"},
+                {"subdomain":"www"}
+            ],
+            "more":false
+        }"#;
+
+        let parsed: ShodanDnsDomainResponse = serde_json::from_str(payload).unwrap();
+        let mut hostnames: HashSet<String> = HashSet::new();
+        for subdomain in parsed.subdomains {
+            if let Some(hostname) = ShodanClient::compose_dns_hostname("example.com", &subdomain) {
+                hostnames.insert(hostname);
+            }
+        }
+        for record in parsed.data {
+            if let Some(hostname) =
+                ShodanClient::compose_dns_hostname("example.com", &record.subdomain)
+            {
+                hostnames.insert(hostname);
+            }
+        }
+
+        assert!(hostnames.contains("www.example.com"));
+        assert!(hostnames.contains("api.internal.example.com"));
+        assert!(hostnames.contains("mail.example.com"));
+        assert_eq!(hostnames.len(), 3);
     }
 }

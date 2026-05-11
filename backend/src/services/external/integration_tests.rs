@@ -301,17 +301,22 @@ mod tests {
         let crtsh_client = CrtShClient::new().unwrap();
         let cs_client = CertSpotterClient::new(Some("test_token".to_string())).unwrap();
 
+        // (input, base, expected_crtsh, expected_certspotter)
+        //
+        // crt.sh skips wildcard entries entirely; CertSpotter normalizes `*.foo`
+        // to `foo` and re-validates. Both behaviors are intentional, so the
+        // expectations diverge for the wildcard cases.
         let test_cases = vec![
-            ("example.com", "example.com", true),
-            ("www.example.com", "example.com", true),
-            ("sub.example.com", "example.com", true),
-            ("*.example.com", "example.com", false), // Wildcards should be filtered
-            ("other.com", "example.com", false),
-            ("", "example.com", false),
-            ("invalid domain", "example.com", false),
+            ("example.com", "example.com", true, true),
+            ("www.example.com", "example.com", true, true),
+            ("sub.example.com", "example.com", true, true),
+            ("*.example.com", "example.com", false, true),
+            ("other.com", "example.com", false, false),
+            ("", "example.com", false, false),
+            ("invalid domain", "example.com", false, false),
         ];
 
-        for (domain, base_domain, expected) in test_cases {
+        for (domain, base_domain, expected_crtsh, expected_cs) in test_cases {
             let crtsh_result = crtsh_client
                 .validate_and_clean_domain(domain, base_domain)
                 .is_some();
@@ -320,12 +325,12 @@ mod tests {
                 .is_some();
 
             assert_eq!(
-                crtsh_result, expected,
+                crtsh_result, expected_crtsh,
                 "crt.sh validation failed for: {}",
                 domain
             );
             assert_eq!(
-                cs_result, expected,
+                cs_result, expected_cs,
                 "CertSpotter validation failed for: {}",
                 domain
             );

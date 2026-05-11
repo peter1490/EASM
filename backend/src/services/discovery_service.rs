@@ -41,7 +41,8 @@ use crate::{
     utils::network::expand_cidr,
 };
 
-/// Common CDN, cloud provider, and hosting organizations to filter
+/// Common CDN, cloud provider, and hosting organizations to filter.
+/// Keep this list focused on explicit infrastructure names only.
 static COMMON_INFRASTRUCTURE_ORGS: &[&str] = &[
     "cloudflare",
     "akamai",
@@ -81,19 +82,9 @@ static COMMON_INFRASTRUCTURE_ORGS: &[&str] = &[
     "barracuda",
     "domain administrator",
     "domain admin",
-    "privacy",
     "whois privacy",
     "contact privacy",
-    "private",
     "registration private",
-    "proxy",
-    "inc",
-    "llc",
-    "ltd",
-    "corporation",
-    "corp",
-    "company",
-    "co.",
 ];
 
 /// Provider keywords used to classify cloud/WAF infrastructure IPs.
@@ -582,7 +573,32 @@ impl DiscoveryService {
         config: Option<DiscoveryConfig>,
     ) -> Result<(), ApiError> {
         // Load seeds
-        let seeds = self.seed_repo.list(company_id).await?;
+        let all_seeds = self.seed_repo.list(company_id).await?;
+        let (seeds, missing_seed_ids) = Self::filter_seeds_by_requested_ids(
+            all_seeds,
+            config.as_ref().and_then(|c| c.seed_ids.as_ref()),
+        );
+        if !missing_seed_ids.is_empty() {
+            tracing::warn!(
+                "Discovery run {} requested {} seed_ids that do not exist for company {}: {:?}",
+                run_id,
+                missing_seed_ids.len(),
+                company_id,
+                missing_seed_ids
+            );
+        }
+        if config
+            .as_ref()
+            .and_then(|c| c.seed_ids.as_ref())
+            .map(|ids| !ids.is_empty())
+            .unwrap_or(false)
+        {
+            tracing::info!(
+                "Discovery run {} filtered seeds by seed_ids: {} selected",
+                run_id,
+                seeds.len()
+            );
+        }
         let seed_count = seeds.len();
 
         // Extract auto_scan_threshold from config
@@ -673,11 +689,13 @@ impl DiscoveryService {
             .as_ref()
             .and_then(|c| c.max_depth)
             .unwrap_or(settings.max_discovery_depth);
+        let max_assets_per_discovery = settings.max_assets_per_discovery as usize;
 
         let mut total_result = DiscoveryResult::default();
+        let mut unique_discovered_assets: HashSet<Uuid> = HashSet::new();
         let mut processed = 0;
 
-        loop {
+        'queue_loop: loop {
             ctx.check_cancellation().await?;
 
             // Get pending count
@@ -729,7 +747,33 @@ impl DiscoveryService {
                 match result {
                     Ok(item_result) => {
                         self.discovery_queue_repo.complete_item(&item.id).await?;
+                        unique_discovered_assets.extend(item_result.assets_created.iter().copied());
+                        unique_discovered_assets.extend(item_result.assets_updated.iter().copied());
                         total_result.merge(item_result);
+                        if unique_discovered_assets.len() >= max_assets_per_discovery {
+                            let warning = format!(
+                                "Discovery asset cap reached ({} unique assets). Stopping further queue processing.",
+                                max_assets_per_discovery
+                            );
+                            tracing::warn!(
+                                run_id = %run_id,
+                                company_id = %company_id,
+                                "{}",
+                                warning
+                            );
+                            total_result.warnings.push(warning.clone());
+                            let mut statuses = self.status.lock().await;
+                            let status = statuses
+                                .entry(company_id)
+                                .or_insert_with(DiscoveryStatus::default);
+                            status.current_phase = "Asset cap reached".to_string();
+                            if status.errors.len() < 50 {
+                                status.errors.push(warning);
+                            }
+                            drop(statuses);
+                            self.discovery_queue_repo.clear_run(&run_id).await?;
+                            break 'queue_loop;
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to process queue item {}: {}", item.item_value, e);
@@ -1223,9 +1267,67 @@ impl DiscoveryService {
                     )
                     .await?;
 
+                    let san_confidence = self.calculate_multi_source_confidence(0.55, 1);
+                    for san_domain in &cert_info.san_domains {
+                        let Some(canonical_san_domain) =
+                            Self::normalize_discovery_hostname(san_domain)
+                        else {
+                            continue;
+                        };
+                        if canonical_san_domain == canonical_domain {
+                            continue;
+                        }
+
+                        let san_asset = self
+                            .create_or_update_asset_with_sources(
+                                run_id,
+                                company_id,
+                                AssetType::Domain,
+                                &canonical_san_domain,
+                                vec![SourceType::TlsCertificate],
+                                san_confidence,
+                                seed_id,
+                                Some(cert_asset.0),
+                                Some(json!({
+                                    "discovered_from": "certificate_san",
+                                    "certificate_subject": cert_info.subject.clone(),
+                                    "certificate_parent_domain": canonical_domain.clone(),
+                                })),
+                            )
+                            .await?;
+
+                        if san_asset.1 {
+                            result.assets_created.push(san_asset.0);
+                        } else {
+                            result.assets_updated.push(san_asset.0);
+                        }
+
+                        self.create_relationship(
+                            run_id,
+                            san_asset.0,
+                            cert_asset.0,
+                            RelationshipType::HasCertificate,
+                            san_confidence,
+                        )
+                        .await?;
+
+                        if depth < max_depth {
+                            self.queue_for_discovery(
+                                run_id,
+                                QueueItemType::Domain,
+                                &canonical_san_domain,
+                                seed_id,
+                                Some(cert_asset.0),
+                                depth + 1,
+                                4,
+                            )
+                            .await?;
+                        }
+                    }
+
                     // Queue organization for discovery if found and depth allows
                     if let Some(ref org) = cert_info.organization {
-                        if !self.should_filter_organization(org) && depth < max_depth {
+                        if !Self::should_filter_organization(org) && depth < max_depth {
                             self.queue_for_discovery(
                                 run_id,
                                 QueueItemType::Organization,
@@ -1266,7 +1368,7 @@ impl DiscoveryService {
         let mut result = DiscoveryResult::default();
 
         // Skip common infrastructure orgs
-        if self.should_filter_organization(org) {
+        if Self::should_filter_organization(org) {
             tracing::debug!("Filtered organization: {}", org);
             return Ok(result);
         }
@@ -1332,6 +1434,18 @@ impl DiscoveryService {
                         0.7,
                     )
                     .await?;
+                    if depth < max_depth {
+                        self.queue_for_discovery(
+                            run_id,
+                            QueueItemType::Ip,
+                            ip,
+                            seed_id,
+                            Some(org_asset_id),
+                            depth + 1,
+                            3,
+                        )
+                        .await?;
+                    }
                 }
 
                 // Collect domains from Shodan, then process all domains in source-priority order.
@@ -1384,8 +1498,19 @@ impl DiscoveryService {
 
         let mut ordered_domains: Vec<String> = discovered_domains.keys().cloned().collect();
         ordered_domains.sort();
+        let max_domains_per_org = self.current_settings().max_domains_per_org as usize;
+        if ordered_domains.len() > max_domains_per_org {
+            let warning = format!(
+                "Organization '{}' discovery found {} domains; limiting to {}",
+                org,
+                ordered_domains.len(),
+                max_domains_per_org
+            );
+            tracing::warn!("{}", warning);
+            result.warnings.push(warning);
+        }
 
-        for domain in ordered_domains {
+        for domain in ordered_domains.into_iter().take(max_domains_per_org) {
             let source_types = discovered_domains.remove(&domain).unwrap_or_default();
             let source_names: Vec<String> = source_types.iter().map(|s| s.to_string()).collect();
             let confidence = self.calculate_multi_source_confidence(0.6, source_types.len());
@@ -1510,6 +1635,18 @@ impl DiscoveryService {
                         0.8,
                     )
                     .await?;
+                    if depth < max_depth {
+                        self.queue_for_discovery(
+                            run_id,
+                            QueueItemType::Ip,
+                            ip,
+                            seed_id,
+                            Some(asn_asset_id),
+                            depth + 1,
+                            3,
+                        )
+                        .await?;
+                    }
                 }
 
                 for domain in &extracted.domains {
@@ -1598,8 +1735,8 @@ impl DiscoveryService {
         cidr: &str,
         seed_id: Option<Uuid>,
         _parent_asset_id: Option<Uuid>,
-        _depth: i32,
-        _max_depth: i32,
+        depth: i32,
+        max_depth: i32,
     ) -> Result<DiscoveryResult, ApiError> {
         let mut result = DiscoveryResult::default();
         let settings = self.current_settings();
@@ -1635,6 +1772,19 @@ impl DiscoveryService {
             if asset.1 {
                 result.assets_created.push(asset.0);
             }
+
+            if depth < max_depth {
+                self.queue_for_discovery(
+                    run_id,
+                    QueueItemType::Ip,
+                    &ip_str,
+                    seed_id,
+                    Some(asset.0),
+                    depth + 1,
+                    3,
+                )
+                .await?;
+            }
         }
 
         Ok(result)
@@ -1648,8 +1798,8 @@ impl DiscoveryService {
         ip: &str,
         seed_id: Option<Uuid>,
         parent_asset_id: Option<Uuid>,
-        _depth: i32,
-        _max_depth: i32,
+        depth: i32,
+        max_depth: i32,
     ) -> Result<DiscoveryResult, ApiError> {
         let mut result = DiscoveryResult::default();
 
@@ -1710,6 +1860,19 @@ impl DiscoveryService {
                             0.7,
                         )
                         .await?;
+
+                        if depth < max_depth {
+                            self.queue_for_discovery(
+                                run_id,
+                                QueueItemType::Domain,
+                                &hostname,
+                                seed_id,
+                                Some(ip_asset_id),
+                                depth + 1,
+                                3,
+                            )
+                            .await?;
+                        }
                     }
                 }
                 Err(e) => {
@@ -1917,15 +2080,15 @@ impl DiscoveryService {
     }
 
     /// Check if an organization should be filtered out
-    fn should_filter_organization(&self, org: &str) -> bool {
-        let org_lower = org.to_lowercase();
-
-        if org_lower.trim().is_empty() || org_lower.len() < 3 {
+    fn should_filter_organization(org: &str) -> bool {
+        let normalized_org = Self::normalize_organization_name(org);
+        if normalized_org.len() < 3 {
             return true;
         }
 
+        let tokens: HashSet<&str> = normalized_org.split_whitespace().collect();
         for infra_org in COMMON_INFRASTRUCTURE_ORGS {
-            if org_lower.contains(infra_org) {
+            if Self::organization_matches_infra_keyword(&normalized_org, &tokens, infra_org) {
                 return true;
             }
         }
@@ -1963,6 +2126,36 @@ impl DiscoveryService {
         Some(normalized)
     }
 
+    fn normalize_organization_name(org: &str) -> String {
+        org.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    ' '
+                }
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<&str>>()
+            .join(" ")
+    }
+
+    fn organization_matches_infra_keyword(
+        normalized_org: &str,
+        tokens: &HashSet<&str>,
+        keyword: &str,
+    ) -> bool {
+        let normalized_keyword = Self::normalize_organization_name(keyword);
+        if normalized_keyword.is_empty() {
+            return false;
+        }
+        if normalized_keyword.contains(' ') {
+            return normalized_org.contains(&normalized_keyword);
+        }
+        tokens.contains(normalized_keyword.as_str())
+    }
+
     fn record_discovered_domain_source(
         domain_sources: &mut HashMap<String, Vec<SourceType>>,
         domain: &str,
@@ -1977,6 +2170,26 @@ impl DiscoveryService {
         }
         let ordered = Self::order_source_types(entry.clone());
         *entry = ordered;
+    }
+
+    fn filter_seeds_by_requested_ids(
+        all_seeds: Vec<Seed>,
+        requested_ids: Option<&Vec<Uuid>>,
+    ) -> (Vec<Seed>, Vec<Uuid>) {
+        let Some(ids) = requested_ids.filter(|ids| !ids.is_empty()) else {
+            return (all_seeds, Vec::new());
+        };
+
+        let requested_set: HashSet<Uuid> = ids.iter().copied().collect();
+        let available_set: HashSet<Uuid> = all_seeds.iter().map(|seed| seed.id).collect();
+        let mut missing_ids: Vec<Uuid> =
+            requested_set.difference(&available_set).copied().collect();
+        missing_ids.sort_unstable();
+        let filtered = all_seeds
+            .into_iter()
+            .filter(|seed| requested_set.contains(&seed.id))
+            .collect();
+        (filtered, missing_ids)
     }
 
     fn source_priority(source: &SourceType) -> usize {
@@ -2248,5 +2461,67 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(sources, vec![SourceType::Shodan, SourceType::Virustotal]);
+    }
+
+    #[test]
+    fn test_should_filter_organization_precision() {
+        assert!(DiscoveryService::should_filter_organization(
+            "Cloudflare, Inc."
+        ));
+        assert!(DiscoveryService::should_filter_organization(
+            "Akamai Technologies"
+        ));
+        assert!(!DiscoveryService::should_filter_organization(
+            "Principal Financial Group, Inc."
+        ));
+        assert!(!DiscoveryService::should_filter_organization(
+            "Acme Corporation"
+        ));
+    }
+
+    #[test]
+    fn test_normalize_organization_name() {
+        assert_eq!(
+            DiscoveryService::normalize_organization_name("  Cloudflare, Inc.  "),
+            "cloudflare inc"
+        );
+        assert_eq!(
+            DiscoveryService::normalize_organization_name("ACME-Group LLC"),
+            "acme group llc"
+        );
+    }
+
+    #[test]
+    fn test_filter_seeds_by_requested_ids() {
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+        let missing = Uuid::new_v4();
+        let seeds = vec![
+            Seed {
+                id: id_a,
+                seed_type: SeedType::Domain,
+                value: "example.com".to_string(),
+                note: None,
+                company_id: Uuid::new_v4(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            Seed {
+                id: id_b,
+                seed_type: SeedType::Domain,
+                value: "api.example.com".to_string(),
+                note: None,
+                company_id: Uuid::new_v4(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        ];
+
+        let requested = vec![id_b, missing];
+        let (filtered, missing_ids) =
+            DiscoveryService::filter_seeds_by_requested_ids(seeds, Some(&requested));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, id_b);
+        assert_eq!(missing_ids, vec![missing]);
     }
 }

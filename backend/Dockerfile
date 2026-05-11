@@ -7,7 +7,7 @@ ARG DATABASE_URL
 # ============================================================================
 # Development Stage
 # ============================================================================
-FROM rust:1.86 AS development
+FROM rust:1.88 AS development
 
 ARG DATABASE_URL
 
@@ -47,7 +47,7 @@ CMD ["cargo", "watch", "-x", "run"]
 # ============================================================================
 # Production Builder Stage
 # ============================================================================
-FROM rust:1.86 AS builder
+FROM rust:1.88 AS builder
 
 ARG DATABASE_URL
 

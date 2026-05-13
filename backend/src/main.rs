@@ -72,7 +72,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route(
             "/api/companies/:id",
-            patch(handlers::company_handlers::update_company),
+            patch(handlers::company_handlers::update_company)
+                .delete(handlers::company_handlers::delete_company),
+        )
+        .route(
+            "/api/companies/:id/clear-data",
+            post(handlers::company_handlers::clear_company_data),
+        )
+        .route(
+            "/api/companies/:id/members",
+            get(handlers::company_handlers::list_company_members)
+                .post(handlers::company_handlers::add_company_member),
+        )
+        .route(
+            "/api/companies/:id/members/:user_id",
+            patch(handlers::company_handlers::update_company_member_role)
+                .delete(handlers::company_handlers::remove_company_member),
         )
         // Admin endpoints
         .route(
@@ -88,6 +103,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/admin/users/:id/roles",
             post(handlers::admin_handlers::update_user_role),
+        )
+        .route(
+            "/api/admin/users/:id/companies",
+            get(handlers::admin_handlers::list_user_companies),
         )
         .route(
             "/api/admin/settings",

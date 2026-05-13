@@ -158,6 +158,9 @@ pub struct ManagedSettings {
     #[serde(default = "default_max_domains_per_org")]
     pub max_domains_per_org: u32,
 
+    #[serde(default = "default_false")]
+    pub skip_unresolved_domains: bool,
+
     // Search
     #[serde(default = "default_reindex_min_interval_seconds")]
     pub reindex_min_interval_seconds: u32,
@@ -309,6 +312,8 @@ impl Default for ManagedSettings {
             max_orgs_per_domain: default_max_orgs_per_domain(),
             max_domains_per_org: default_max_domains_per_org(),
 
+            skip_unresolved_domains: default_false(),
+
             reindex_min_interval_seconds: default_reindex_min_interval_seconds(),
         }
     }
@@ -410,6 +415,8 @@ impl ManagedSettings {
         settings.max_orgs_per_domain = normalized.max_orgs_per_domain;
         settings.max_domains_per_org = normalized.max_domains_per_org;
 
+        settings.skip_unresolved_domains = normalized.skip_unresolved_domains;
+
         settings.reindex_min_interval_seconds = normalized.reindex_min_interval_seconds;
     }
 }
@@ -475,6 +482,8 @@ impl From<&Settings> for ManagedSettings {
             min_pivot_confidence: settings.min_pivot_confidence,
             max_orgs_per_domain: settings.max_orgs_per_domain,
             max_domains_per_org: settings.max_domains_per_org,
+
+            skip_unresolved_domains: settings.skip_unresolved_domains,
 
             reindex_min_interval_seconds: settings.reindex_min_interval_seconds,
         }

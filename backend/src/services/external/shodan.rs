@@ -477,6 +477,143 @@ impl ShodanClient {
         self.search_comprehensive(&query).await
     }
 
+    /// Count results for a filtered query without consuming query credits.
+    /// Used to gate lateral pivots (favicon/JARM/HTML) so a SaaS-grade saturated
+    /// fingerprint cannot blow the discovery run's Shodan budget.
+    pub async fn count(&self, query: &str) -> Result<u64, ApiError> {
+        let api_key = self.api_key.as_ref().ok_or_else(|| {
+            ApiError::ExternalService("Shodan API key not configured".to_string())
+        })?;
+        if query.is_empty() {
+            return Err(ApiError::Validation(
+                "Search query cannot be empty".to_string(),
+            ));
+        }
+
+        let url = format!(
+            "https://api.shodan.io/shodan/host/count?key={}&query={}",
+            api_key,
+            urlencoding::encode(query)
+        );
+        let response = self.client.get(&url).await?;
+        let text = response.text().await?;
+        #[derive(Deserialize)]
+        struct CountResponse {
+            #[serde(default)]
+            total: u64,
+        }
+        let parsed: CountResponse = serde_json::from_str(&text).map_err(|e| {
+            ApiError::ExternalService(format!("Failed to parse Shodan count response: {}", e))
+        })?;
+        Ok(parsed.total)
+    }
+
+    /// Lateral pivot — find hosts whose favicon hash matches `hash`.
+    /// `max_results` caps the result set after a free count pre-check (Shodan's
+    /// `host/count` does not consume query credits). When the live count exceeds
+    /// the cap the pivot is skipped entirely and an empty extraction is returned;
+    /// this prevents a popular SaaS favicon from saturating the queue.
+    pub async fn search_by_favicon_hash(
+        &self,
+        hash: i32,
+        max_results: usize,
+    ) -> Result<ShodanExtractedAssets, ApiError> {
+        let query = format!("http.favicon.hash:{}", hash);
+        self.lateral_pivot_search(&query, max_results).await
+    }
+
+    /// Lateral pivot — find hosts whose TLS stack fingerprint matches `jarm`.
+    /// (JARM probe computation lives in [`HttpAnalyzer`]; this is just the search side.)
+    pub async fn search_by_jarm(
+        &self,
+        jarm: &str,
+        max_results: usize,
+    ) -> Result<ShodanExtractedAssets, ApiError> {
+        let trimmed = jarm.trim();
+        if trimmed.is_empty() {
+            return Err(ApiError::Validation(
+                "JARM fingerprint cannot be empty".to_string(),
+            ));
+        }
+        let query = format!("ssl.jarm:{}", trimmed);
+        self.lateral_pivot_search(&query, max_results).await
+    }
+
+    /// Lateral pivot — find hosts whose HTML body contains the given needle.
+    /// Used with analytics IDs / tag-manager IDs / pixel tokens extracted from
+    /// the seed's HTML. The needle is wrapped in double quotes so Shodan treats
+    /// it as an exact substring match rather than a tokenized search.
+    pub async fn search_by_html(
+        &self,
+        needle: &str,
+        max_results: usize,
+    ) -> Result<ShodanExtractedAssets, ApiError> {
+        let trimmed = needle.trim();
+        if trimmed.is_empty() {
+            return Err(ApiError::Validation(
+                "HTML pivot needle cannot be empty".to_string(),
+            ));
+        }
+        // Shodan's filter accepts a quoted exact-match value; URL encoding is
+        // applied later by the caller-side helper.
+        let query = format!("http.html:\"{}\"", trimmed.replace('"', ""));
+        self.lateral_pivot_search(&query, max_results).await
+    }
+
+    async fn lateral_pivot_search(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<ShodanExtractedAssets, ApiError> {
+        if self.api_key.is_none() {
+            return Err(ApiError::ExternalService(
+                "Shodan API key not configured".to_string(),
+            ));
+        }
+
+        // Free pre-check: count does not consume query credits.
+        let total = match self.count(query).await {
+            Ok(n) => n,
+            Err(e) => {
+                // The count endpoint is occasionally flaky for new filters; degrade
+                // gracefully by proceeding with the paged search and letting the
+                // existing per-page cap handle runaway result sets.
+                tracing::debug!(
+                    "Shodan count pre-check failed for '{}': {}; proceeding with search",
+                    query,
+                    e
+                );
+                u64::MAX
+            }
+        };
+
+        if total == 0 {
+            return Ok(ShodanExtractedAssets::default());
+        }
+        if max_results > 0 && total as usize > max_results {
+            tracing::info!(
+                "Skipping Shodan lateral pivot '{}': count={} exceeds cap={}",
+                query,
+                total,
+                max_results
+            );
+            return Ok(ShodanExtractedAssets::default());
+        }
+
+        let results = self.search(query).await?;
+        let mut extracted = self.extract_assets_from_results(&results);
+        if max_results > 0 && extracted.domains.len() > max_results {
+            // Defensive trim — should be unreachable given the count pre-check.
+            let trimmed: HashSet<String> = extracted
+                .domains
+                .into_iter()
+                .take(max_results)
+                .collect();
+            extracted.domains = trimmed;
+        }
+        Ok(extracted)
+    }
+
     /// Check if API key is configured
     pub fn is_configured(&self) -> bool {
         self.api_key.is_some()

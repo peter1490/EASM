@@ -133,6 +133,24 @@ export type CompanyListResponse = {
   companies: CompanyWithRole[];
 };
 
+export type CompanyMember = {
+  user_id: string;
+  email: string;
+  display_name: string | null;
+  role: string;
+  assigned_at: string;
+};
+
+export type CompanyMembersResponse = {
+  members: CompanyMember[];
+};
+
+export type ClearCompanyDataResponse = {
+  deleted: Record<string, number>;
+};
+
+export const DEFAULT_COMPANY_ID = "00000000-0000-0000-0000-000000000000";
+
 // ============================================================================
 // SEED & ASSET TYPES
 // ============================================================================
@@ -456,6 +474,7 @@ export type UserWithRoles = {
   updated_at: string;
   last_login_at?: string | null;
   roles: string[];
+  companies: CompanyWithRole[];
 };
 
 export type CreateUserRequest = {
@@ -1001,6 +1020,109 @@ export async function updateCompany(id: string, name: string): Promise<Company> 
   return res.json();
 }
 
+export async function deleteCompany(id: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/api/companies/${id}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to delete company: ${res.status}`);
+  }
+}
+
+export async function clearCompanyData(id: string): Promise<ClearCompanyDataResponse> {
+  const res = await apiFetch(`${API_BASE}/api/companies/${id}/clear-data`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to clear company data: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function listCompanyMembers(id: string): Promise<CompanyMember[]> {
+  const res = await apiFetch(`${API_BASE}/api/companies/${id}/members`, {
+    cache: "no-store",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to list members: ${res.status}`);
+  }
+  const data: CompanyMembersResponse = await res.json();
+  return data.members || [];
+}
+
+export async function addCompanyMember(
+  id: string,
+  userId: string,
+  role: string,
+): Promise<CompanyMember[]> {
+  const res = await apiFetch(`${API_BASE}/api/companies/${id}/members`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId, role }),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to add member: ${res.status}`);
+  }
+  const data: CompanyMembersResponse = await res.json();
+  return data.members || [];
+}
+
+export async function updateCompanyMemberRole(
+  id: string,
+  userId: string,
+  role: string,
+): Promise<CompanyMember[]> {
+  const res = await apiFetch(`${API_BASE}/api/companies/${id}/members/${userId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role }),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to update member role: ${res.status}`);
+  }
+  const data: CompanyMembersResponse = await res.json();
+  return data.members || [];
+}
+
+export async function removeCompanyMember(
+  id: string,
+  userId: string,
+): Promise<CompanyMember[]> {
+  const res = await apiFetch(`${API_BASE}/api/companies/${id}/members/${userId}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to remove member: ${res.status}`);
+  }
+  const data: CompanyMembersResponse = await res.json();
+  return data.members || [];
+}
+
+export async function listUserCompanies(userId: string): Promise<CompanyWithRole[]> {
+  const res = await apiFetch(`${API_BASE}/api/admin/users/${userId}/companies`, {
+    cache: "no-store",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to list user companies: ${res.status}`);
+  }
+  const data: { companies: CompanyWithRole[] } = await res.json();
+  return data.companies || [];
+}
+
 // ============================================================================
 // ADMIN API
 // ============================================================================
@@ -1124,6 +1246,7 @@ export type SettingsView = {
   min_pivot_confidence: number;
   max_orgs_per_domain: number;
   max_domains_per_org: number;
+  skip_unresolved_domains: boolean;
 };
 
 export type SettingsResponse = {
@@ -1179,6 +1302,7 @@ export type SettingsUpdatePayload = {
   min_pivot_confidence?: number;
   max_orgs_per_domain?: number;
   max_domains_per_org?: number;
+  skip_unresolved_domains?: boolean;
 };
 
 export async function getSettings(revealSecrets = false): Promise<SettingsResponse> {

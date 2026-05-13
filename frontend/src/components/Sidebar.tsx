@@ -11,7 +11,9 @@ const navItems = [
   { href: "/security", label: "Security", icon: "🛡️", roles: ["admin", "operator", "analyst", "viewer"] },
   { href: "/risk", label: "Risk", icon: "⚠️", roles: ["admin", "operator", "analyst", "viewer"] },
   { href: "/search", label: "Search", icon: "🔎", roles: ["admin", "operator", "analyst", "viewer"] },
-  { href: "/settings", label: "Settings", icon: "⚙️", roles: ["admin", "operator", "analyst", "viewer"] },
+  // Settings is always available to any authenticated user — it hosts the System Status
+  // page and, for users with no other access, is their only landing spot.
+  { href: "/settings", label: "Settings", icon: "⚙️", roles: ["*"] },
 ];
 
 export default function Sidebar() {
@@ -23,10 +25,23 @@ export default function Sidebar() {
     return pathname.startsWith(href);
   };
 
-  // Filter items based on user roles
+  // Compute the user's effective per-company role for the currently active company.
+  // The sidebar gates need to consider this in addition to global roles: a user with no
+  // global role but a per-company role like `viewer` should still see the company-scoped
+  // nav items (Dashboard, Assets, Search, etc.).
+  const activeCompanyRole =
+    companies.find((c) => c.id === companyId)?.role ?? null;
+
+  // Filter items based on user roles. Global admin is the system super-role and
+  // implicitly satisfies every per-item role gate, mirroring the backend hierarchy
+  // in UserContext::has_role. `roles: ["*"]` items are visible to any authenticated user.
   const filteredNavItems = navItems.filter(item => {
     if (!user) return false;
-    return item.roles.some(role => user.roles.includes(role));
+    if (item.roles.includes("*")) return true;
+    if (user.roles.includes("global_admin")) return true;
+    if (item.roles.some(role => user.roles.includes(role))) return true;
+    if (activeCompanyRole && item.roles.includes(activeCompanyRole)) return true;
+    return false;
   });
   
   return (

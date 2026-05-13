@@ -109,7 +109,7 @@ function getDefaultTimeZone(): string {
 }
 
 export default function DiscoveryPage() {
-  const { user } = useAuth();
+  const { user, companies, companyId } = useAuth();
   const [activeTab, setActiveTab] = useState<TabType>("overview");
   const [status, setStatus] = useState<DiscoveryStatus | null>(null);
   const [runs, setRuns] = useState<DiscoveryRun[]>([]);
@@ -182,8 +182,22 @@ export default function DiscoveryPage() {
   const [blacklistDeleteConfirm, setBlacklistDeleteConfirm] = useState<BlacklistEntry | null>(null);
   const [blacklistDeleting, setBlacklistDeleting] = useState(false);
 
-  const isAdmin = user?.roles?.includes("admin");
-  const isAnalyst = user?.roles?.includes("analyst") || user?.roles?.includes("operator") || isAdmin;
+  const isGlobalAdmin = user?.roles?.includes("global_admin");
+  // Effective per-company role for the active company — drives operator/analyst/viewer
+  // access when the user has no global role.
+  const activeCompanyRole =
+    companies.find((c) => c.id === companyId)?.role ?? null;
+  const isAdmin =
+    isGlobalAdmin ||
+    user?.roles?.includes("admin") ||
+    activeCompanyRole === "admin";
+  const isAnalyst =
+    isGlobalAdmin ||
+    user?.roles?.includes("analyst") ||
+    user?.roles?.includes("operator") ||
+    isAdmin ||
+    activeCompanyRole === "operator" ||
+    activeCompanyRole === "analyst";
   const defaultTimezone = useMemo(() => getDefaultTimeZone(), []);
   const timezoneOptions = useMemo(() => {
     const supported = (Intl as any)?.supportedValuesOf?.("timeZone");

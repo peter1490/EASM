@@ -46,6 +46,120 @@ pub struct ReverseDnsResult {
     pub error: Option<String>,
 }
 
+/// Parsed SPF directives that name another DNS hostname (and thus expand the
+/// attack surface). Mechanisms that do not name a hostname (`ip4:`, `ip6:`,
+/// `all`, qualifiers) are deliberately discarded.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpfDirectives {
+    /// `include:domain` and `redirect=domain` — the other SPF policies this
+    /// record delegates to. Highest-yield SPF pivot: routinely names sibling
+    /// apex domains used for transactional mail.
+    pub includes: Vec<String>,
+    /// `a:domain` / `mx:domain` — explicit hostnames that authorize mail.
+    pub hosts: Vec<String>,
+    /// `exists:domain` — DNS-time existence check; sometimes names internal hosts.
+    pub exists: Vec<String>,
+}
+
+/// Parse SPF mechanisms from a single TXT record that begins with `v=spf1`.
+/// Returns an empty `SpfDirectives` for non-SPF records.
+pub fn parse_spf(record: &str) -> SpfDirectives {
+    let trimmed = record.trim();
+    // Some resolvers concatenate `"v=spf1 ..." "..."` into raw quoted strings —
+    // strip stray quotes defensively.
+    let cleaned: String = trimmed.chars().filter(|c| *c != '"').collect();
+    if !cleaned.to_ascii_lowercase().starts_with("v=spf1") {
+        return SpfDirectives::default();
+    }
+    let mut out = SpfDirectives::default();
+    for raw_token in cleaned.split_whitespace().skip(1) {
+        // Strip leading qualifier (+, -, ~, ?) so "+include:foo" matches.
+        let token = raw_token.trim_start_matches(['+', '-', '~', '?']);
+        let lower = token.to_ascii_lowercase();
+        if let Some(value) = lower.strip_prefix("include:") {
+            if !value.is_empty() {
+                out.includes.push(value.to_string());
+            }
+        } else if let Some(value) = lower.strip_prefix("redirect=") {
+            if !value.is_empty() {
+                out.includes.push(value.to_string());
+            }
+        } else if let Some(value) = lower.strip_prefix("a:") {
+            if !value.is_empty() {
+                out.hosts.push(value.to_string());
+            }
+        } else if let Some(value) = lower.strip_prefix("mx:") {
+            if !value.is_empty() {
+                out.hosts.push(value.to_string());
+            }
+        } else if let Some(value) = lower.strip_prefix("exists:") {
+            if !value.is_empty() {
+                out.exists.push(value.to_string());
+            }
+        }
+    }
+    out.includes.sort();
+    out.includes.dedup();
+    out.hosts.sort();
+    out.hosts.dedup();
+    out.exists.sort();
+    out.exists.dedup();
+    out
+}
+
+/// Parsed DMARC report mailboxes — the domain portions of `rua=mailto:` and
+/// `ruf=mailto:` tags. These mailboxes are usually hosted on the org's own
+/// monitoring infrastructure and frequently leak sibling domain names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DmarcReportDomains {
+    pub aggregate: Vec<String>,
+    pub forensic: Vec<String>,
+}
+
+/// Parse the `rua=` and `ruf=` tags from a DMARC TXT record.
+pub fn parse_dmarc(record: &str) -> DmarcReportDomains {
+    let cleaned: String = record.chars().filter(|c| *c != '"').collect();
+    if !cleaned.to_ascii_lowercase().contains("v=dmarc1") {
+        return DmarcReportDomains::default();
+    }
+    let mut out = DmarcReportDomains::default();
+    for tag in cleaned.split(';') {
+        let tag = tag.trim();
+        let lower = tag.to_ascii_lowercase();
+        let push_to: &mut Vec<String> = if let Some(rest) = lower.strip_prefix("rua=") {
+            let _ = rest;
+            &mut out.aggregate
+        } else if let Some(rest) = lower.strip_prefix("ruf=") {
+            let _ = rest;
+            &mut out.forensic
+        } else {
+            continue;
+        };
+        // Use the original-case tag value to preserve mailbox capitalisation
+        // before we lowercase the host below.
+        let value = tag.splitn(2, '=').nth(1).unwrap_or("");
+        for mailbox in value.split(',') {
+            let cleaned = mailbox
+                .trim()
+                .trim_start_matches("mailto:")
+                .trim_start_matches("MAILTO:");
+            // Drop any size suffix (`!10m`).
+            let cleaned = cleaned.split('!').next().unwrap_or("");
+            if let Some(domain) = cleaned.split('@').nth(1) {
+                let host = domain.trim().to_ascii_lowercase();
+                if !host.is_empty() {
+                    push_to.push(host);
+                }
+            }
+        }
+    }
+    out.aggregate.sort();
+    out.aggregate.dedup();
+    out.forensic.sort();
+    out.forensic.dedup();
+    out
+}
+
 /// Async DNS resolver with timeout handling and concurrency limits
 pub struct DnsResolver {
     resolver: TokioAsyncResolver,
@@ -392,6 +506,45 @@ impl DnsResolver {
         }
     }
 
+    /// Lookup DMARC record at `_dmarc.{domain}` and return parsed report mailboxes.
+    /// Returns an empty `DmarcReportDomains` when no DMARC record exists or the
+    /// query fails — DMARC lookup failure is non-fatal for discovery.
+    pub async fn lookup_dmarc(&self, domain: &str) -> Result<DmarcReportDomains, ApiError> {
+        let name = format!("_dmarc.{}", domain.trim_end_matches('.'));
+        let records = self.lookup_txt(&name).await?;
+        let mut merged = DmarcReportDomains::default();
+        for record in records {
+            let parsed = parse_dmarc(&record);
+            merged.aggregate.extend(parsed.aggregate);
+            merged.forensic.extend(parsed.forensic);
+        }
+        merged.aggregate.sort();
+        merged.aggregate.dedup();
+        merged.forensic.sort();
+        merged.forensic.dedup();
+        Ok(merged)
+    }
+
+    /// Lookup SPF — the v=spf1 record in the domain's own TXT records — and
+    /// return parsed mechanisms that name other hostnames.
+    pub async fn lookup_spf(&self, domain: &str) -> Result<SpfDirectives, ApiError> {
+        let records = self.lookup_txt(domain).await?;
+        let mut merged = SpfDirectives::default();
+        for record in records {
+            let parsed = parse_spf(&record);
+            merged.includes.extend(parsed.includes);
+            merged.hosts.extend(parsed.hosts);
+            merged.exists.extend(parsed.exists);
+        }
+        merged.includes.sort();
+        merged.includes.dedup();
+        merged.hosts.sort();
+        merged.hosts.dedup();
+        merged.exists.sort();
+        merged.exists.dedup();
+        Ok(merged)
+    }
+
     /// Lookup MX records for a domain
     pub async fn lookup_mx(&self, domain: &str) -> Result<Vec<(u16, String)>, ApiError> {
         // Apply rate limiting
@@ -564,6 +717,64 @@ mod tests {
                 .hostname_exists("this-domain-should-not-exist-12345.invalid")
                 .await
         );
+    }
+
+    #[test]
+    fn test_parse_spf_includes_and_redirect() {
+        let spf = parse_spf("v=spf1 include:_spf.google.com include:amazonses.com ip4:1.2.3.4 a:mail.example.org mx:mx.example.com exists:%{i}._spf.example.net -all");
+        assert_eq!(
+            spf.includes,
+            vec!["_spf.google.com".to_string(), "amazonses.com".to_string()]
+        );
+        assert_eq!(
+            spf.hosts,
+            vec!["mail.example.org".to_string(), "mx.example.com".to_string()]
+        );
+        assert_eq!(spf.exists, vec!["%{i}._spf.example.net".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_spf_redirect() {
+        let spf = parse_spf("v=spf1 redirect=_spf.example.com");
+        assert_eq!(spf.includes, vec!["_spf.example.com".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_spf_ignores_non_spf() {
+        // Other TXT records (Google site verification, DKIM, etc.) must not produce hits.
+        let spf = parse_spf("google-site-verification=abc123");
+        assert!(spf.includes.is_empty());
+        assert!(spf.hosts.is_empty());
+    }
+
+    #[test]
+    fn test_parse_spf_handles_qualifiers_and_quotes() {
+        let spf = parse_spf("\"v=spf1 +include:foo.example.com ?include:bar.example.com ~all\"");
+        assert_eq!(
+            spf.includes,
+            vec!["bar.example.com".to_string(), "foo.example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_dmarc_extracts_report_domains() {
+        let rec = "v=DMARC1; p=reject; rua=mailto:dmarc-agg@reports.example.org, mailto:other@watchdog.example.net!10m; ruf=mailto:forensic@reports.example.org; fo=1";
+        let parsed = parse_dmarc(rec);
+        assert_eq!(
+            parsed.aggregate,
+            vec![
+                "reports.example.org".to_string(),
+                "watchdog.example.net".to_string(),
+            ]
+        );
+        assert_eq!(parsed.forensic, vec!["reports.example.org".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_dmarc_ignores_non_dmarc() {
+        let parsed = parse_dmarc("v=spf1 -all");
+        assert!(parsed.aggregate.is_empty());
+        assert!(parsed.forensic.is_empty());
     }
 
     #[tokio::test]

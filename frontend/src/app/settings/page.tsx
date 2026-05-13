@@ -21,11 +21,19 @@ import {
   listCompanies,
   createCompany,
   updateCompany,
+  deleteCompany,
+  clearCompanyData,
+  listCompanyMembers,
+  addCompanyMember,
+  updateCompanyMemberRole,
+  removeCompanyMember,
+  listUserCompanies,
+  DEFAULT_COMPANY_ID,
   listFindingTypeConfigs,
   updateFindingTypeConfig,
   bulkUpdateFindingTypeConfigs,
   recalculateAllRisks,
-  type SystemMetrics, 
+  type SystemMetrics,
   type UserWithRoles,
   type SettingsResponse,
   type SettingsView,
@@ -36,6 +44,7 @@ import {
   type TagUpdate,
   type AutoTagResult,
   type CompanyWithRole,
+  type CompanyMember,
   type FindingTypeConfig,
   type FindingTypeConfigUpdate,
   type RiskRecalculationResult,
@@ -53,9 +62,17 @@ import Modal from "@/components/ui/Modal";
 import Input from "@/components/ui/Input";
 import Checkbox from "@/components/ui/Checkbox";
 
-type TabType = "status" | "users" | "config" | "companies" | "tags" | "risk_scoring";
+type TabType =
+  | "status"
+  | "users"
+  | "config"
+  | "companies"
+  | "management"
+  | "tags"
+  | "risk_scoring";
 
 const ROLE_COLORS: Record<string, "error" | "warning" | "info" | "secondary" | "success"> = {
+  global_admin: "error",
   admin: "error",
   operator: "warning",
   analyst: "info",
@@ -63,13 +80,42 @@ const ROLE_COLORS: Record<string, "error" | "warning" | "info" | "secondary" | "
 };
 
 const ROLE_DESCRIPTIONS: Record<string, string> = {
-  admin: "Full access - can manage users and all settings",
-  operator: "Can run scans, discovery, and modify assets",
-  analyst: "Can view assets, findings, and update importance",
-  viewer: "Read-only access to all data",
+  global_admin:
+    "System-wide super-admin: full access to every company, can create/delete companies and manage users.",
+  admin: "Per-company admin: manage the company (rename, clear, members) within their company only.",
+  operator: "Can run scans, discovery, and modify assets within their company.",
+  analyst: "Can view assets, findings, and update importance within their company.",
+  viewer: "Read-only access within their company.",
 };
 
-const ALL_ROLES = ["admin", "operator", "analyst", "viewer"];
+// Roles assignable in user_roles (the global tier shown in the Users tab).
+const ALL_GLOBAL_ROLES = ["global_admin"];
+// Roles assignable in user_companies (per-company tier shown wherever a member is added or edited).
+const ALL_COMPANY_ROLES = ["admin", "operator", "analyst", "viewer"];
+// Legacy alias used by older parts of this file (per-company role dropdowns + role legend cards).
+const ALL_ROLES = ALL_COMPANY_ROLES;
+
+// Ranking used to pick the highest role across a user's global roles and per-company
+// memberships. Higher number = more privileges.
+const ROLE_RANK: Record<string, number> = {
+  global_admin: 5,
+  admin: 4,
+  operator: 3,
+  analyst: 2,
+  viewer: 1,
+};
+
+function highestRoleFor(u: UserWithRoles): string | null {
+  const candidates: string[] = [
+    ...(u.roles || []),
+    ...((u.companies || []).map((c) => c.role)),
+  ];
+  if (candidates.length === 0) return null;
+  return candidates.reduce<string | null>((best, role) => {
+    if (best === null) return role;
+    return (ROLE_RANK[role] || 0) > (ROLE_RANK[best] || 0) ? role : best;
+  }, null);
+}
 
 const HELP_TEXT: Record<string, string> = {
   google_client_id: "Google OAuth client ID.",
@@ -118,6 +164,7 @@ const HELP_TEXT: Record<string, string> = {
   min_pivot_confidence: "Minimum confidence required to pivot relationships.",
   max_orgs_per_domain: "Max organizations pivoted from a domain.",
   max_domains_per_org: "Max domains pivoted from an organization.",
+  skip_unresolved_domains: "Don't add or enqueue domains that fail DNS resolution.",
 };
 
 const DEFAULT_TAG_COLORS = [
@@ -199,6 +246,7 @@ type SettingsFormState = {
   min_pivot_confidence: string;
   max_orgs_per_domain: string;
   max_domains_per_org: string;
+  skip_unresolved_domains: boolean;
 };
 
 const createEmptySettingsForm = (): SettingsFormState => ({
@@ -248,6 +296,7 @@ const createEmptySettingsForm = (): SettingsFormState => ({
   min_pivot_confidence: "",
   max_orgs_per_domain: "",
   max_domains_per_org: "",
+  skip_unresolved_domains: false,
 });
 
 const listToString = (items: string[]) => items.join(", ");
@@ -299,6 +348,7 @@ const settingsToForm = (view: SettingsView): SettingsFormState => ({
   min_pivot_confidence: view.min_pivot_confidence.toString(),
   max_orgs_per_domain: view.max_orgs_per_domain.toString(),
   max_domains_per_org: view.max_domains_per_org.toString(),
+  skip_unresolved_domains: view.skip_unresolved_domains,
 });
 
 const splitList = (value: string): string[] =>
@@ -333,11 +383,17 @@ const InfoLabel = ({ text, keyName }: { text: string; keyName: string }) => {
 };
 
 export default function SettingsPage() {
-  const { user, refreshCompanies: refreshCompaniesContext } = useAuth();
+  const {
+    user,
+    refreshCompanies: refreshCompaniesContext,
+    companyId: activeCompanyId,
+    companies: companiesContext,
+    setCompanyId: setActiveCompanyId,
+  } = useAuth();
   const searchParams = useSearchParams();
   const tabFromUrl = searchParams.get("tab") as TabType | null;
   const [activeTab, setActiveTab] = useState<TabType>(
-    tabFromUrl && ["status", "users", "config", "companies", "tags", "risk_scoring"].includes(tabFromUrl) ? tabFromUrl : "status"
+    tabFromUrl && ["status", "users", "config", "companies", "management", "tags", "risk_scoring"].includes(tabFromUrl) ? tabFromUrl : "status"
   );
   const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
   const [health, setHealth] = useState<{ status: string; version: string } | null>(null);
@@ -407,6 +463,33 @@ export default function SettingsPage() {
   const [companyFormError, setCompanyFormError] = useState<string | null>(null);
   const [companySubmitting, setCompanySubmitting] = useState(false);
 
+  // Per-user companies (shown in the User Role Management modal)
+  const [userCompanies, setUserCompanies] = useState<CompanyWithRole[]>([]);
+  const [userCompaniesLoading, setUserCompaniesLoading] = useState(false);
+  const [userCompaniesError, setUserCompaniesError] = useState<string | null>(null);
+  const [addUserCompanyId, setAddUserCompanyId] = useState<string>("");
+  const [addUserCompanyRole, setAddUserCompanyRole] = useState<string>("viewer");
+  const [userCompanySubmitting, setUserCompanySubmitting] = useState(false);
+  const [userCompanyRowBusy, setUserCompanyRowBusy] = useState<string | null>(null);
+
+  // Destructive company actions state
+  const [destructiveCompany, setDestructiveCompany] =
+    useState<{ company: CompanyWithRole; mode: "delete" | "clear" } | null>(null);
+  const [destructiveConfirmName, setDestructiveConfirmName] = useState("");
+  const [destructiveError, setDestructiveError] = useState<string | null>(null);
+  const [destructiveSubmitting, setDestructiveSubmitting] = useState(false);
+  const [destructiveResult, setDestructiveResult] = useState<string | null>(null);
+
+  // Members modal state
+  const [membersCompany, setMembersCompany] = useState<CompanyWithRole | null>(null);
+  const [members, setMembers] = useState<CompanyMember[]>([]);
+  const [membersLoading, setMembersLoading] = useState(false);
+  const [membersError, setMembersError] = useState<string | null>(null);
+  const [addMemberUserId, setAddMemberUserId] = useState<string>("");
+  const [addMemberRole, setAddMemberRole] = useState<string>("viewer");
+  const [addMemberSubmitting, setAddMemberSubmitting] = useState(false);
+  const [memberRowBusy, setMemberRowBusy] = useState<string | null>(null);
+
   // Finding Type Config state
   const [findingTypeConfigs, setFindingTypeConfigs] = useState<FindingTypeConfig[]>([]);
   const [findingTypeCategories, setFindingTypeCategories] = useState<string[]>([]);
@@ -420,7 +503,11 @@ export default function SettingsPage() {
   const [riskRecalculationResult, setRiskRecalculationResult] = useState<RiskRecalculationResult | null>(null);
   const [pendingChanges, setPendingChanges] = useState<Map<string, FindingTypeConfigUpdate>>(new Map());
 
-  const isAdmin = user?.roles?.includes("admin");
+  const isGlobalAdmin = !!user?.roles?.includes("global_admin");
+  const isCompanyAdmin =
+    !isGlobalAdmin && companiesContext.some((c) => c.role === "admin");
+  // Legacy alias for places that just need "any admin"; gates the broader admin UI surfaces.
+  const isAdmin = isGlobalAdmin || isCompanyAdmin;
 
   const loadData = useCallback(async (isRefresh = false) => {
     try {
@@ -438,13 +525,13 @@ export default function SettingsPage() {
       setMetrics(metricsData);
       setHealth(healthData);
       
-      if (isAdmin) {
+      if (isGlobalAdmin) {
         const usersData = await listUsers();
         setUsers(usersData);
       } else {
         setUsers([]);
       }
-      
+
       setError(null);
       hasInitialLoadRef.current = true;
     } catch (err) {
@@ -453,10 +540,10 @@ export default function SettingsPage() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [isAdmin]);
+  }, [isGlobalAdmin]);
 
   const loadSettings = useCallback(async (reveal = false) => {
-    if (!isAdmin) return;
+    if (!isGlobalAdmin) return;
     try {
       setSettingsLoading(true);
       const data = await getSettings(reveal);
@@ -471,7 +558,7 @@ export default function SettingsPage() {
     } finally {
       setSettingsLoading(false);
     }
-  }, [isAdmin]);
+  }, [isGlobalAdmin]);
 
   const loadTags = useCallback(async () => {
     try {
@@ -698,6 +785,150 @@ export default function SettingsPage() {
     }
   };
 
+  const openDestructiveCompanyModal = (
+    company: CompanyWithRole,
+    mode: "delete" | "clear",
+  ) => {
+    setDestructiveCompany({ company, mode });
+    setDestructiveConfirmName("");
+    setDestructiveError(null);
+    setDestructiveResult(null);
+  };
+
+  const closeDestructiveCompanyModal = () => {
+    setDestructiveCompany(null);
+    setDestructiveConfirmName("");
+    setDestructiveError(null);
+    setDestructiveResult(null);
+  };
+
+  const handleConfirmDestructiveCompany = async () => {
+    if (!destructiveCompany) return;
+    const { company, mode } = destructiveCompany;
+    if (destructiveConfirmName.trim() !== company.name) {
+      setDestructiveError("Company name does not match");
+      return;
+    }
+    setDestructiveSubmitting(true);
+    setDestructiveError(null);
+    try {
+      if (mode === "delete") {
+        await deleteCompany(company.id);
+        setDestructiveResult(`Company "${company.name}" deleted.`);
+      } else {
+        const summary = await clearCompanyData(company.id);
+        const total = Object.values(summary.deleted || {}).reduce(
+          (acc, n) => acc + (n || 0),
+          0,
+        );
+        const breakdown = Object.entries(summary.deleted || {})
+          .filter(([, n]) => n > 0)
+          .map(([table, n]) => `${table}: ${n}`)
+          .join(", ");
+        setDestructiveResult(
+          `Cleared ${total} rows from "${company.name}"${breakdown ? ` (${breakdown})` : ""}.`,
+        );
+      }
+
+      // If we just deleted the company the user is currently scoped to, the cached
+      // company id in the auth context (and localStorage) is now stale. Switching to
+      // any remaining company forces a full reload so every page re-fetches data with
+      // a valid X-Company-ID header.
+      if (mode === "delete" && company.id === activeCompanyId) {
+        const next = companiesContext.find((c) => c.id !== company.id);
+        if (next) {
+          setActiveCompanyId(next.id);
+          return;
+        }
+      }
+
+      await syncCompanies();
+      setDestructiveCompany(null);
+      setDestructiveConfirmName("");
+    } catch (e) {
+      setDestructiveError((e as Error).message);
+    } finally {
+      setDestructiveSubmitting(false);
+    }
+  };
+
+  const openMembersModal = async (company: CompanyWithRole) => {
+    setMembersCompany(company);
+    setMembers([]);
+    setMembersError(null);
+    setAddMemberUserId("");
+    setAddMemberRole("viewer");
+    setMembersLoading(true);
+    try {
+      const list = await listCompanyMembers(company.id);
+      setMembers(list);
+    } catch (e) {
+      setMembersError((e as Error).message);
+    } finally {
+      setMembersLoading(false);
+    }
+  };
+
+  const closeMembersModal = () => {
+    setMembersCompany(null);
+    setMembers([]);
+    setMembersError(null);
+    setAddMemberUserId("");
+    setAddMemberRole("viewer");
+  };
+
+  const handleAddMember = async () => {
+    if (!membersCompany || !addMemberUserId) return;
+    setAddMemberSubmitting(true);
+    setMembersError(null);
+    try {
+      const updated = await addCompanyMember(
+        membersCompany.id,
+        addMemberUserId,
+        addMemberRole,
+      );
+      setMembers(updated);
+      setAddMemberUserId("");
+      setAddMemberRole("viewer");
+    } catch (e) {
+      setMembersError((e as Error).message);
+    } finally {
+      setAddMemberSubmitting(false);
+    }
+  };
+
+  const handleChangeMemberRole = async (member: CompanyMember, role: string) => {
+    if (!membersCompany || role === member.role) return;
+    setMemberRowBusy(member.user_id);
+    setMembersError(null);
+    try {
+      const updated = await updateCompanyMemberRole(
+        membersCompany.id,
+        member.user_id,
+        role,
+      );
+      setMembers(updated);
+    } catch (e) {
+      setMembersError((e as Error).message);
+    } finally {
+      setMemberRowBusy(null);
+    }
+  };
+
+  const handleRemoveMember = async (member: CompanyMember) => {
+    if (!membersCompany) return;
+    setMemberRowBusy(member.user_id);
+    setMembersError(null);
+    try {
+      const updated = await removeCompanyMember(membersCompany.id, member.user_id);
+      setMembers(updated);
+    } catch (e) {
+      setMembersError((e as Error).message);
+    } finally {
+      setMemberRowBusy(null);
+    }
+  };
+
   const openEditFindingTypeModal = (config: FindingTypeConfig) => {
     setFindingTypeFormData({
       display_name: config.display_name,
@@ -780,14 +1011,16 @@ export default function SettingsPage() {
   useEffect(() => {
     loadData(false); // Initial load with full spinner
     if (isAdmin) {
-      loadSettings(false);
       syncCompanies();
+    }
+    if (isGlobalAdmin) {
+      loadSettings(false);
       loadTags();
       loadFindingTypeConfigs();
     }
     const iv = setInterval(() => loadData(true), 10000); // Silent refreshes
     return () => clearInterval(iv);
-  }, [isAdmin, loadData, loadSettings, syncCompanies, loadTags, loadFindingTypeConfigs]);
+  }, [isAdmin, isGlobalAdmin, loadData, loadSettings, syncCompanies, loadTags, loadFindingTypeConfigs]);
 
   async function handleAddRole(userId: string, role: string) {
     if (!role) return;
@@ -800,6 +1033,84 @@ export default function SettingsPage() {
       setError((err as Error).message);
     } finally {
       setUpdating(null);
+    }
+  }
+
+  const loadUserCompanies = useCallback(async (userId: string) => {
+    setUserCompaniesLoading(true);
+    setUserCompaniesError(null);
+    try {
+      const list = await listUserCompanies(userId);
+      setUserCompanies(list);
+    } catch (e) {
+      setUserCompaniesError((e as Error).message);
+      setUserCompanies([]);
+    } finally {
+      setUserCompaniesLoading(false);
+    }
+  }, []);
+
+  const openManageUserRolesModal = useCallback(
+    (u: UserWithRoles) => {
+      setSelectedUser(u);
+      setSelectedRole("");
+      setAddUserCompanyId("");
+      setAddUserCompanyRole("viewer");
+      loadUserCompanies(u.id);
+    },
+    [loadUserCompanies],
+  );
+
+  const closeManageUserRolesModal = useCallback(() => {
+    setSelectedUser(null);
+    setSelectedRole("");
+    setUserCompanies([]);
+    setUserCompaniesError(null);
+    setAddUserCompanyId("");
+    setAddUserCompanyRole("viewer");
+  }, []);
+
+  async function handleAddUserCompany() {
+    if (!selectedUser || !addUserCompanyId) return;
+    setUserCompanySubmitting(true);
+    setUserCompaniesError(null);
+    try {
+      await addCompanyMember(addUserCompanyId, selectedUser.id, addUserCompanyRole);
+      await loadUserCompanies(selectedUser.id);
+      setAddUserCompanyId("");
+      setAddUserCompanyRole("viewer");
+    } catch (e) {
+      setUserCompaniesError((e as Error).message);
+    } finally {
+      setUserCompanySubmitting(false);
+    }
+  }
+
+  async function handleChangeUserCompanyRole(companyId: string, role: string) {
+    if (!selectedUser) return;
+    setUserCompanyRowBusy(companyId);
+    setUserCompaniesError(null);
+    try {
+      await updateCompanyMemberRole(companyId, selectedUser.id, role);
+      await loadUserCompanies(selectedUser.id);
+    } catch (e) {
+      setUserCompaniesError((e as Error).message);
+    } finally {
+      setUserCompanyRowBusy(null);
+    }
+  }
+
+  async function handleRemoveUserCompany(companyId: string) {
+    if (!selectedUser) return;
+    setUserCompanyRowBusy(companyId);
+    setUserCompaniesError(null);
+    try {
+      await removeCompanyMember(companyId, selectedUser.id);
+      await loadUserCompanies(selectedUser.id);
+    } catch (e) {
+      setUserCompaniesError((e as Error).message);
+    } finally {
+      setUserCompanyRowBusy(null);
     }
   }
 
@@ -846,6 +1157,7 @@ export default function SettingsPage() {
       min_pivot_confidence: toNumber(settingsForm.min_pivot_confidence),
       max_orgs_per_domain: toNumber(settingsForm.max_orgs_per_domain),
       max_domains_per_org: toNumber(settingsForm.max_domains_per_org),
+      skip_unresolved_domains: settingsForm.skip_unresolved_domains,
     };
 
     if (secretTouched.google_client_secret) {
@@ -1068,13 +1380,24 @@ export default function SettingsPage() {
 
   const tabs = [
     { id: "status" as TabType, label: "System Status", icon: "⚙️" },
-    ...(isAdmin ? [
-      { id: "config" as TabType, label: "Configuration", icon: "🛡️" },
-      { id: "users" as TabType, label: "User Management", icon: "👥", badge: users.length },
-      { id: "companies" as TabType, label: "Companies", icon: "🏢", badge: companies.length },
-      { id: "tags" as TabType, label: "Tags", icon: "🏷️", badge: tagsTotalCount },
-      { id: "risk_scoring" as TabType, label: "Risk Scoring", icon: "📊", badge: findingTypeConfigs.length },
-    ] : []),
+    ...(isGlobalAdmin
+      ? [
+          { id: "config" as TabType, label: "Configuration", icon: "🛡️" },
+          { id: "users" as TabType, label: "User Management", icon: "👥", badge: users.length },
+          { id: "companies" as TabType, label: "Companies", icon: "🏢", badge: companies.length },
+          { id: "tags" as TabType, label: "Tags", icon: "🏷️", badge: tagsTotalCount },
+          { id: "risk_scoring" as TabType, label: "Risk Scoring", icon: "📊", badge: findingTypeConfigs.length },
+        ]
+      : isCompanyAdmin
+        ? [
+            {
+              id: "management" as TabType,
+              label: "User & Company Management",
+              icon: "🏢",
+              badge: companies.filter((c) => c.role === "admin").length,
+            },
+          ]
+        : []),
   ];
 
   return (
@@ -1244,7 +1567,7 @@ export default function SettingsPage() {
       )}
 
       {/* Configuration Tab */}
-      {activeTab === "config" && isAdmin && (
+      {activeTab === "config" && isGlobalAdmin && (
         <div className="space-y-6 stagger-children">
           {settingsLoading && !settingsData ? (
             <div className="flex items-center justify-center py-12">
@@ -1530,6 +1853,11 @@ export default function SettingsPage() {
                         onChange={(e) => updateFormField("max_domains_per_org", e.target.value)}
                       />
                     </div>
+                    <Checkbox
+                      checked={settingsForm.skip_unresolved_domains}
+                      onChange={(checked) => updateFormField("skip_unresolved_domains", checked)}
+                      label={<InfoLabel text="Skip Unresolved Domains" keyName="skip_unresolved_domains" />}
+                    />
                   </CardContent>
                 </Card>
               </div>
@@ -1588,14 +1916,34 @@ export default function SettingsPage() {
       )}
 
       {/* Companies Tab */}
-      {activeTab === "companies" && isAdmin && (
+      {activeTab === "companies" && isGlobalAdmin && (
         <div className="space-y-6 stagger-children">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">How access works</CardTitle>
+            </CardHeader>
+            <CardContent className="text-sm text-muted-foreground space-y-2">
+              <p>
+                The <strong>Global Admin</strong> role (assigned in the <em>Users</em> tab)
+                is the system-wide super-admin: it has full access to every company, can
+                create / delete companies, manage users, and assign per-company roles to
+                anyone.
+              </p>
+              <p>
+                Each user&apos;s per-company role (admin, operator, analyst, viewer) is
+                scoped to a single company. A per-company <strong>admin</strong> can
+                manage their own company (rename, clear data, members) but cannot create
+                or delete companies and cannot manage users globally.
+              </p>
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
               <div>
                 <CardTitle>Manage Companies</CardTitle>
                 <CardDescription>
-                  Create and rename companies. Your access is scoped by company membership.
+                  Create, rename, and remove companies, and assign members. Deleting a company
+                  permanently removes all of its assets, scans, findings, seeds, and tags.
                 </CardDescription>
               </div>
               <div className="flex gap-3 flex-wrap">
@@ -1647,9 +1995,41 @@ export default function SettingsPage() {
                           {new Date(company.created_at).toLocaleDateString()}
                         </TableCell>
                         <TableCell className="text-right">
-                          <Button variant="outline" size="sm" onClick={() => openEditCompanyModal(company)}>
-                            Rename
-                          </Button>
+                          <div className="flex justify-end gap-2 flex-wrap">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => openMembersModal(company)}
+                            >
+                              Members
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => openEditCompanyModal(company)}
+                            >
+                              Rename
+                            </Button>
+                            {company.id === DEFAULT_COMPANY_ID ? (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="text-destructive border-destructive/40 hover:bg-destructive/10"
+                                onClick={() => openDestructiveCompanyModal(company, "clear")}
+                              >
+                                Clear Data
+                              </Button>
+                            ) : (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="text-destructive border-destructive/40 hover:bg-destructive/10"
+                                onClick={() => openDestructiveCompanyModal(company, "delete")}
+                              >
+                                Delete
+                              </Button>
+                            )}
+                          </div>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -1661,8 +2041,117 @@ export default function SettingsPage() {
         </div>
       )}
 
+      {/* Combined Management Tab (per-company admins) */}
+      {activeTab === "management" && isCompanyAdmin && !isGlobalAdmin && (
+        <div className="space-y-6 stagger-children">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Your scope</CardTitle>
+            </CardHeader>
+            <CardContent className="text-sm text-muted-foreground space-y-2">
+              <p>
+                You are a per-company admin. You can rename your companies, clear their
+                data, and manage their members (add users, change roles, remove members)
+                — but only for the companies where you are an admin.
+              </p>
+              <p>
+                Creating new companies, deleting companies, and managing users
+                system-wide are reserved for global admins.
+              </p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div>
+                <CardTitle>My Companies</CardTitle>
+                <CardDescription>
+                  Companies where you have the per-company admin role.
+                </CardDescription>
+              </div>
+              <div className="flex gap-3 flex-wrap">
+                <Button variant="outline" onClick={syncCompanies} disabled={companiesLoading}>
+                  {companiesLoading ? "Refreshing..." : "Refresh"}
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {companiesLoading ? (
+                <div className="py-12">
+                  <LoadingSpinner size="lg" />
+                </div>
+              ) : companies.filter((c) => c.role === "admin").length === 0 ? (
+                <EmptyState
+                  icon="🏢"
+                  title="No companies"
+                  description="You are not currently an admin of any company."
+                />
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Name</TableHead>
+                      <TableHead>Role</TableHead>
+                      <TableHead>Assigned</TableHead>
+                      <TableHead className="text-right">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {companies
+                      .filter((c) => c.role === "admin")
+                      .map((company) => (
+                        <TableRow key={company.id}>
+                          <TableCell>
+                            <div className="font-medium">{company.name}</div>
+                            <div className="text-xs text-muted-foreground font-mono">
+                              {company.id}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={ROLE_COLORS[company.role] || "secondary"}>
+                              {company.role}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-sm text-muted-foreground">
+                            {new Date(company.assigned_at).toLocaleDateString()}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <div className="flex justify-end gap-2 flex-wrap">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => openMembersModal(company)}
+                              >
+                                Members
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => openEditCompanyModal(company)}
+                              >
+                                Rename
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="text-destructive border-destructive/40 hover:bg-destructive/10"
+                                onClick={() => openDestructiveCompanyModal(company, "clear")}
+                              >
+                                Clear Data
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
       {/* User Management Tab */}
-      {activeTab === "users" && isAdmin && (
+      {activeTab === "users" && isGlobalAdmin && (
         <div className="space-y-6 stagger-children">
           {/* User Stats */}
           <div className="grid gap-4 md:grid-cols-4">
@@ -1674,17 +2163,17 @@ export default function SettingsPage() {
             </Card>
             <Card>
               <CardHeader className="pb-2">
-                <CardDescription>Admins</CardDescription>
+                <CardDescription>Global Admins</CardDescription>
                 <CardTitle className="text-3xl font-mono text-destructive">
-                  {users.filter(u => u.roles?.includes("admin")).length}
+                  {users.filter(u => u.roles?.includes("global_admin")).length}
                 </CardTitle>
               </CardHeader>
             </Card>
             <Card>
               <CardHeader className="pb-2">
-                <CardDescription>Operators</CardDescription>
+                <CardDescription>With Company Roles</CardDescription>
                 <CardTitle className="text-3xl font-mono text-warning">
-                  {users.filter(u => u.roles?.includes("operator")).length}
+                  {users.filter(u => !u.roles?.includes("global_admin")).length}
                 </CardTitle>
               </CardHeader>
             </Card>
@@ -1702,10 +2191,36 @@ export default function SettingsPage() {
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Role Definitions</CardTitle>
+              <CardDescription>
+                Global roles are system-wide (assigned here); per-company roles are scoped
+                to one company (assigned via the Companies tab or this modal).
+              </CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="grid gap-3 md:grid-cols-2">
-                {ALL_ROLES.map((role) => (
+              <div className="space-y-4">
+                <div>
+                  <div className="text-xs font-semibold uppercase text-muted-foreground mb-2">
+                    Global tier
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {ALL_GLOBAL_ROLES.map((role) => (
+                      <div key={role} className="flex items-start gap-3 p-3 border border-border rounded-lg">
+                        <Badge variant={ROLE_COLORS[role] || "secondary"} className="mt-0.5">
+                          {role}
+                        </Badge>
+                        <div className="text-sm text-muted-foreground">
+                          {ROLE_DESCRIPTIONS[role]}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs font-semibold uppercase text-muted-foreground mb-2">
+                    Per-company tier
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                {ALL_COMPANY_ROLES.map((role) => (
                   <div key={role} className="flex items-start gap-3 p-3 border border-border rounded-lg">
                     <Badge variant={ROLE_COLORS[role] || "secondary"} className="mt-0.5">
                       {role}
@@ -1715,6 +2230,8 @@ export default function SettingsPage() {
                     </div>
                   </div>
                 ))}
+                  </div>
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -1781,26 +2298,27 @@ export default function SettingsPage() {
                           </Badge>
                         </TableCell>
                         <TableCell>
-                          <div className="flex flex-wrap gap-1">
-                            {(u.roles || []).map((role) => (
-                              <Badge 
-                                key={role} 
-                                variant={ROLE_COLORS[role] || "secondary"}
-                                className="cursor-pointer hover:opacity-80 transition-opacity"
-                                onClick={() => {
-                                  if (updating !== u.id) {
-                                    handleRemoveRole(u.id, role);
-                                  }
-                                }}
-                                title="Click to remove"
-                              >
-                                {role} ×
-                              </Badge>
-                            ))}
-                            {(!u.roles || u.roles.length === 0) && (
-                              <span className="text-muted-foreground text-sm">No roles</span>
-                            )}
-                          </div>
+                          {(() => {
+                            const top = highestRoleFor(u);
+                            if (!top) {
+                              return (
+                                <span className="text-muted-foreground text-sm">No roles</span>
+                              );
+                            }
+                            const companyCount = (u.companies || []).length;
+                            return (
+                              <div className="flex flex-col gap-1">
+                                <Badge variant={ROLE_COLORS[top] || "secondary"}>
+                                  {top}
+                                </Badge>
+                                {companyCount > 0 && (
+                                  <span className="text-[11px] text-muted-foreground">
+                                    in {companyCount} {companyCount === 1 ? "company" : "companies"}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </TableCell>
                         <TableCell className="text-muted-foreground text-sm">
                           {u.created_at ? new Date(u.created_at).toLocaleDateString() : "—"}
@@ -1818,7 +2336,7 @@ export default function SettingsPage() {
                             <Button
                               size="sm"
                               variant="outline"
-                              onClick={() => setSelectedUser(u)}
+                              onClick={() => openManageUserRolesModal(u)}
                               disabled={updating === u.id}
                             >
                               Roles
@@ -1846,7 +2364,7 @@ export default function SettingsPage() {
       )}
 
       {/* Tags Tab */}
-      {activeTab === "tags" && isAdmin && (
+      {activeTab === "tags" && isGlobalAdmin && (
         <div className="space-y-6 stagger-children">
           {/* Auto-tag Result Banner */}
           {autoTagResult && (
@@ -2077,7 +2595,7 @@ export default function SettingsPage() {
       )}
 
       {/* Risk Scoring Tab */}
-      {activeTab === "risk_scoring" && isAdmin && (
+      {activeTab === "risk_scoring" && isGlobalAdmin && (
         <div className="space-y-6 stagger-children">
           {/* Risk Recalculation Result Banner */}
           {riskRecalculationResult && (
@@ -2389,8 +2907,9 @@ export default function SettingsPage() {
       {/* User Role Management Modal */}
       <Modal
         isOpen={!!selectedUser}
-        onClose={() => { setSelectedUser(null); setSelectedRole(""); }}
-        title="Manage User Roles"
+        onClose={closeManageUserRolesModal}
+        title="Manage User Roles & Companies"
+        size="lg"
       >
         {selectedUser && (
           <div className="space-y-6">
@@ -2439,7 +2958,7 @@ export default function SettingsPage() {
                   className="flex-1"
                 >
                   <option value="">Select a role...</option>
-                  {ALL_ROLES.filter(r => !selectedUser.roles.includes(r)).map((role) => (
+                  {ALL_GLOBAL_ROLES.filter(r => !selectedUser.roles.includes(r)).map((role) => (
                     <option key={role} value={role}>{role}</option>
                   ))}
                 </Select>
@@ -2452,11 +2971,113 @@ export default function SettingsPage() {
               </div>
             </div>
 
+            <div className="pt-4 border-t space-y-4">
+              <div className="flex items-baseline justify-between">
+                <h4 className="font-medium">Company Memberships</h4>
+                <p className="text-xs text-muted-foreground">
+                  Scope this user&apos;s access by assigning them to companies with a per-company role.
+                </p>
+              </div>
+
+              {userCompaniesError && (
+                <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
+                  {userCompaniesError}
+                </div>
+              )}
+
+              <div className="border border-border rounded-lg p-3 space-y-3">
+                <div className="grid gap-3 md:grid-cols-[1fr_150px_auto] md:items-end">
+                  <Select
+                    label="Company"
+                    value={addUserCompanyId}
+                    onChange={(e) => setAddUserCompanyId(e.target.value)}
+                  >
+                    <option value="">Select a company…</option>
+                    {companies
+                      .filter((c) => !userCompanies.some((uc) => uc.id === c.id))
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                  </Select>
+                  <Select
+                    label="Role"
+                    value={addUserCompanyRole}
+                    onChange={(e) => setAddUserCompanyRole(e.target.value)}
+                  >
+                    {ALL_ROLES.map((r) => (
+                      <option key={r} value={r}>
+                        {r}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button
+                    onClick={handleAddUserCompany}
+                    loading={userCompanySubmitting}
+                    disabled={!addUserCompanyId}
+                  >
+                    Add
+                  </Button>
+                </div>
+              </div>
+
+              {userCompaniesLoading ? (
+                <div className="py-4">
+                  <LoadingSpinner />
+                </div>
+              ) : userCompanies.length === 0 ? (
+                <div className="text-sm text-muted-foreground">
+                  This user is not a member of any company.
+                </div>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Company</TableHead>
+                      <TableHead>Role</TableHead>
+                      <TableHead className="text-right">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {userCompanies.map((c) => (
+                      <TableRow key={c.id}>
+                        <TableCell>
+                          <div className="font-medium">{c.name}</div>
+                        </TableCell>
+                        <TableCell>
+                          <Select
+                            value={c.role}
+                            onChange={(e) => handleChangeUserCompanyRole(c.id, e.target.value)}
+                            disabled={userCompanyRowBusy === c.id}
+                          >
+                            {ALL_ROLES.map((r) => (
+                              <option key={r} value={r}>
+                                {r}
+                              </option>
+                            ))}
+                          </Select>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-destructive border-destructive/40 hover:bg-destructive/10"
+                            onClick={() => handleRemoveUserCompany(c.id)}
+                            disabled={userCompanyRowBusy === c.id}
+                          >
+                            Remove
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </div>
+
             <div className="pt-4 border-t">
-              <Button
-                variant="outline"
-                onClick={() => { setSelectedUser(null); setSelectedRole(""); }}
-              >
+              <Button variant="outline" onClick={closeManageUserRolesModal}>
                 Close
               </Button>
             </div>
@@ -2511,9 +3132,13 @@ export default function SettingsPage() {
           )}
           
           <div>
-            <label className="block text-sm font-medium mb-2">Roles</label>
+            <label className="block text-sm font-medium mb-2">Global Roles</label>
+            <p className="text-xs text-muted-foreground mb-2">
+              Optional. Leave unchecked to create a user with no global role — you can
+              still grant per-company access from the user&apos;s edit modal.
+            </p>
             <div className="flex flex-wrap gap-2">
-              {ALL_ROLES.map((role) => (
+              {ALL_GLOBAL_ROLES.map((role) => (
                 <label key={role} className="flex items-center gap-2 p-2 bg-muted rounded-lg cursor-pointer hover:bg-muted/80">
                   <input
                     type="checkbox"
@@ -2690,6 +3315,220 @@ export default function SettingsPage() {
             </Button>
           </div>
         </div>
+      </Modal>
+
+      {/* Destructive Company Action (Delete or Clear Data) Modal */}
+      <Modal
+        isOpen={!!destructiveCompany}
+        onClose={() => {
+          if (!destructiveSubmitting) closeDestructiveCompanyModal();
+        }}
+        title={
+          destructiveCompany?.mode === "clear"
+            ? "Clear Company Data"
+            : "Delete Company"
+        }
+      >
+        {destructiveCompany && (
+          <div className="space-y-4">
+            {destructiveCompany.mode === "clear" ? (
+              <div className="p-3 rounded-lg bg-warning/10 border border-warning/20 text-warning text-sm">
+                All assets, scans, findings, seeds, tags, discovery runs and security
+                scans for <strong>{destructiveCompany.company.name}</strong> will be
+                permanently deleted. The company itself and its members will be kept.
+              </div>
+            ) : (
+              <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
+                Deleting <strong>{destructiveCompany.company.name}</strong> permanently
+                removes the company and <em>all</em> of its data (assets, scans,
+                findings, seeds, tags, members). This cannot be undone.
+              </div>
+            )}
+
+            <div>
+              <label className="text-sm font-medium">
+                Type <span className="font-mono">{destructiveCompany.company.name}</span> to confirm
+              </label>
+              <Input
+                value={destructiveConfirmName}
+                onChange={(e) => setDestructiveConfirmName(e.target.value)}
+                placeholder={destructiveCompany.company.name}
+                autoFocus
+              />
+            </div>
+
+            {destructiveError && (
+              <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
+                {destructiveError}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-3 pt-4 border-t">
+              <Button
+                variant="outline"
+                onClick={closeDestructiveCompanyModal}
+                disabled={destructiveSubmitting}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleConfirmDestructiveCompany}
+                loading={destructiveSubmitting}
+                disabled={
+                  destructiveConfirmName.trim() !== destructiveCompany.company.name
+                }
+                className="bg-destructive hover:bg-destructive/90"
+              >
+                {destructiveCompany.mode === "clear" ? "Clear Data" : "Delete Company"}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Result toast after destructive action */}
+      {destructiveResult && !destructiveCompany && (
+        <div
+          className="fixed bottom-6 right-6 z-50 max-w-sm rounded-lg border border-border bg-card p-4 shadow-lg text-sm"
+          role="status"
+        >
+          <div className="flex items-start gap-3">
+            <div className="flex-1">{destructiveResult}</div>
+            <button
+              className="text-muted-foreground hover:text-foreground"
+              onClick={() => setDestructiveResult(null)}
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Company Members Modal */}
+      <Modal
+        isOpen={!!membersCompany}
+        onClose={closeMembersModal}
+        title={membersCompany ? `Members — ${membersCompany.name}` : "Members"}
+        size="lg"
+      >
+        {membersCompany && (
+          <div className="space-y-4">
+            {membersError && (
+              <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
+                {membersError}
+              </div>
+            )}
+
+            <div className="border border-border rounded-lg p-4 space-y-3">
+              <div className="text-sm font-medium">Add member</div>
+              <div className="grid gap-3 md:grid-cols-[1fr_180px_auto] md:items-end">
+                <Select
+                  label="User"
+                  value={addMemberUserId}
+                  onChange={(e) => setAddMemberUserId(e.target.value)}
+                >
+                  <option value="">Select a user…</option>
+                  {users
+                    .filter(
+                      (u) => !members.some((m) => m.user_id === u.id),
+                    )
+                    .map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.display_name ? `${u.display_name} (${u.email})` : u.email}
+                      </option>
+                    ))}
+                </Select>
+                <Select
+                  label="Role"
+                  value={addMemberRole}
+                  onChange={(e) => setAddMemberRole(e.target.value)}
+                >
+                  {ALL_ROLES.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </Select>
+                <Button
+                  onClick={handleAddMember}
+                  loading={addMemberSubmitting}
+                  disabled={!addMemberUserId}
+                >
+                  Add
+                </Button>
+              </div>
+            </div>
+
+            {membersLoading ? (
+              <div className="py-8">
+                <LoadingSpinner />
+              </div>
+            ) : members.length === 0 ? (
+              <EmptyState
+                icon="👥"
+                title="No members"
+                description="Add users to this company to grant them access."
+              />
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>User</TableHead>
+                    <TableHead>Role</TableHead>
+                    <TableHead>Assigned</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {members.map((m) => (
+                    <TableRow key={m.user_id}>
+                      <TableCell>
+                        <div className="font-medium">{m.display_name || m.email}</div>
+                        {m.display_name && (
+                          <div className="text-xs text-muted-foreground">{m.email}</div>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Select
+                          value={m.role}
+                          onChange={(e) => handleChangeMemberRole(m, e.target.value)}
+                          disabled={memberRowBusy === m.user_id}
+                        >
+                          {ALL_ROLES.map((r) => (
+                            <option key={r} value={r}>
+                              {r}
+                            </option>
+                          ))}
+                        </Select>
+                      </TableCell>
+                      <TableCell className="text-sm text-muted-foreground">
+                        {new Date(m.assigned_at).toLocaleDateString()}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="text-destructive border-destructive/40 hover:bg-destructive/10"
+                          onClick={() => handleRemoveMember(m)}
+                          disabled={memberRowBusy === m.user_id}
+                        >
+                          Remove
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+
+            <div className="flex justify-end pt-4 border-t">
+              <Button variant="outline" onClick={closeMembersModal}>
+                Close
+              </Button>
+            </div>
+          </div>
+        )}
       </Modal>
 
       {/* Edit Finding Type Config Modal */}

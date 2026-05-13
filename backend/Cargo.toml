@@ -88,6 +88,10 @@ validator = { version = "0.18", features = ["derive"] }
 # URL encoding
 urlencoding = "2.1"
 
+# Hashing & encoding for lateral OSINT pivots (favicon, content fingerprints)
+murmur3 = "0.5"
+base64 = "0.22"
+
 # File handling
 mime = "0.3"
 mime_guess = "2.0"

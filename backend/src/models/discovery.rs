@@ -207,6 +207,14 @@ pub enum SourceType {
     UserInput,
     HttpProbe,
     PortScan,
+    // Lateral OSINT pivots — find apex domains that share infrastructure/content/mail
+    // with a seed, rather than subdomains of the seed.
+    FaviconPivot,
+    JarmPivot,
+    AnalyticsIdPivot,
+    SpfPivot,
+    DmarcPivot,
+    MxPivot,
 }
 
 impl std::fmt::Display for SourceType {
@@ -224,6 +232,12 @@ impl std::fmt::Display for SourceType {
             SourceType::UserInput => write!(f, "user_input"),
             SourceType::HttpProbe => write!(f, "http_probe"),
             SourceType::PortScan => write!(f, "port_scan"),
+            SourceType::FaviconPivot => write!(f, "favicon_pivot"),
+            SourceType::JarmPivot => write!(f, "jarm_pivot"),
+            SourceType::AnalyticsIdPivot => write!(f, "analytics_id_pivot"),
+            SourceType::SpfPivot => write!(f, "spf_pivot"),
+            SourceType::DmarcPivot => write!(f, "dmarc_pivot"),
+            SourceType::MxPivot => write!(f, "mx_pivot"),
         }
     }
 }
@@ -242,7 +256,39 @@ impl From<&str> for SourceType {
             "seed" => SourceType::Seed,
             "http_probe" | "http" => SourceType::HttpProbe,
             "port_scan" | "ports" => SourceType::PortScan,
+            "favicon_pivot" => SourceType::FaviconPivot,
+            "jarm_pivot" => SourceType::JarmPivot,
+            "analytics_id_pivot" => SourceType::AnalyticsIdPivot,
+            "spf_pivot" => SourceType::SpfPivot,
+            "dmarc_pivot" => SourceType::DmarcPivot,
+            "mx_pivot" => SourceType::MxPivot,
             _ => SourceType::UserInput,
+        }
+    }
+}
+
+impl SourceType {
+    /// Default confidence weight for an asset discovered solely via this source.
+    /// Lateral pivots (favicon/JARM/HTML/SPF/DMARC/MX) deliberately start low —
+    /// they can match unrelated SaaS tenants and need analyst review.
+    pub fn confidence_weight(&self) -> f64 {
+        match self {
+            SourceType::Seed => 1.0,
+            SourceType::UserInput => 1.0,
+            SourceType::Shodan
+            | SourceType::Virustotal
+            | SourceType::Crtsh
+            | SourceType::Certspotter => 0.8,
+            SourceType::TlsCertificate => 0.7,
+            SourceType::DnsResolution | SourceType::ReverseDns => 0.7,
+            SourceType::CidrExpansion => 0.5,
+            SourceType::HttpProbe | SourceType::PortScan => 0.6,
+            SourceType::FaviconPivot
+            | SourceType::JarmPivot
+            | SourceType::AnalyticsIdPivot
+            | SourceType::SpfPivot
+            | SourceType::DmarcPivot
+            | SourceType::MxPivot => 0.3,
         }
     }
 }
@@ -294,6 +340,8 @@ pub enum RelationshipType {
     SharesIp,
     /// Certificate covers both domains
     SharedCertificate,
+    /// Domains share mail infrastructure (MX target / SPF include / DMARC report mailbox)
+    UsesMailInfrastructure,
 }
 
 impl std::fmt::Display for RelationshipType {
@@ -309,6 +357,7 @@ impl std::fmt::Display for RelationshipType {
             RelationshipType::SameOwner => write!(f, "same_owner"),
             RelationshipType::SharesIp => write!(f, "shares_ip"),
             RelationshipType::SharedCertificate => write!(f, "shared_certificate"),
+            RelationshipType::UsesMailInfrastructure => write!(f, "uses_mail_infrastructure"),
         }
     }
 }

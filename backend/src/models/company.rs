@@ -38,3 +38,12 @@ pub struct CompanyWithRole {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct CompanyMember {
+    pub user_id: Uuid,
+    pub email: String,
+    pub display_name: Option<String>,
+    pub role: String,
+    pub assigned_at: DateTime<Utc>,
+}

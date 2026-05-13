@@ -41,8 +41,15 @@ impl UserContext {
         }
     }
 
+    /// Role check with hierarchy: GlobalAdmin implicitly satisfies every role check,
+    /// so existing `has_role(Role::Admin)` / `has_role(Role::Operator)` gates continue to
+    /// work for global super-admins.
     pub fn has_role(&self, role: Role) -> bool {
-        self.roles.contains(&role)
+        self.roles.contains(&Role::GlobalAdmin) || self.roles.contains(&role)
+    }
+
+    pub fn is_global_admin(&self) -> bool {
+        self.roles.contains(&Role::GlobalAdmin)
     }
 
     pub fn has_permission(&self, permission: &crate::auth::rbac::Permission) -> bool {

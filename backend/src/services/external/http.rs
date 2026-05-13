@@ -1,4 +1,5 @@
 use crate::error::ApiError;
+use base64::Engine;
 use futures::future::join_all;
 use governor::{
     clock::DefaultClock, state::direct::NotKeyed, state::InMemoryState, Quota, RateLimiter,
@@ -8,6 +9,8 @@ use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
 use serde::{Deserialize, Serialize};
 
+use std::collections::HashSet;
+use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -468,6 +471,239 @@ impl HttpAnalyzer {
     pub fn config(&self) -> &HttpConfig {
         &self.config
     }
+
+    /// Fetch a hostname's favicon and compute the hash Shodan's `http.favicon.hash:` filter
+    /// expects. Returns `Ok(None)` when no favicon is found (404/HTML missing a `<link>`).
+    ///
+    /// Tries `https://{host}/favicon.ico` then `http://{host}/favicon.ico`, then falls back
+    /// to parsing the first `<link rel="...icon...">` href from `/`.
+    pub async fn fetch_favicon_hash(&self, hostname: &str) -> Result<Option<i32>, ApiError> {
+        self.rate_limiter.until_ready().await;
+
+        // Try the well-known location first over both schemes.
+        for url in [
+            format!("https://{}/favicon.ico", hostname),
+            format!("http://{}/favicon.ico", hostname),
+        ] {
+            match self.fetch_favicon_bytes(&url).await {
+                Ok(Some(bytes)) => return Ok(Some(shodan_favicon_hash(&bytes))),
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::debug!("favicon fetch error for {}: {}", url, e);
+                }
+            }
+        }
+
+        // Fallback: parse the root page for a <link rel="icon"> reference.
+        for root in [format!("https://{}/", hostname), format!("http://{}/", hostname)] {
+            let Ok(response) = self.perform_http_request(&root).await else {
+                continue;
+            };
+            let final_url = response.url().clone();
+            let Ok(body) = response.text().await else {
+                continue;
+            };
+            let Some(icon_href) = extract_icon_link(&body) else {
+                continue;
+            };
+            let Ok(resolved) = final_url.join(&icon_href) else {
+                continue;
+            };
+            if let Ok(Some(bytes)) = self.fetch_favicon_bytes(resolved.as_str()).await {
+                return Ok(Some(shodan_favicon_hash(&bytes)));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn fetch_favicon_bytes(&self, url: &str) -> Result<Option<Vec<u8>>, ApiError> {
+        let response = self
+            .perform_http_request(url)
+            .await
+            .map_err(|e| ApiError::ExternalService(format!("favicon HEAD/GET failed: {}", e)))?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| ApiError::HttpClient(e))?
+            .to_vec();
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Extract content-based pivot fingerprints from an HTML body — analytics IDs,
+    /// tag-manager IDs, ad network publisher IDs, pixel tokens. Each yielded string
+    /// is suitable as the `needle` for a Shodan `http.html:"<needle>"` query.
+    pub fn extract_html_fingerprints(&self, html: &str) -> HtmlFingerprints {
+        extract_html_fingerprints(html)
+    }
+}
+
+/// Compute the favicon hash Shodan's `http.favicon.hash:` filter uses.
+///
+/// The de-facto recipe (from the original Python implementation everyone copies):
+///   1. base64-encode the raw favicon bytes using Python's `codecs.encode(..., "base64")`,
+///      which wraps the output at 76 chars with `\n` separators and a trailing `\n`.
+///   2. MurmurHash3-32 over those base64 bytes (default `mmh3.hash()` seed 0).
+///   3. Interpret the result as a signed 32-bit integer.
+///
+/// Re-implementations that use unwrapped base64 (`base64::encode` /
+/// `base64.b64encode`) produce a *different* hash and silently fail to match
+/// Shodan results. This helper handles the wrapping explicitly.
+pub fn shodan_favicon_hash(favicon: &[u8]) -> i32 {
+    let raw_b64 = base64::engine::general_purpose::STANDARD.encode(favicon);
+    let wrapped = wrap_base64_lines(&raw_b64);
+    let unsigned = murmur3::murmur3_32(&mut Cursor::new(wrapped.as_bytes()), 0).unwrap_or(0);
+    unsigned as i32
+}
+
+/// Replicate Python's `codecs.encode(..., "base64")` line wrapping:
+/// chunks of 76 characters separated by `\n`, with a trailing `\n`.
+fn wrap_base64_lines(b64: &str) -> String {
+    let mut out = String::with_capacity(b64.len() + b64.len() / 76 + 2);
+    let bytes = b64.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let end = (i + 76).min(bytes.len());
+        out.push_str(std::str::from_utf8(&bytes[i..end]).unwrap_or(""));
+        out.push('\n');
+        i = end;
+    }
+    if out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+fn extract_icon_link(html: &str) -> Option<String> {
+    // Find any <link ... rel="...icon..." ... href="..."> in either attribute order.
+    use regex::Regex;
+    let re = Regex::new(
+        r#"(?is)<link[^>]*\brel\s*=\s*['"][^'"]*icon[^'"]*['"][^>]*\bhref\s*=\s*['"]([^'"]+)['"]"#,
+    )
+    .ok()?;
+    if let Some(caps) = re.captures(html) {
+        return caps.get(1).map(|m| m.as_str().to_string());
+    }
+    let re2 = Regex::new(
+        r#"(?is)<link[^>]*\bhref\s*=\s*['"]([^'"]+)['"][^>]*\brel\s*=\s*['"][^'"]*icon[^'"]*['"]"#,
+    )
+    .ok()?;
+    re2.captures(html)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+/// HTML content fingerprints suitable for Shodan `http.html:` pivots.
+/// All vectors are deduplicated and stable-sorted; capped per-kind to keep the
+/// downstream Shodan credit fan-out bounded.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HtmlFingerprints {
+    pub google_analytics: Vec<String>,
+    pub google_tag_manager: Vec<String>,
+    pub google_adsense: Vec<String>,
+    pub facebook_pixel: Vec<String>,
+    pub hotjar: Vec<String>,
+    pub mixpanel: Vec<String>,
+    pub segment: Vec<String>,
+}
+
+impl HtmlFingerprints {
+    /// All fingerprint values flattened, deduplicated, capped for sane Shodan fan-out.
+    pub fn pivot_needles(&self, max: usize) -> Vec<String> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out: Vec<String> = Vec::new();
+        for group in [
+            &self.google_analytics,
+            &self.google_tag_manager,
+            &self.google_adsense,
+            &self.facebook_pixel,
+            &self.hotjar,
+            &self.mixpanel,
+            &self.segment,
+        ] {
+            for v in group {
+                if out.len() >= max {
+                    return out;
+                }
+                if seen.insert(v.clone()) {
+                    out.push(v.clone());
+                }
+            }
+        }
+        out
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.google_analytics.is_empty()
+            && self.google_tag_manager.is_empty()
+            && self.google_adsense.is_empty()
+            && self.facebook_pixel.is_empty()
+            && self.hotjar.is_empty()
+            && self.mixpanel.is_empty()
+            && self.segment.is_empty()
+    }
+}
+
+fn extract_html_fingerprints(html: &str) -> HtmlFingerprints {
+    use regex::Regex;
+    // Compile lazily on each call — the html bodies are small relative to the regex cost,
+    // and this is invoked at most once per domain per discovery run.
+    let mut fp = HtmlFingerprints::default();
+
+    macro_rules! collect {
+        ($field:ident, $re:literal) => {{
+            if let Ok(re) = Regex::new($re) {
+                let mut seen: HashSet<String> = HashSet::new();
+                for caps in re.captures_iter(html) {
+                    if let Some(m) = caps.get(1).or_else(|| caps.get(0)) {
+                        let v = m.as_str().to_string();
+                        if seen.insert(v.clone()) {
+                            fp.$field.push(v);
+                        }
+                    }
+                }
+                fp.$field.sort();
+            }
+        }};
+    }
+
+    // Legacy Universal Analytics: UA-XXXXXX-Y
+    collect!(google_analytics, r"\bUA-\d{4,10}-\d{1,4}\b");
+    // GA4: G-XXXXXXXXXX
+    collect!(google_analytics, r"\bG-[A-Z0-9]{10}\b");
+    // Google Tag Manager: GTM-XXXXXX
+    collect!(google_tag_manager, r"\bGTM-[A-Z0-9]{4,10}\b");
+    // AdSense publisher IDs: ca-pub-1234567890123456
+    collect!(google_adsense, r"\bca-pub-\d{16}\b");
+    // Facebook pixel: fbq('init', '<digits>')
+    collect!(
+        facebook_pixel,
+        r#"fbq\(\s*['"]init['"]\s*,\s*['"](\d{13,17})['"]"#
+    );
+    // Hotjar: hjid:<digits> or hjid=<digits> appears in their snippet
+    collect!(hotjar, r"\bhjid\s*[:=]\s*(\d{5,10})\b");
+    // Mixpanel token in init call: mixpanel.init('<32-hex>')
+    collect!(
+        mixpanel,
+        r#"mixpanel\.init\(\s*['"]([a-f0-9]{32})['"]"#
+    );
+    // Segment analytics.load('<key>')
+    collect!(
+        segment,
+        r#"analytics\.load\(\s*['"]([A-Za-z0-9_\-]{10,40})['"]"#
+    );
+
+    // Deduplicate within google_analytics across the two patterns
+    fp.google_analytics.sort();
+    fp.google_analytics.dedup();
+
+    fp
 }
 
 // Implement Clone for HttpAnalyzer to support concurrent operations
@@ -735,6 +971,99 @@ mod tests {
                 println!("TLS test skipped due to network error: {}", e);
             }
         }
+    }
+
+    #[test]
+    fn test_shodan_favicon_hash_known_vectors() {
+        // Reference vectors generated with the canonical Python recipe:
+        //   mmh3.hash(codecs.encode(body, "base64"))
+        // The point of pinning these is to catch a silent regression to
+        // *unwrapped* base64 — a different code path that returns a valid-
+        // looking i32 but does not match what Shodan's filter expects.
+        assert_eq!(shodan_favicon_hash(b"a"), -316242180);
+        assert_eq!(shodan_favicon_hash(b"hello"), 1155597304);
+        assert_eq!(shodan_favicon_hash(&[0xCAu8; 200]), -399850401);
+    }
+
+    #[test]
+    fn test_shodan_favicon_hash_rejects_unwrapped_base64() {
+        // Cross-check the wrapping requirement: the unwrapped-base64 variant
+        // (which mmh3.hash(base64.b64encode(b"a")) computes in Python) yields
+        // 486536668. Our implementation must NOT produce that.
+        assert_ne!(shodan_favicon_hash(b"a"), 486536668);
+    }
+
+    #[test]
+    fn test_wrap_base64_layout() {
+        let body = vec![0xCAu8; 200];
+        let raw = base64::engine::general_purpose::STANDARD.encode(&body);
+        let wrapped = wrap_base64_lines(&raw);
+        assert!(wrapped.ends_with('\n'));
+        let last_line = wrapped.lines().last().unwrap();
+        assert!(last_line.len() <= 76);
+        // Every non-final line is exactly 76 chars.
+        let lines: Vec<&str> = wrapped.lines().collect();
+        for line in &lines[..lines.len() - 1] {
+            assert_eq!(line.len(), 76);
+        }
+    }
+
+    #[test]
+    fn test_extract_html_fingerprints_basic() {
+        let html = r#"
+            <script>
+                ga('create', 'UA-12345678-1', 'auto');
+                gtag('config', 'G-ABCDE12345');
+            </script>
+            <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-ABCD123"></iframe></noscript>
+            <script>
+                fbq('init', '1234567890123456');
+                (function(h,o,t,j,a,r){h.hj=h.hj||function(){(h.hj.q=h.hj.q||[]).push(arguments)};h._hjSettings={hjid:1234567,hjsv:6};})();
+                mixpanel.init("0123456789abcdef0123456789abcdef");
+                analytics.load("AbCdEfGhIjKl12345");
+            </script>
+            <ins class="adsbygoogle" data-ad-client="ca-pub-1234567890123456"></ins>
+        "#;
+
+        let analyzer = HttpAnalyzer::new().unwrap();
+        let fp = analyzer.extract_html_fingerprints(html);
+
+        assert!(fp.google_analytics.iter().any(|v| v == "UA-12345678-1"));
+        assert!(fp.google_analytics.iter().any(|v| v == "G-ABCDE12345"));
+        assert!(fp.google_tag_manager.iter().any(|v| v == "GTM-ABCD123"));
+        assert!(fp.google_adsense.iter().any(|v| v == "ca-pub-1234567890123456"));
+        assert!(fp.facebook_pixel.iter().any(|v| v == "1234567890123456"));
+        assert!(fp.hotjar.iter().any(|v| v == "1234567"));
+        assert!(fp
+            .mixpanel
+            .iter()
+            .any(|v| v == "0123456789abcdef0123456789abcdef"));
+        assert!(fp.segment.iter().any(|v| v == "AbCdEfGhIjKl12345"));
+        assert!(!fp.is_empty());
+        assert!(!fp.pivot_needles(50).is_empty());
+    }
+
+    #[test]
+    fn test_extract_html_fingerprints_empty() {
+        let analyzer = HttpAnalyzer::new().unwrap();
+        let fp = analyzer.extract_html_fingerprints("<html><body>nothing here</body></html>");
+        assert!(fp.is_empty());
+        assert!(fp.pivot_needles(50).is_empty());
+    }
+
+    #[test]
+    fn test_extract_icon_link() {
+        let html = r#"<html><head><link rel="shortcut icon" href="/static/fav.ico"></head></html>"#;
+        assert_eq!(extract_icon_link(html), Some("/static/fav.ico".to_string()));
+
+        let html2 = r#"<html><head><link href="https://cdn.example.com/i.png" rel="icon"></head></html>"#;
+        assert_eq!(
+            extract_icon_link(html2),
+            Some("https://cdn.example.com/i.png".to_string())
+        );
+
+        let html3 = "<html><head></head></html>";
+        assert_eq!(extract_icon_link(html3), None);
     }
 
     #[tokio::test]

@@ -662,6 +662,49 @@ impl ExternalServicesManager {
         }
     }
 
+    /// Lateral OSINT pivot — find apex domains that serve the same favicon as the seed.
+    /// Returns an empty extraction (no error) when Shodan is unconfigured, the count
+    /// exceeds `max_results`, or no matches exist. Cost: 1 Shodan query credit max
+    /// (the count pre-check is free).
+    pub async fn shodan_favicon_pivot(
+        &self,
+        hash: i32,
+        max_results: usize,
+    ) -> Result<ShodanExtractedAssets, ApiError> {
+        let settings = self.settings.load();
+        match self.shodan_client_for(&settings)? {
+            Some(client) => client.search_by_favicon_hash(hash, max_results).await,
+            None => Ok(ShodanExtractedAssets::default()),
+        }
+    }
+
+    /// Lateral OSINT pivot — find apex domains whose TLS stack matches the seed's JARM.
+    pub async fn shodan_jarm_pivot(
+        &self,
+        jarm: &str,
+        max_results: usize,
+    ) -> Result<ShodanExtractedAssets, ApiError> {
+        let settings = self.settings.load();
+        match self.shodan_client_for(&settings)? {
+            Some(client) => client.search_by_jarm(jarm, max_results).await,
+            None => Ok(ShodanExtractedAssets::default()),
+        }
+    }
+
+    /// Lateral OSINT pivot — find apex domains whose HTML body contains the given
+    /// fingerprint (analytics ID, tag-manager ID, pixel token, ...).
+    pub async fn shodan_html_pivot(
+        &self,
+        needle: &str,
+        max_results: usize,
+    ) -> Result<ShodanExtractedAssets, ApiError> {
+        let settings = self.settings.load();
+        match self.shodan_client_for(&settings)? {
+            Some(client) => client.search_by_html(needle, max_results).await,
+            None => Ok(ShodanExtractedAssets::default()),
+        }
+    }
+
     fn shodan_client_for(&self, settings: &Settings) -> Result<Option<ShodanClient>, ApiError> {
         if has_value(&settings.shodan_api_key) {
             Ok(Some(ShodanClient::new(settings.shodan_api_key.clone())?))

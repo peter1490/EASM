@@ -1052,6 +1052,21 @@ impl DiscoveryService {
             return Err(ApiError::Validation("Invalid domain format".to_string()));
         }
 
+        let settings = self.current_settings();
+        if settings.skip_unresolved_domains {
+            let resolves = match self.dns_resolver.resolve_hostname(&canonical_domain).await {
+                Ok(ips) => ips.iter().any(|ip| !ip.is_loopback()),
+                Err(_) => false,
+            };
+            if !resolves {
+                result.warnings.push(format!(
+                    "Skipped {} (no non-loopback DNS resolution; skip_unresolved_domains enabled)",
+                    canonical_domain
+                ));
+                return Ok(result);
+            }
+        }
+
         // Create the domain asset first (if it's not from a seed)
         let domain_asset = self
             .create_or_update_asset(
@@ -1102,6 +1117,20 @@ impl DiscoveryService {
                 for subdomain in &subdomain_result.subdomains {
                     if subdomain == &canonical_domain {
                         continue; // Skip the main domain
+                    }
+
+                    if settings.skip_unresolved_domains {
+                        let resolves = match self.dns_resolver.resolve_hostname(subdomain).await {
+                            Ok(ips) => ips.iter().any(|ip| !ip.is_loopback()),
+                            Err(_) => false,
+                        };
+                        if !resolves {
+                            result.warnings.push(format!(
+                                "Skipped subdomain {} (no non-loopback DNS resolution)",
+                                subdomain
+                            ));
+                            continue;
+                        }
                     }
 
                     let source_types = subdomain_result
@@ -1351,7 +1380,304 @@ impl DiscoveryService {
             }
         }
 
+        // Step 4: Lateral OSINT pivots (favicon, HTML fingerprints, DNS metadata).
+        // These surface apex domains that share infrastructure or mail relays with
+        // the seed. By design they do NOT trigger further recursion — lateral hits
+        // can be unrelated SaaS tenants and the analyst triages in the UI.
+        if let Err(e) = self
+            .run_lateral_pivots(run_id, company_id, &canonical_domain, domain_asset_id, seed_id)
+            .await
+        {
+            tracing::debug!("Lateral pivots failed for {}: {}", canonical_domain, e);
+            result
+                .warnings
+                .push(format!("Lateral pivots failed: {}", e));
+        }
+
         Ok(result)
+    }
+
+    /// Run all Phase-1 lateral OSINT pivots for a seed domain.
+    ///
+    /// Pivots fired (cost-bounded by the Shodan `host/count` pre-check):
+    ///   - Favicon hash (Shodan `http.favicon.hash:`)
+    ///   - HTML content fingerprints (Shodan `http.html:` for each unique
+    ///     analytics/tag-manager/pixel ID found on the seed's homepage)
+    ///   - DNS metadata: SPF `include:`/`redirect=`, DMARC `rua=`/`ruf=`,
+    ///     MX hostnames
+    ///
+    /// All discovered apex domains are persisted as low-confidence assets with
+    /// the appropriate `SourceType::*Pivot` variant and a `DiscoveredVia`
+    /// (Shodan pivots) or `UsesMailInfrastructure` (DNS pivots) relationship to
+    /// the seed. They are NOT enqueued for recursive discovery.
+    async fn run_lateral_pivots(
+        &self,
+        run_id: Uuid,
+        company_id: Uuid,
+        canonical_domain: &str,
+        domain_asset_id: Uuid,
+        seed_id: Option<Uuid>,
+    ) -> Result<(), ApiError> {
+        let settings = self.current_settings();
+        let max_results = settings.lateral_pivot_max_results as usize;
+        let max_html_needles = settings.lateral_pivot_max_html_needles as usize;
+        let shodan_enabled = settings.shodan_lateral_pivots_enabled;
+
+        // --- Favicon-hash pivot ---
+        if shodan_enabled {
+            match self.http_analyzer.fetch_favicon_hash(canonical_domain).await {
+                Ok(Some(hash)) => {
+                    match self
+                        .external_services
+                        .shodan_favicon_pivot(hash, max_results)
+                        .await
+                    {
+                        Ok(extracted) => {
+                            self.persist_lateral_pivot_hosts(
+                                run_id,
+                                company_id,
+                                domain_asset_id,
+                                seed_id,
+                                SourceType::FaviconPivot,
+                                RelationshipType::DiscoveredVia,
+                                extracted.domains.into_iter().collect(),
+                                json!({
+                                    "pivot": "favicon_hash",
+                                    "favicon_hash": hash,
+                                    "seed_domain": canonical_domain,
+                                }),
+                            )
+                            .await?;
+                        }
+                        Err(e) => tracing::debug!(
+                            "Shodan favicon pivot failed for {}: {}",
+                            canonical_domain,
+                            e
+                        ),
+                    }
+                }
+                Ok(None) => {
+                    tracing::debug!("No favicon found for {}", canonical_domain);
+                }
+                Err(e) => {
+                    tracing::debug!("Favicon fetch failed for {}: {}", canonical_domain, e);
+                }
+            }
+        }
+
+        // --- HTML content-fingerprint pivot ---
+        if shodan_enabled && max_html_needles > 0 {
+            let homepage_url = format!("https://{}/", canonical_domain);
+            let probe = self.http_analyzer.probe_url(&homepage_url).await;
+            // The probe only stores the title in HttpProbeResult; for fingerprint
+            // extraction we need the body. Re-fetch the body via a single GET —
+            // discovery already accepts an HTTP probe cost per domain.
+            if probe.status_code.is_some() {
+                if let Ok(body) =
+                    Self::fetch_body_for_fingerprints(&self.http_analyzer, &homepage_url).await
+                {
+                    let fingerprints = self.http_analyzer.extract_html_fingerprints(&body);
+                    let needles = fingerprints.pivot_needles(max_html_needles);
+                    for needle in needles {
+                        match self
+                            .external_services
+                            .shodan_html_pivot(&needle, max_results)
+                            .await
+                        {
+                            Ok(extracted) => {
+                                self.persist_lateral_pivot_hosts(
+                                    run_id,
+                                    company_id,
+                                    domain_asset_id,
+                                    seed_id,
+                                    SourceType::AnalyticsIdPivot,
+                                    RelationshipType::DiscoveredVia,
+                                    extracted.domains.into_iter().collect(),
+                                    json!({
+                                        "pivot": "html_fingerprint",
+                                        "needle": needle,
+                                        "seed_domain": canonical_domain,
+                                    }),
+                                )
+                                .await?;
+                            }
+                            Err(e) => tracing::debug!(
+                                "Shodan HTML pivot failed for needle '{}': {}",
+                                needle,
+                                e
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- DNS metadata pivots: SPF / DMARC / MX ---
+        // These do not depend on Shodan; even without an API key they yield value.
+        if let Ok(spf) = self.dns_resolver.lookup_spf(canonical_domain).await {
+            let mut spf_targets: Vec<String> = Vec::new();
+            spf_targets.extend(spf.includes);
+            spf_targets.extend(spf.hosts);
+            spf_targets.extend(spf.exists);
+            self.persist_lateral_pivot_hosts(
+                run_id,
+                company_id,
+                domain_asset_id,
+                seed_id,
+                SourceType::SpfPivot,
+                RelationshipType::UsesMailInfrastructure,
+                spf_targets,
+                json!({
+                    "pivot": "spf",
+                    "seed_domain": canonical_domain,
+                }),
+            )
+            .await?;
+        }
+
+        if let Ok(dmarc) = self.dns_resolver.lookup_dmarc(canonical_domain).await {
+            let mut dmarc_targets: Vec<String> = Vec::new();
+            dmarc_targets.extend(dmarc.aggregate);
+            dmarc_targets.extend(dmarc.forensic);
+            self.persist_lateral_pivot_hosts(
+                run_id,
+                company_id,
+                domain_asset_id,
+                seed_id,
+                SourceType::DmarcPivot,
+                RelationshipType::UsesMailInfrastructure,
+                dmarc_targets,
+                json!({
+                    "pivot": "dmarc",
+                    "seed_domain": canonical_domain,
+                }),
+            )
+            .await?;
+        }
+
+        if let Ok(mx) = self.dns_resolver.lookup_mx(canonical_domain).await {
+            let mx_targets: Vec<String> = mx.into_iter().map(|(_, host)| host).collect();
+            self.persist_lateral_pivot_hosts(
+                run_id,
+                company_id,
+                domain_asset_id,
+                seed_id,
+                SourceType::MxPivot,
+                RelationshipType::UsesMailInfrastructure,
+                mx_targets,
+                json!({
+                    "pivot": "mx",
+                    "seed_domain": canonical_domain,
+                }),
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Fetch the response body for a single URL via the analyzer's underlying
+    /// reqwest client. Used by the HTML-fingerprint pivot to retrieve the seed
+    /// homepage body separately from `probe_url`, which discards it.
+    async fn fetch_body_for_fingerprints(
+        analyzer: &Arc<HttpAnalyzer>,
+        url: &str,
+    ) -> Result<String, ApiError> {
+        // Use the analyzer's existing rate limiting indirectly by going through
+        // probe_url first (already called); here we just do a lightweight GET.
+        // A small dedicated reqwest client avoids polluting probe_url's API.
+        let client = reqwest::Client::builder()
+            .timeout(analyzer.config().request_timeout)
+            .redirect(reqwest::redirect::Policy::limited(analyzer.config().max_redirects))
+            .user_agent(&analyzer.config().user_agent)
+            .build()
+            .map_err(ApiError::HttpClient)?;
+        let response = client.get(url).send().await.map_err(ApiError::HttpClient)?;
+        if !response.status().is_success() {
+            return Err(ApiError::ExternalService(format!(
+                "HTML fetch returned {} for {}",
+                response.status(),
+                url
+            )));
+        }
+        response.text().await.map_err(ApiError::HttpClient)
+    }
+
+    /// Persist a batch of lateral-pivot-discovered hostnames as low-confidence
+    /// domain assets linked to the seed via the given relationship. Filters
+    /// blank / malformed / self-matching / blacklisted infrastructure hostnames.
+    /// Does NOT enqueue results for recursive discovery.
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_lateral_pivot_hosts(
+        &self,
+        run_id: Uuid,
+        company_id: Uuid,
+        seed_asset_id: Uuid,
+        seed_id: Option<Uuid>,
+        source_type: SourceType,
+        relationship: RelationshipType,
+        candidates: Vec<String>,
+        metadata: serde_json::Value,
+    ) -> Result<(), ApiError> {
+        let confidence = source_type.confidence_weight();
+        let mut persisted: HashSet<String> = HashSet::new();
+        for raw in candidates {
+            let Some(canonical) = Self::normalize_discovery_hostname(&raw) else {
+                continue;
+            };
+            // Skip self-matches and trivial provider noise. Infrastructure-domain
+            // filtering reuses the existing common-org keyword list as a heuristic.
+            if !persisted.insert(canonical.clone()) {
+                continue;
+            }
+            if Self::is_common_infrastructure_host(&canonical) {
+                continue;
+            }
+            let asset = self
+                .create_or_update_asset_with_sources(
+                    run_id,
+                    company_id,
+                    AssetType::Domain,
+                    &canonical,
+                    vec![source_type.clone()],
+                    confidence,
+                    seed_id,
+                    Some(seed_asset_id),
+                    Some(metadata.clone()),
+                )
+                .await?;
+            self.create_relationship(
+                run_id,
+                seed_asset_id,
+                asset.0,
+                relationship.clone(),
+                confidence,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Heuristic filter — drop hostnames that match the same common-infrastructure
+    /// keyword list used to filter organization names. Catches the obvious noise
+    /// (`_spf.google.com`, `mx.protection.outlook.com`, `amazonses.com`, …)
+    /// without needing a separate maintenance list.
+    fn is_common_infrastructure_host(hostname: &str) -> bool {
+        let lower = hostname.to_lowercase();
+        for keyword in COMMON_INFRASTRUCTURE_ORGS {
+            // Match keywords as whole-label substrings — "amazon" hits
+            // `amazonses.com`, "google" hits `_spf.google.com`, but
+            // "amazon" must not hit a domain like `mycompany.com` just
+            // because of a substring collision.
+            let kw = keyword.replace([' ', '\''], "");
+            if kw.is_empty() || kw.len() < 4 {
+                continue;
+            }
+            if lower.contains(&kw) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Discover assets from an organization

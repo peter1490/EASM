@@ -21,32 +21,44 @@ pub async fn auth_middleware(
 ) -> Result<Response, StatusCode> {
     let settings = state.config.load();
 
-    // Helper to resolve company
+    // Resolution outcomes for the active company on a request.
+    enum CompanyResolution {
+        Resolved(uuid::Uuid),
+        NoMembership, // User exists but belongs to no company → pass through with no company.
+        Forbidden,    // User explicitly requested a company they don't belong to.
+    }
+
     async fn resolve_company(
         user_id: uuid::Uuid,
         headers: &HeaderMap,
         repo: &dyn crate::repositories::UserRepository,
-    ) -> Option<uuid::Uuid> {
+    ) -> CompanyResolution {
         let requested_id = headers
             .get("X-Company-ID")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| uuid::Uuid::parse_str(s).ok());
 
-        // Get user companies
-        if let Ok(companies) = repo.get_user_companies(user_id).await {
-            if let Some(req_id) = requested_id {
-                // Check membership
-                if companies.iter().any(|c| c.company_id == req_id) {
-                    return Some(req_id);
-                }
-                // Requested company not found for user -> Return None (Unauthorized/Forbidden later)
-                return None;
-            } else {
-                // Default to first company
-                return companies.first().map(|c| c.company_id);
-            }
+        let companies = match repo.get_user_companies(user_id).await {
+            Ok(c) => c,
+            Err(_) => return CompanyResolution::NoMembership,
+        };
+
+        if companies.is_empty() {
+            // No memberships yet — don't lock the user out. They authenticate but can't
+            // hit company-scoped endpoints until an admin grants them access.
+            return CompanyResolution::NoMembership;
         }
-        None
+
+        if let Some(req_id) = requested_id {
+            if companies.iter().any(|c| c.company_id == req_id) {
+                CompanyResolution::Resolved(req_id)
+            } else {
+                CompanyResolution::Forbidden
+            }
+        } else {
+            // No header — default to first company.
+            CompanyResolution::Resolved(companies[0].company_id)
+        }
     }
 
     // 1. Check for API Key first (service-to-service or CLI)
@@ -117,19 +129,23 @@ pub async fn auth_middleware(
     if let Some(cookie) = jar.get("session") {
         if let Ok(session) = serde_json::from_str::<UserSession>(cookie.value()) {
             if !session.is_expired() {
-                // Resolve company
-                let company_id =
-                    resolve_company(session.user_id, &headers, state.user_repository.as_ref())
-                        .await;
-
-                if company_id.is_none() {
-                    // User has no companies or requested invalid company -> Forbidden
-                    tracing::warn!(
-                        "User {} requested invalid company or has no companies",
-                        session.user_id
-                    );
-                    return Err(StatusCode::FORBIDDEN);
-                }
+                let company_id = match resolve_company(
+                    session.user_id,
+                    &headers,
+                    state.user_repository.as_ref(),
+                )
+                .await
+                {
+                    CompanyResolution::Resolved(id) => Some(id),
+                    CompanyResolution::NoMembership => None,
+                    CompanyResolution::Forbidden => {
+                        tracing::warn!(
+                            "User {} requested a company they are not a member of",
+                            session.user_id
+                        );
+                        return Err(StatusCode::FORBIDDEN);
+                    }
+                };
 
                 // Session valid: Attach User Context
                 let context = UserContext::new_user(

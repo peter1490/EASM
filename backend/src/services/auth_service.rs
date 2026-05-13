@@ -136,6 +136,12 @@ impl AuthService {
             ));
         }
 
+        if !user.is_active {
+            return Err(ApiError::Authentication(
+                "Account is disabled. Contact an administrator.".to_string(),
+            ));
+        }
+
         // Update last login
         self.user_repo.update_last_login(user.id).await?;
 
@@ -169,6 +175,13 @@ impl AuthService {
                 .find_by_id(identity.user_id)
                 .await?
                 .ok_or_else(|| ApiError::Internal("User not found for identity".to_string()))?;
+
+            if !user.is_active {
+                return Err(ApiError::Authentication(
+                    "Account is disabled. Contact an administrator.".to_string(),
+                ));
+            }
+
             self.user_repo.update_last_login(user.id).await?;
 
             let roles = self.user_repo.get_user_roles(user.id).await?;
@@ -199,6 +212,13 @@ impl AuthService {
             let user = self.user_repo.find_by_id(user_id).await?.ok_or_else(|| {
                 ApiError::Internal("User not found after creation/linking".to_string())
             })?;
+
+            if !user.is_active {
+                return Err(ApiError::Authentication(
+                    "Account is disabled. Contact an administrator.".to_string(),
+                ));
+            }
+
             self.user_repo.update_last_login(user.id).await?;
 
             let roles = self.user_repo.get_user_roles(user.id).await?;

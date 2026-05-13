@@ -19,10 +19,33 @@ pub struct UserWithRoles {
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub last_login_at: Option<chrono::DateTime<chrono::Utc>>,
     pub roles: Vec<Role>,
+    pub companies: Vec<crate::models::CompanyWithRole>,
+}
+
+/// Deactivate a user if they end up with zero global roles AND zero company memberships.
+/// Called after any role / membership removal. Does not re-activate users — admins who
+/// manually disabled an account with active roles keep that override.
+pub(crate) async fn deactivate_if_no_access(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<(), ApiError> {
+    let roles = state.user_repository.get_user_roles(user_id).await?;
+    let companies = state.company_repository.list_for_user(user_id).await?;
+    if roles.is_empty() && companies.is_empty() {
+        state
+            .user_repository
+            .update_user(user_id, None, None, Some(false))
+            .await?;
+    }
+    Ok(())
 }
 
 impl UserWithRoles {
-    pub fn from_user_and_roles(user: User, roles: Vec<Role>) -> Self {
+    pub fn from_parts(
+        user: User,
+        roles: Vec<Role>,
+        companies: Vec<crate::models::CompanyWithRole>,
+    ) -> Self {
         Self {
             id: user.id,
             email: user.email,
@@ -32,6 +55,7 @@ impl UserWithRoles {
             updated_at: user.updated_at,
             last_login_at: user.last_login_at,
             roles,
+            companies,
         }
     }
 }
@@ -62,8 +86,10 @@ pub async fn list_users(
     Extension(context): Extension<UserContext>,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<UserWithRoles>>, ApiError> {
-    if !context.has_role(Role::Admin) {
-        return Err(ApiError::Authorization("Admin role required".to_string()));
+    if !context.is_global_admin() {
+        return Err(ApiError::Authorization(
+            "Global admin role required".to_string(),
+        ));
     }
 
     let users = state.user_repository.list_users().await?;
@@ -71,7 +97,8 @@ pub async fn list_users(
     let mut result = Vec::new();
     for user in users {
         let roles = state.user_repository.get_user_roles(user.id).await?;
-        result.push(UserWithRoles::from_user_and_roles(user, roles));
+        let companies = state.company_repository.list_for_user(user.id).await?;
+        result.push(UserWithRoles::from_parts(user, roles, companies));
     }
 
     Ok(Json(result))
@@ -83,8 +110,10 @@ pub async fn update_user_role(
     Path(user_id): Path<Uuid>,
     Json(req): Json<UpdateRoleRequest>,
 ) -> Result<Json<String>, ApiError> {
-    if !context.has_role(Role::Admin) {
-        return Err(ApiError::Authorization("Admin role required".to_string()));
+    if !context.is_global_admin() {
+        return Err(ApiError::Authorization(
+            "Global admin role required".to_string(),
+        ));
     }
 
     match req.action.as_str() {
@@ -100,6 +129,7 @@ pub async fn update_user_role(
                 .user_repository
                 .remove_user_role(user_id, req.role)
                 .await?;
+            deactivate_if_no_access(&state, user_id).await?;
             Ok(Json("Role removed".to_string()))
         }
         _ => Err(ApiError::Validation(
@@ -113,8 +143,10 @@ pub async fn create_user(
     State(state): State<AppState>,
     Json(req): Json<CreateUserRequest>,
 ) -> Result<Json<UserWithRoles>, ApiError> {
-    if !context.has_role(Role::Admin) {
-        return Err(ApiError::Authorization("Admin role required".to_string()));
+    if !context.is_global_admin() {
+        return Err(ApiError::Authorization(
+            "Global admin role required".to_string(),
+        ));
     }
 
     // Validate email
@@ -167,18 +199,23 @@ pub async fn create_user(
             .await?;
     }
 
-    // If no roles specified, assign default Viewer role
-    if roles_to_assign.is_empty() {
+    // If no global roles AND no company memberships are granted at creation time, the
+    // account has no access; mark it inactive so it can't log in until an admin grants
+    // a role / membership and re-activates it.
+    let user = if roles_to_assign.is_empty() {
         state
             .user_repository
-            .add_user_role(user.id, Role::Viewer, context.user_id)
-            .await?;
-    }
+            .update_user(user.id, None, None, Some(false))
+            .await?
+    } else {
+        user
+    };
 
     // Get final roles
     let roles = state.user_repository.get_user_roles(user.id).await?;
+    let companies = state.company_repository.list_for_user(user.id).await?;
 
-    Ok(Json(UserWithRoles::from_user_and_roles(user, roles)))
+    Ok(Json(UserWithRoles::from_parts(user, roles, companies)))
 }
 
 pub async fn update_user(
@@ -187,8 +224,10 @@ pub async fn update_user(
     Path(user_id): Path<Uuid>,
     Json(req): Json<UpdateUserRequest>,
 ) -> Result<Json<UserWithRoles>, ApiError> {
-    if !context.has_role(Role::Admin) {
-        return Err(ApiError::Authorization("Admin role required".to_string()));
+    if !context.is_global_admin() {
+        return Err(ApiError::Authorization(
+            "Global admin role required".to_string(),
+        ));
     }
 
     // Validate email if provided
@@ -232,8 +271,9 @@ pub async fn update_user(
         .await?;
 
     let roles = state.user_repository.get_user_roles(user.id).await?;
+    let companies = state.company_repository.list_for_user(user.id).await?;
 
-    Ok(Json(UserWithRoles::from_user_and_roles(user, roles)))
+    Ok(Json(UserWithRoles::from_parts(user, roles, companies)))
 }
 
 pub async fn delete_user(
@@ -241,8 +281,10 @@ pub async fn delete_user(
     State(state): State<AppState>,
     Path(user_id): Path<Uuid>,
 ) -> Result<Json<String>, ApiError> {
-    if !context.has_role(Role::Admin) {
-        return Err(ApiError::Authorization("Admin role required".to_string()));
+    if !context.is_global_admin() {
+        return Err(ApiError::Authorization(
+            "Global admin role required".to_string(),
+        ));
     }
 
     // Prevent self-deletion
@@ -267,8 +309,10 @@ pub async fn get_user(
     State(state): State<AppState>,
     Path(user_id): Path<Uuid>,
 ) -> Result<Json<UserWithRoles>, ApiError> {
-    if !context.has_role(Role::Admin) {
-        return Err(ApiError::Authorization("Admin role required".to_string()));
+    if !context.is_global_admin() {
+        return Err(ApiError::Authorization(
+            "Global admin role required".to_string(),
+        ));
     }
 
     let user = state
@@ -278,6 +322,31 @@ pub async fn get_user(
         .ok_or_else(|| ApiError::NotFound("User not found".to_string()))?;
 
     let roles = state.user_repository.get_user_roles(user.id).await?;
+    let companies = state.company_repository.list_for_user(user.id).await?;
 
-    Ok(Json(UserWithRoles::from_user_and_roles(user, roles)))
+    Ok(Json(UserWithRoles::from_parts(user, roles, companies)))
+}
+
+#[derive(Serialize)]
+pub struct UserCompaniesResponse {
+    pub companies: Vec<crate::models::CompanyWithRole>,
+}
+
+/// GET /api/admin/users/:id/companies - List the companies a user belongs to with their
+/// per-company role (admin only).
+pub async fn list_user_companies(
+    Extension(context): Extension<UserContext>,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+) -> Result<Json<UserCompaniesResponse>, ApiError> {
+    if !context.is_global_admin() {
+        return Err(ApiError::Authorization(
+            "Global admin role required".to_string(),
+        ));
+    }
+    if state.user_repository.find_by_id(user_id).await?.is_none() {
+        return Err(ApiError::NotFound("User not found".to_string()));
+    }
+    let companies = state.company_repository.list_for_user(user_id).await?;
+    Ok(Json(UserCompaniesResponse { companies }))
 }

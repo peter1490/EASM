@@ -93,6 +93,8 @@ pub struct SettingsUpdateRequest {
     pub max_orgs_per_domain: Option<u32>,
     pub max_domains_per_org: Option<u32>,
 
+    pub skip_unresolved_domains: Option<bool>,
+
     // Search
     pub reindex_min_interval_seconds: Option<u32>,
 }
@@ -175,6 +177,8 @@ pub struct SettingsView {
     pub min_pivot_confidence: f64,
     pub max_orgs_per_domain: u32,
     pub max_domains_per_org: u32,
+
+    pub skip_unresolved_domains: bool,
 
     // Search
     pub reindex_min_interval_seconds: u32,
@@ -360,6 +364,7 @@ fn to_view(settings: &ManagedSettings, reveal_secrets: bool) -> SettingsView {
         min_pivot_confidence: settings.min_pivot_confidence,
         max_orgs_per_domain: settings.max_orgs_per_domain,
         max_domains_per_org: settings.max_domains_per_org,
+        skip_unresolved_domains: settings.skip_unresolved_domains,
         reindex_min_interval_seconds: settings.reindex_min_interval_seconds,
     }
 }
@@ -533,6 +538,10 @@ fn merge_settings(mut current: ManagedSettings, update: SettingsUpdateRequest) -
     }
     if let Some(v) = update.max_domains_per_org {
         current.max_domains_per_org = v;
+    }
+
+    if let Some(v) = update.skip_unresolved_domains {
+        current.skip_unresolved_domains = v;
     }
 
     if let Some(v) = update.reindex_min_interval_seconds {

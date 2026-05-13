@@ -265,6 +265,7 @@ pub struct Settings {
     pub enable_cloud_storage_discovery: bool,
     pub enable_wikidata: bool,
     pub enable_opencorporates: bool,
+    pub skip_unresolved_domains: bool,
     pub related_asset_confidence_default: f64,
 
     // Recursive Discovery Limits (to reduce false-positives)
@@ -272,6 +273,14 @@ pub struct Settings {
     pub min_pivot_confidence: f64,     // Min confidence to follow pivot
     pub max_orgs_per_domain: u32,      // Max orgs to pivot from per domain
     pub max_domains_per_org: u32,      // Max domains to pivot from per org
+
+    // Lateral OSINT Pivots
+    // Phase-1 pivots (favicon / JARM / HTML / SPF / DMARC / MX) surface apex
+    // domains that share infrastructure or mail relays with the seed. They can
+    // match unrelated SaaS tenants — keep these bounded.
+    pub shodan_lateral_pivots_enabled: bool, // Master switch for Shodan-backed lateral pivots
+    pub lateral_pivot_max_results: u32, // Max hosts a single Shodan pivot may yield
+    pub lateral_pivot_max_html_needles: u32, // Max unique HTML fingerprints to pivot per host
 
     // Rate Limiting
     pub rate_limit_enabled: bool,
@@ -398,6 +407,7 @@ impl Settings {
             .set_default("enable_cloud_storage_discovery", true)?
             .set_default("enable_wikidata", true)?
             .set_default("enable_opencorporates", false)?
+            .set_default("skip_unresolved_domains", false)?
             .set_default("related_asset_confidence_default", 0.3)?
 
             // Recursive Discovery Limits defaults
@@ -405,6 +415,11 @@ impl Settings {
             .set_default("min_pivot_confidence", 0.5)?
             .set_default("max_orgs_per_domain", 3u32)?
             .set_default("max_domains_per_org", 20u32)?
+
+            // Lateral OSINT Pivot defaults
+            .set_default("shodan_lateral_pivots_enabled", true)?
+            .set_default("lateral_pivot_max_results", 200u32)?
+            .set_default("lateral_pivot_max_html_needles", 3u32)?
 
             // Rate Limiting defaults
             .set_default("rate_limit_enabled", true)?
@@ -668,6 +683,9 @@ impl Settings {
             }
             if let Some(v) = parse_bool_env("ENABLE_OPENCORPORATES") {
                 builder = builder.set_override("enable_opencorporates", v)?;
+            }
+            if let Some(v) = parse_bool_env("SKIP_UNRESOLVED_DOMAINS") {
+                builder = builder.set_override("skip_unresolved_domains", v)?;
             }
             if let Some(v) = parse_bool_env("RATE_LIMIT_ENABLED") {
                 builder = builder.set_override("rate_limit_enabled", v)?;

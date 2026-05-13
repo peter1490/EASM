@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
+    GlobalAdmin,
     Admin,
     Operator,
     Analyst,
@@ -13,6 +14,7 @@ pub enum Role {
 impl Role {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Role::GlobalAdmin => "global_admin",
             Role::Admin => "admin",
             Role::Operator => "operator",
             Role::Analyst => "analyst",
@@ -22,6 +24,9 @@ impl Role {
 
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
+            "global_admin" | "globaladmin" | "superadmin" | "super_admin" => {
+                Some(Role::GlobalAdmin)
+            }
             "admin" => Some(Role::Admin),
             "operator" => Some(Role::Operator),
             "analyst" => Some(Role::Analyst),
@@ -69,7 +74,7 @@ pub enum Permission {
 impl Role {
     pub fn permissions(&self) -> Vec<Permission> {
         match self {
-            Role::Admin => vec![
+            Role::GlobalAdmin | Role::Admin => vec![
                 Permission::CreateScan,
                 Permission::StopScan,
                 Permission::DeleteScan,

@@ -1416,8 +1416,38 @@ impl SecurityScanService {
             })
             .collect();
 
+        // Capture Set-Cookie values and the response body before consuming the
+        // response, so the fingerprint engine can inspect cookies + HTML.
+        let set_cookies: Vec<String> = response
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
+            .collect();
+        let body = response.text().await.unwrap_or_default();
+
         let fingerprints = Self::extract_http_technology_fingerprints(&headers_map);
-        technology_stack = Self::technology_stack_from_fingerprints(&fingerprints);
+
+        // Wappalyzer-style detection across headers, cookies, HTML body, meta
+        // tags and script sources — broader than the header-only fingerprints.
+        let detections =
+            crate::services::fingerprint::engine().detect(&headers_map, &set_cookies, &body, &url);
+
+        // Build the combined technology stack summary (header + body sources).
+        technology_stack = {
+            let mut stack: std::collections::BTreeSet<String> =
+                Self::technology_stack_from_fingerprints(&fingerprints)
+                    .into_iter()
+                    .collect();
+            for det in &detections {
+                let label = match &det.version {
+                    Some(v) => format!("{} {}", det.product, v),
+                    None => det.product.clone(),
+                };
+                stack.insert(label);
+            }
+            stack.into_iter().collect()
+        };
 
         let mut looked_up_versions: HashSet<(String, String)> = HashSet::new();
         let mut unknown_version_disclosures: HashSet<String> = HashSet::new();
@@ -1432,89 +1462,19 @@ impl SecurityScanService {
                     continue;
                 }
 
-                let euvd_vulns = self
-                    .lookup_vulnerabilities_from_euvd(&fingerprint.product, version)
-                    .await;
-
-                let matched_vulns = if euvd_vulns.is_empty() {
-                    get_known_vulnerabilities(&fingerprint.product, version)
-                } else {
-                    euvd_vulns
-                };
-
-                for vuln in matched_vulns {
-                    let vuln_severity = match vuln.severity.as_str() {
-                        "critical" => FindingSeverity::Critical,
-                        "high" => FindingSeverity::High,
-                        "medium" => FindingSeverity::Medium,
-                        _ => FindingSeverity::Low,
-                    };
-
-                    let euvd_url = EuvdClient::get_vulnerability_url(&vuln.cve_id);
-
-                    self.create_finding_with_cvss(
-                        scan_id,
-                        asset.id,
-                        "known_cve",
-                        vuln_severity,
-                        &format!("{}: {}", vuln.cve_id, vuln.title),
-                        Some(&vuln.description),
-                        json!({
-                            "cve_id": vuln.cve_id,
-                            "cvss_score": vuln.cvss_score,
-                            "cvss_vector": vuln.cvss_vector,
-                            "affected_service": fingerprint.product.clone(),
-                            "affected_version": vuln.affected_versions,
-                            "exploitable": vuln.exploitable,
-                            "has_public_exploit": vuln.has_public_exploit,
-                            "detection_method": "http_header_fingerprint",
-                            "fingerprint_header": fingerprint.header_name.clone(),
-                            "fingerprint_value": fingerprint.raw_evidence.clone(),
-                            "detected_version": version,
-                            "references": vuln.references,
-                            "source_url": euvd_url,
-                            "source_name": "EUVD (ENISA)",
-                        }),
-                        vuln.cvss_score,
-                        Some(vec![vuln.cve_id.clone()]),
-                        company_id,
-                    )
-                    .await?;
-
-                    vulnerabilities.push(VulnerabilityResult {
-                        cve_id: vuln.cve_id.clone(),
-                        title: vuln.title.clone(),
-                        severity: vuln.severity.clone(),
-                        cvss_score: vuln.cvss_score,
-                        affected_service: fingerprint.product.clone(),
-                        affected_version: vuln.affected_versions.join(", "),
-                        exploitable: vuln.exploitable,
-                        has_public_exploit: vuln.has_public_exploit,
-                        description: vuln.description.clone(),
-                        remediation: Some(format!(
-                            "Update {} to the latest version",
-                            fingerprint.product
-                        )),
-                        references: vuln.references.clone(),
-                    });
-
-                    let impact = if vuln.exploitable { 0.9 } else { 0.5 };
-                    risk_factors.push(RiskFactor {
-                        factor_type: "vulnerability".to_string(),
-                        name: format!("Known vulnerability: {}", vuln.cve_id),
-                        severity: vuln.severity.clone(),
-                        description: vuln.description.clone(),
-                        impact_score: impact,
-                        data: json!({
-                            "cve_id": vuln.cve_id,
-                            "cvss_score": vuln.cvss_score,
-                            "detection_method": "http_header_fingerprint",
-                            "product": fingerprint.product.clone(),
-                            "version": version,
-                            "euvd_url": euvd_url,
-                        }),
-                    });
-                }
+                self.record_cves_for_technology(
+                    scan_id,
+                    asset,
+                    &fingerprint.product,
+                    version,
+                    "http_header_fingerprint",
+                    &fingerprint.header_name,
+                    &fingerprint.raw_evidence,
+                    &mut vulnerabilities,
+                    risk_factors,
+                    company_id,
+                )
+                .await?;
             } else {
                 let product_key = fingerprint.product.to_ascii_lowercase();
                 if !unknown_version_disclosures.insert(product_key) {
@@ -1561,6 +1521,80 @@ impl SecurityScanService {
                     }),
                 });
             }
+        }
+
+        // Body / cookie / meta / script technology detections: feed versioned
+        // hits into the same CVE lookup and assemble the stack inventory.
+        let mut detected_technologies: Vec<Value> = Vec::new();
+        let mut seen_tech: HashSet<(String, Option<String>)> = HashSet::new();
+
+        for det in &detections {
+            seen_tech.insert((det.product.to_ascii_lowercase(), det.version.clone()));
+            detected_technologies.push(json!({
+                "product": det.product,
+                "name": det.display_name,
+                "version": det.version,
+                "categories": det.categories,
+                "cpe": det.cpe,
+                "confidence": det.confidence,
+                "source": det.source,
+            }));
+
+            if let Some(version) = &det.version {
+                let lookup_key =
+                    (det.product.to_ascii_lowercase(), version.to_ascii_lowercase());
+                if looked_up_versions.insert(lookup_key) {
+                    self.record_cves_for_technology(
+                        scan_id,
+                        asset,
+                        &det.product,
+                        version,
+                        "technology_fingerprint",
+                        &det.source,
+                        &det.evidence,
+                        &mut vulnerabilities,
+                        risk_factors,
+                        company_id,
+                    )
+                    .await?;
+                }
+            }
+        }
+
+        // Include any header-only fingerprints not already covered above.
+        for fp in &fingerprints {
+            if seen_tech.insert((fp.product.to_ascii_lowercase(), fp.version.clone())) {
+                detected_technologies.push(json!({
+                    "product": fp.product,
+                    "version": fp.version,
+                    "source": fp.header_name,
+                    "confidence": fp.confidence,
+                }));
+            }
+        }
+
+        if !technology_stack.is_empty() {
+            self.create_finding(
+                scan_id,
+                asset.id,
+                "technology_detected",
+                FindingSeverity::Info,
+                "Detected technology stack",
+                Some(&format!(
+                    "Identified {} technologies: {}",
+                    technology_stack.len(),
+                    technology_stack.join(", ")
+                )),
+                json!({
+                    "technologies": detected_technologies,
+                    "stack": technology_stack,
+                    "count": technology_stack.len(),
+                    "url": url,
+                    "detection_method": "technology_fingerprint",
+                }),
+                company_id,
+            )
+            .await?;
         }
 
         // Check for security headers
@@ -1756,6 +1790,107 @@ impl SecurityScanService {
             vulnerabilities: Self::dedupe_vulnerability_results(vulnerabilities),
             technology_stack,
         })
+    }
+
+    /// Look up known CVEs for a detected (product, version) via EUVD (with a
+    /// local fallback) and record `known_cve` findings, vulnerability results
+    /// and risk factors. Shared by the header- and body-based detectors.
+    #[allow(clippy::too_many_arguments)]
+    async fn record_cves_for_technology(
+        &self,
+        scan_id: Uuid,
+        asset: &Asset,
+        product: &str,
+        version: &str,
+        detection_method: &str,
+        detection_source: &str,
+        detection_evidence: &str,
+        vulnerabilities: &mut Vec<VulnerabilityResult>,
+        risk_factors: &mut Vec<RiskFactor>,
+        company_id: Uuid,
+    ) -> Result<(), ApiError> {
+        let euvd_vulns = self
+            .lookup_vulnerabilities_from_euvd(product, version)
+            .await;
+        let matched_vulns = if euvd_vulns.is_empty() {
+            get_known_vulnerabilities(product, version)
+        } else {
+            euvd_vulns
+        };
+
+        for vuln in matched_vulns {
+            let vuln_severity = match vuln.severity.as_str() {
+                "critical" => FindingSeverity::Critical,
+                "high" => FindingSeverity::High,
+                "medium" => FindingSeverity::Medium,
+                _ => FindingSeverity::Low,
+            };
+
+            let euvd_url = EuvdClient::get_vulnerability_url(&vuln.cve_id);
+
+            self.create_finding_with_cvss(
+                scan_id,
+                asset.id,
+                "known_cve",
+                vuln_severity,
+                &format!("{}: {}", vuln.cve_id, vuln.title),
+                Some(&vuln.description),
+                json!({
+                    "cve_id": vuln.cve_id,
+                    "cvss_score": vuln.cvss_score,
+                    "cvss_vector": vuln.cvss_vector,
+                    "affected_service": product,
+                    "affected_version": vuln.affected_versions,
+                    "exploitable": vuln.exploitable,
+                    "has_public_exploit": vuln.has_public_exploit,
+                    "detection_method": detection_method,
+                    "detection_source": detection_source,
+                    "fingerprint_header": detection_source,
+                    "fingerprint_value": detection_evidence,
+                    "detected_version": version,
+                    "references": vuln.references,
+                    "source_url": euvd_url,
+                    "source_name": "EUVD (ENISA)",
+                }),
+                vuln.cvss_score,
+                Some(vec![vuln.cve_id.clone()]),
+                company_id,
+            )
+            .await?;
+
+            vulnerabilities.push(VulnerabilityResult {
+                cve_id: vuln.cve_id.clone(),
+                title: vuln.title.clone(),
+                severity: vuln.severity.clone(),
+                cvss_score: vuln.cvss_score,
+                affected_service: product.to_string(),
+                affected_version: vuln.affected_versions.join(", "),
+                exploitable: vuln.exploitable,
+                has_public_exploit: vuln.has_public_exploit,
+                description: vuln.description.clone(),
+                remediation: Some(format!("Update {} to the latest version", product)),
+                references: vuln.references.clone(),
+            });
+
+            let impact = if vuln.exploitable { 0.9 } else { 0.5 };
+            risk_factors.push(RiskFactor {
+                factor_type: "vulnerability".to_string(),
+                name: format!("Known vulnerability: {}", vuln.cve_id),
+                severity: vuln.severity.clone(),
+                description: vuln.description.clone(),
+                impact_score: impact,
+                data: json!({
+                    "cve_id": vuln.cve_id,
+                    "cvss_score": vuln.cvss_score,
+                    "detection_method": detection_method,
+                    "product": product,
+                    "version": version,
+                    "euvd_url": euvd_url,
+                }),
+            });
+        }
+
+        Ok(())
     }
 
     fn extract_http_technology_fingerprints(
@@ -2968,11 +3103,12 @@ impl SecurityScanService {
             "known_cve",
             "dns_resolution_failed",
         ];
-        const HTTP_TYPES: [&str; 4] = [
+        const HTTP_TYPES: [&str; 5] = [
             "missing_security_header",
             "https_not_enforced",
             "server_version_exposed",
             "no_waf_detected",
+            "technology_detected",
         ];
         const TLS_TYPES: [&str; 9] = [
             "expired_certificate",

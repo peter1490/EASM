@@ -802,6 +802,20 @@ export async function updateSecurityFinding(id: string, update: SecurityFindingU
   return res.json();
 }
 
+export async function bulkUpdateSecurityFindings(
+  ids: string[],
+  update: SecurityFindingUpdate,
+): Promise<{ updated: number; failed: number; updated_ids: string[]; failed_ids: string[] }> {
+  const res = await apiFetch(`${API_BASE}/api/security/findings/bulk`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids, update }),
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Failed to bulk update findings: ${res.status}`);
+  return res.json();
+}
+
 export async function resolveSecurityFinding(id: string): Promise<SecurityFinding> {
   const res = await apiFetch(`${API_BASE}/api/security/findings/${id}/resolve`, {
     method: "POST",

@@ -4,6 +4,7 @@ pub mod discovery_schedule_service;
 pub mod discovery_service;
 pub mod drift_service;
 pub mod external;
+pub mod fingerprint;
 pub mod limits;
 pub mod metrics_service;
 pub mod risk_service;

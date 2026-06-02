@@ -270,6 +270,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(handlers::security_handlers::list_security_findings),
         )
         .route(
+            "/api/security/findings/bulk",
+            patch(handlers::security_handlers::bulk_update_security_findings),
+        )
+        .route(
             "/api/security/findings/:id",
             get(handlers::security_handlers::get_security_finding),
         )

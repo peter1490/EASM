@@ -223,6 +223,59 @@ pub async fn update_security_finding(
     Ok(Json(finding))
 }
 
+/// Request body for bulk finding updates (triage queue).
+#[derive(Debug, Deserialize)]
+pub struct BulkUpdateFindingsRequest {
+    pub ids: Vec<Uuid>,
+    pub update: SecurityFindingUpdate,
+}
+
+/// PATCH /api/security/findings/bulk - Update many findings at once (triage)
+pub async fn bulk_update_security_findings(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<UserContext>,
+    Json(payload): Json<BulkUpdateFindingsRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let company_id = user.company_id.ok_or_else(|| {
+        ApiError::Authorization("Company scope required for security scans".to_string())
+    })?;
+
+    if payload.ids.is_empty() {
+        return Err(ApiError::Validation("No finding ids provided".to_string()));
+    }
+    const MAX_BULK: usize = 500;
+    if payload.ids.len() > MAX_BULK {
+        return Err(ApiError::Validation(format!(
+            "Too many findings in one request (max {})",
+            MAX_BULK
+        )));
+    }
+
+    let updated_by = user.user_id;
+    let mut updated_ids = Vec::new();
+    let mut failed_ids = Vec::new();
+    for id in &payload.ids {
+        match app_state
+            .security_finding_repository
+            .update(id, &payload.update, updated_by, company_id)
+            .await
+        {
+            Ok(_) => updated_ids.push(*id),
+            Err(e) => {
+                tracing::warn!("bulk update: failed to update finding {}: {}", id, e);
+                failed_ids.push(*id);
+            }
+        }
+    }
+
+    Ok(Json(json!({
+        "updated": updated_ids.len(),
+        "failed": failed_ids.len(),
+        "updated_ids": updated_ids,
+        "failed_ids": failed_ids,
+    })))
+}
+
 /// POST /api/security/findings/:id/resolve - Resolve a finding
 pub async fn resolve_security_finding(
     State(app_state): State<AppState>,

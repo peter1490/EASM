@@ -332,6 +332,63 @@ function SubdomainEnumerationRenderer({ data }: { data: FindingData }) {
   );
 }
 
+function TechnologyDetectedRenderer({ data }: { data: FindingData }) {
+  const technologies = (data.technologies as Array<{
+    product?: string;
+    name?: string;
+    version?: string | null;
+    categories?: string[];
+    cpe?: string | null;
+    confidence?: number;
+    source?: string;
+  }>) || [];
+  const stack = (data.stack as string[]) || [];
+  const url = data.url as string | undefined;
+
+  if (technologies.length === 0 && stack.length === 0) {
+    return <div className="text-sm text-muted-foreground">No technologies detected</div>;
+  }
+
+  return (
+    <div className="space-y-3">
+      {url && (
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-muted-foreground">URL:</span>
+          <span className="font-mono text-sm break-all">{url}</span>
+        </div>
+      )}
+      {technologies.length > 0 ? (
+        <div className="space-y-2">
+          {technologies.map((t, idx) => (
+            <div key={idx} className="flex flex-wrap items-center gap-2">
+              <Badge variant="info">
+                {(t.name || t.product) ?? "unknown"}{t.version ? ` ${t.version}` : ""}
+              </Badge>
+              {(t.categories || []).map((c) => (
+                <span key={c} className="text-xs text-muted-foreground">{c}</span>
+              ))}
+              {typeof t.confidence === "number" && (
+                <span className="text-xs text-muted-foreground">· {t.confidence}%</span>
+              )}
+              {t.source && (
+                <code className="text-[10px] bg-muted px-1 py-0.5 rounded font-mono text-muted-foreground">
+                  {t.source}
+                </code>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-1">
+          {stack.map((s, idx) => (
+            <Badge key={idx} variant="info">{s}</Badge>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function GenericRenderer({ data }: { data: FindingData }) {
   // Handle null, undefined, or empty data
   if (!data || typeof data !== 'object') {
@@ -386,6 +443,8 @@ export default function FindingRenderer({
       return <ThreatIntelligenceRenderer data={data} />;
     case "subdomain_enumeration":
       return <SubdomainEnumerationRenderer data={data} />;
+    case "technology_detected":
+      return <TechnologyDetectedRenderer data={data} />;
     default:
       return <GenericRenderer data={data} />;
   }
@@ -400,6 +459,7 @@ export function getFindingTypeLabel(findingType: string): string {
     tls_analysis: "TLS Certificate Analysis",
     threat_intelligence: "Threat Intelligence",
     subdomain_enumeration: "Subdomain Enumeration",
+    technology_detected: "Technology Stack",
   };
   return labels[findingType] || findingType.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase());
 }
@@ -413,6 +473,7 @@ export function getFindingTypeIcon(findingType: string): string {
     tls_analysis: "🔒",
     threat_intelligence: "🛡️",
     subdomain_enumeration: "🔍",
+    technology_detected: "🧩",
   };
   return icons[findingType] || "📋";
 }

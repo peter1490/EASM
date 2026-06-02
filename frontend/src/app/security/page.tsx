@@ -7,6 +7,7 @@ import {
   getSecurityFindingsSummary,
   updateSecurityFinding,
   resolveSecurityFinding,
+  bulkUpdateSecurityFindings,
   type SecurityScan,
   type SecurityFinding,
   type SecurityFindingFilter,
@@ -22,9 +23,20 @@ import Input from "@/components/ui/Input";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import EmptyState from "@/components/ui/EmptyState";
 import Modal from "@/components/ui/Modal";
+import Checkbox from "@/components/ui/Checkbox";
 import Link from "next/link";
 
 type TabType = "findings" | "scans";
+
+const SEVERITY_RANK: Record<string, number> = {
+  critical: 5,
+  high: 4,
+  medium: 3,
+  low: 2,
+  info: 1,
+};
+
+const ACTIVE_STATUSES = new Set(["open", "acknowledged", "in_progress"]);
 
 const SEVERITY_COLORS: Record<string, "error" | "warning" | "info" | "secondary" | "success"> = {
   critical: "error",
@@ -73,6 +85,10 @@ export default function SecurityPage() {
   // Finding detail modal
   const [selectedFinding, setSelectedFinding] = useState<SecurityFinding | null>(null);
   const [updating, setUpdating] = useState(false);
+
+  // Triage bulk selection
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkUpdating, setBulkUpdating] = useState(false);
   
   // Track if initial load has happened (ref to avoid re-renders)
   const hasInitialLoadRef = useRef(false);
@@ -149,14 +165,59 @@ export default function SecurityPage() {
   }
 
   const filteredFindings = useMemo(() => {
-    if (!searchTerm) return findings;
     const term = searchTerm.toLowerCase();
-    return findings.filter(f =>
-      f.title.toLowerCase().includes(term) ||
-      f.finding_type.toLowerCase().includes(term) ||
-      f.description?.toLowerCase().includes(term)
-    );
+    const base = searchTerm
+      ? findings.filter(f =>
+          f.title.toLowerCase().includes(term) ||
+          f.finding_type.toLowerCase().includes(term) ||
+          f.description?.toLowerCase().includes(term)
+        )
+      : findings;
+    // Prioritized triage order: active findings first, then severity, then CVSS.
+    return [...base].sort((a, b) => {
+      const aActive = ACTIVE_STATUSES.has(a.status) ? 0 : 1;
+      const bActive = ACTIVE_STATUSES.has(b.status) ? 0 : 1;
+      if (aActive !== bActive) return aActive - bActive;
+      const sev = (SEVERITY_RANK[b.severity] || 0) - (SEVERITY_RANK[a.severity] || 0);
+      if (sev !== 0) return sev;
+      return (b.cvss_score || 0) - (a.cvss_score || 0);
+    });
   }, [findings, searchTerm]);
+
+  const allVisibleSelected =
+    filteredFindings.length > 0 && filteredFindings.every((f) => selectedIds.has(f.id));
+  const someVisibleSelected = filteredFindings.some((f) => selectedIds.has(f.id));
+
+  function toggleSelectAll(checked: boolean) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      filteredFindings.forEach((f) => (checked ? next.add(f.id) : next.delete(f.id)));
+      return next;
+    });
+  }
+
+  function toggleSelect(id: string, checked: boolean) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  async function handleBulkUpdate(status: FindingStatus) {
+    if (selectedIds.size === 0) return;
+    setBulkUpdating(true);
+    try {
+      await bulkUpdateSecurityFindings([...selectedIds], { status });
+      setSelectedIds(new Set());
+      await loadData(true);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBulkUpdating(false);
+    }
+  }
 
   const totalPages = Math.ceil(totalCount / limit);
   const currentPage = Math.floor(offset / limit) + 1;
@@ -330,9 +391,35 @@ export default function SecurityPage() {
               />
             ) : (
               <>
+                {selectedIds.size > 0 && (
+                  <div className="flex flex-wrap items-center gap-2 mb-4 p-3 rounded-lg border bg-muted/40">
+                    <span className="text-sm font-medium">{selectedIds.size} selected</span>
+                    <div className="flex flex-wrap gap-2 ml-auto">
+                      <Button size="sm" variant="outline" disabled={bulkUpdating}
+                        onClick={() => handleBulkUpdate("acknowledged")}>Acknowledge</Button>
+                      <Button size="sm" variant="outline" disabled={bulkUpdating}
+                        onClick={() => handleBulkUpdate("in_progress")}>Start Working</Button>
+                      <Button size="sm" disabled={bulkUpdating}
+                        onClick={() => handleBulkUpdate("resolved")}>Resolve</Button>
+                      <Button size="sm" variant="outline" disabled={bulkUpdating}
+                        onClick={() => handleBulkUpdate("false_positive")}>False Positive</Button>
+                      <Button size="sm" variant="outline" disabled={bulkUpdating}
+                        onClick={() => handleBulkUpdate("accepted")}>Accept Risk</Button>
+                      <Button size="sm" variant="ghost" disabled={bulkUpdating}
+                        onClick={() => setSelectedIds(new Set())}>Clear</Button>
+                    </div>
+                  </div>
+                )}
                 <Table>
                   <TableHeader>
                     <TableRow>
+                      <TableHead className="w-10">
+                        <Checkbox
+                          checked={allVisibleSelected}
+                          indeterminate={!allVisibleSelected && someVisibleSelected}
+                          onChange={toggleSelectAll}
+                        />
+                      </TableHead>
                       <TableHead>Severity</TableHead>
                       <TableHead>Title</TableHead>
                       <TableHead>Type</TableHead>
@@ -350,6 +437,12 @@ export default function SecurityPage() {
                         className="cursor-pointer hover:bg-muted/50"
                         onClick={() => setSelectedFinding(finding)}
                       >
+                        <TableCell onClick={(e) => e.stopPropagation()}>
+                          <Checkbox
+                            checked={selectedIds.has(finding.id)}
+                            onChange={(c) => toggleSelect(finding.id, c)}
+                          />
+                        </TableCell>
                         <TableCell>
                           <Badge variant={SEVERITY_COLORS[finding.severity] || "secondary"}>
                             {finding.severity.toUpperCase()}

@@ -2307,41 +2307,43 @@ impl DiscoveryService {
             self.asset_source_repo.create(&source_create).await?;
         }
 
-        // Auto-scan high confidence newly created assets
-        if was_created {
-            let auto_scan_threshold = {
-                let statuses = self.status.lock().await;
-                statuses
-                    .get(&company_id)
-                    .map(|status| status.auto_scan_threshold)
-                    .unwrap_or(0.0)
-            };
+        // Auto-scan assets whose merged confidence clears the threshold. We use the merged
+        // asset.confidence (returned by create_or_merge) rather than the discovery-time
+        // `confidence` parameter, and we run on every touch — not just on first create — so
+        // that subdomains whose confidence rises through re-discovery still get scanned.
+        // The 24h dedup inside maybe_trigger_auto_scan prevents repeated scans.
+        let auto_scan_threshold = {
+            let statuses = self.status.lock().await;
+            statuses
+                .get(&company_id)
+                .map(|status| status.auto_scan_threshold)
+                .unwrap_or(0.0)
+        };
 
-            if auto_scan_threshold > 0.0 {
-                if let Err(e) = self
-                    .maybe_trigger_auto_scan(
-                        company_id,
-                        asset.id,
-                        &normalized_identifier,
-                        &asset_type,
-                        confidence,
-                        Some(auto_scan_threshold),
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        "Failed to trigger auto-scan for {}: {}",
-                        normalized_identifier,
-                        e
-                    );
-                } else if confidence >= auto_scan_threshold {
-                    // Increment counter if scan was likely queued
-                    let mut statuses = self.status.lock().await;
-                    let status = statuses
-                        .entry(company_id)
-                        .or_insert_with(DiscoveryStatus::default);
-                    status.scans_queued += 1;
-                }
+        if auto_scan_threshold > 0.0 {
+            if let Err(e) = self
+                .maybe_trigger_auto_scan(
+                    company_id,
+                    asset.id,
+                    &normalized_identifier,
+                    &asset_type,
+                    asset.confidence,
+                    Some(auto_scan_threshold),
+                )
+                .await
+            {
+                tracing::warn!(
+                    "Failed to trigger auto-scan for {}: {}",
+                    normalized_identifier,
+                    e
+                );
+            } else if asset.confidence >= auto_scan_threshold {
+                // Upper-bound counter; real dedup happens inside maybe_trigger_auto_scan.
+                let mut statuses = self.status.lock().await;
+                let status = statuses
+                    .entry(company_id)
+                    .or_insert_with(DiscoveryStatus::default);
+                status.scans_queued += 1;
             }
         }
 

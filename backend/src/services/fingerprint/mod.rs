@@ -6,7 +6,7 @@
 //! products (with versions where they can be extracted).
 //!
 //! The detections are consumed by the security scan service, which:
-//!   1. feeds versioned detections into the existing EUVD CVE lookup, and
+//!   1. feeds versioned detections into the NVD CVE lookup, and
 //!   2. records the full technology stack as an inventory finding.
 //!
 //! The signature ruleset (`signatures.json`) uses our own / permissively
@@ -78,6 +78,11 @@ struct RawSignature {
     meta: Vec<String>,
     #[serde(default)]
     scripts: Vec<String>,
+    /// Regexes applied to *fetched* JS/CSS asset contents to recover a version
+    /// banner (e.g. "/*! jQuery v3.6.0" or `.fn.jquery="3.6.0"`). Capture group 1
+    /// is the version.
+    #[serde(default)]
+    js_content: Vec<String>,
     #[serde(default)]
     url: Vec<String>,
     #[serde(default = "default_confidence")]
@@ -117,6 +122,7 @@ struct Signature {
     html: Vec<Regex>,
     meta: Vec<Regex>,
     scripts: Vec<Regex>,
+    js_content: Vec<Regex>,
     url: Vec<Regex>,
 }
 
@@ -199,6 +205,7 @@ impl FingerprintEngine {
                 html: compile_all(sig.html, "html"),
                 meta: compile_all(sig.meta, "meta"),
                 scripts: compile_all(sig.scripts, "script"),
+                js_content: compile_all(sig.js_content, "js_content"),
                 url: compile_all(sig.url, "url"),
             });
         }
@@ -317,6 +324,41 @@ impl FingerprintEngine {
         let mut detections: Vec<TechDetection> = found.into_values().collect();
         detections.sort_by(|a, b| a.product.cmp(&b.product));
         detections
+    }
+
+    /// True if this engine can recover a version for `product` from the contents
+    /// of a fetched asset (i.e. the signature defines content-banner patterns).
+    /// Used to decide whether fetching a referenced script is worthwhile.
+    pub fn supports_asset_version(&self, product: &str) -> bool {
+        self.signatures
+            .iter()
+            .any(|s| s.product == product && !s.js_content.is_empty())
+    }
+
+    /// Recover a version for `product` from the body of a fetched asset
+    /// (e.g. a minified `jquery.min.js`), using the signature's content-banner
+    /// patterns — plus, as a bonus, any version-capturing HTML banner patterns
+    /// (a JS banner comment is the same text as the HTML one).
+    pub fn version_from_asset(&self, product: &str, content: &str) -> Option<String> {
+        let sig = self.signatures.iter().find(|s| s.product == product)?;
+
+        // Banners live near the top; scan a bounded prefix to cap regex work.
+        let truncated: String;
+        let scan: &str = if content.len() > MAX_BODY_CHARS {
+            truncated = content.chars().take(MAX_BODY_CHARS).collect();
+            truncated.as_str()
+        } else {
+            content
+        };
+
+        for re in sig.js_content.iter().chain(sig.html.iter()) {
+            if let Some(caps) = re.captures(scan) {
+                if let Some(v) = version_from(&caps) {
+                    return Some(v);
+                }
+            }
+        }
+        None
     }
 }
 
@@ -474,6 +516,202 @@ mod tests {
                 .as_deref(),
             Some("3.5.1")
         );
+    }
+
+    #[test]
+    fn detects_versionless_jquery_min_js() {
+        // Bare, unversioned filename (as served by mutantstage.lafayetteanticipations.com):
+        // technology must still be detected (inventory), just without a version.
+        let body = r#"<script src="js/lib/jquery.min.js"></script>"#;
+        let dets = engine().detect(&HashMap::new(), &[], body, "https://x");
+        let jq = find(&dets, "jquery").expect("jquery detected without version");
+        assert_eq!(jq.version, None);
+    }
+
+    #[test]
+    fn detects_jquery_version_from_query_string() {
+        // CMS-style cache-busting query param (Drupal/WordPress): version is in ?v=/?ver=.
+        for body in [
+            r#"<script src="/core/assets/vendor/jquery/jquery.min.js?v=3.7.1"></script>"#,
+            r#"<script src="/wp-includes/js/jquery/jquery.js?ver=3.6.0"></script>"#,
+        ] {
+            let dets = engine().detect(&HashMap::new(), &[], body, "https://x");
+            let jq = find(&dets, "jquery").expect("jquery detected");
+            assert!(
+                jq.version.is_some(),
+                "expected a version from query string in {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_misdetect_jquery_plugin_as_jquery() {
+        // A jQuery *plugin* filename alone should not be reported as jQuery core.
+        let body = r#"<script src="js/jquery.waypoints.min.js"></script>"#;
+        let dets = engine().detect(&HashMap::new(), &[], body, "https://x");
+        assert!(find(&dets, "jquery").is_none());
+    }
+
+    #[test]
+    fn supports_asset_version_only_for_banner_libs() {
+        assert!(engine().supports_asset_version("jquery"));
+        assert!(engine().supports_asset_version("bootstrap"));
+        assert!(engine().supports_asset_version("vue"));
+        assert!(!engine().supports_asset_version("nginx"));
+        assert!(!engine().supports_asset_version("wordpress"));
+    }
+
+    #[test]
+    fn recovers_jquery_version_from_banner_comment() {
+        let content = "/*! jQuery v3.6.0 | (c) OpenJS Foundation and other contributors */\n!function(){}";
+        assert_eq!(
+            engine().version_from_asset("jquery", content).as_deref(),
+            Some("3.6.0")
+        );
+        // Older "jQuery JavaScript Library v1.12.4" banner form.
+        let legacy = "/*!\n * jQuery JavaScript Library v1.12.4\n */";
+        assert_eq!(
+            engine().version_from_asset("jquery", legacy).as_deref(),
+            Some("1.12.4")
+        );
+    }
+
+    #[test]
+    fn recovers_jquery_version_from_fn_property() {
+        // Minified body without a leading banner; version is in `.fn.jquery`.
+        let content = r#"a.fn.jquery="3.5.1",a.extend({})"#;
+        assert_eq!(
+            engine().version_from_asset("jquery", content).as_deref(),
+            Some("3.5.1")
+        );
+    }
+
+    #[test]
+    fn recovers_bootstrap_and_vue_versions_from_banner() {
+        assert_eq!(
+            engine()
+                .version_from_asset("bootstrap", "/*! Bootstrap v5.3.2 (https://getbootstrap.com/) */")
+                .as_deref(),
+            Some("5.3.2")
+        );
+        assert_eq!(
+            engine()
+                .version_from_asset("vue", "/*!\n * vue v3.3.4\n * (c) 2014-2023 */")
+                .as_deref(),
+            Some("3.3.4")
+        );
+    }
+
+    #[test]
+    fn version_from_asset_none_when_absent() {
+        assert_eq!(engine().version_from_asset("jquery", "no version here"), None);
+        // Unknown product yields nothing.
+        assert_eq!(engine().version_from_asset("nginx", "nginx 1.2.3"), None);
+    }
+
+    #[test]
+    fn detects_new_js_libraries_versionless_and_versioned() {
+        // Versionless presence (bare minified filenames).
+        for (src, product) in [
+            ("/js/lodash.min.js", "lodash"),
+            ("/vendor/moment.min.js", "moment"),
+            ("/lib/angular.min.js", "angularjs"),
+            ("/js/underscore.min.js", "underscore"),
+            ("/js/modernizr.custom.min.js", "modernizr"),
+        ] {
+            let body = format!(r#"<script src="{src}"></script>"#);
+            let dets = engine().detect(&HashMap::new(), &[], &body, "https://x");
+            let d = find(&dets, product).unwrap_or_else(|| panic!("{product} not detected from {src}"));
+            assert_eq!(d.version, None, "{product} should be versionless from {src}");
+        }
+    }
+
+    #[test]
+    fn detects_versioned_libs_from_filename_and_cdn_path() {
+        // version in filename
+        let b1 = r#"<script src="/lib/angular-1.7.9.min.js"></script>"#;
+        assert_eq!(
+            find(&engine().detect(&HashMap::new(), &[], b1, "https://x"), "angularjs")
+                .and_then(|d| d.version.clone()).as_deref(),
+            Some("1.7.9")
+        );
+        // version in cdnjs-style path
+        let b2 = r#"<script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js"></script>"#;
+        assert_eq!(
+            find(&engine().detect(&HashMap::new(), &[], b2, "https://x"), "lodash")
+                .and_then(|d| d.version.clone()).as_deref(),
+            Some("4.17.21")
+        );
+    }
+
+    #[test]
+    fn recovers_new_lib_versions_from_banners() {
+        assert_eq!(engine().version_from_asset("lodash", r#"var x;t.VERSION="4.17.21";"#).as_deref(), Some("4.17.21"));
+        assert_eq!(engine().version_from_asset("moment", r#"e.version="2.29.4",e.fn"#).as_deref(), Some("2.29.4"));
+        assert_eq!(engine().version_from_asset("angularjs", "/*! AngularJS v1.8.2 */").as_deref(), Some("1.8.2"));
+        assert_eq!(engine().version_from_asset("underscore", "//     Underscore.js 1.13.6").as_deref(), Some("1.13.6"));
+    }
+
+    #[test]
+    fn detects_jquery_version_from_cdnjs_path() {
+        // Real-world case (www.groupegalerieslafayette.com): jQuery loaded from a
+        // cdnjs URL where the version is a path segment, not in the filename.
+        let body = r#"<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>"#;
+        let dets = engine().detect(&HashMap::new(), &[], body, "https://x");
+        assert_eq!(
+            find(&dets, "jquery").and_then(|d| d.version.clone()).as_deref(),
+            Some("3.2.1")
+        );
+    }
+
+    #[test]
+    fn detects_cdnjs_path_versions_for_core_libs() {
+        for (body, product, ver) in [
+            (r#"<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.2/css/bootstrap.min.css">"#, "bootstrap", "5.3.2"),
+            (r#"<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>"#, "react", "18.2.0"),
+            (r#"<script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.3.4/vue.global.prod.min.js"></script>"#, "vue", "3.3.4"),
+        ] {
+            let dets = engine().detect(&HashMap::new(), &[], body, "https://x");
+            assert_eq!(
+                find(&dets, product).and_then(|d| d.version.clone()).as_deref(),
+                Some(ver),
+                "{product} cdnjs path version"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_bootstrap_from_versionless_stylesheet() {
+        let body = r#"<link rel="stylesheet" href="/css/bootstrap.min.css">"#;
+        let dets = engine().detect(&HashMap::new(), &[], body, "https://x");
+        let bs = find(&dets, "bootstrap").expect("bootstrap detected from css");
+        assert_eq!(bs.version, None);
+    }
+
+    #[test]
+    fn detects_server_side_tech_from_cookies() {
+        let php = engine().detect(&HashMap::new(), &["PHPSESSID=abc123; path=/".to_string()], "", "https://x");
+        assert!(find(&php, "php").is_some(), "PHP from PHPSESSID cookie");
+
+        let aspnet = engine().detect(&HashMap::new(), &["ASP.NET_SessionId=xyz".to_string()], "", "https://x");
+        assert!(find(&aspnet, "asp.net").is_some(), "ASP.NET from session cookie");
+    }
+
+    #[test]
+    fn cms_implies_php() {
+        let body = r#"<html><head><meta name="generator" content="WordPress 6.4.2"></head></html>"#;
+        let dets = engine().detect(&HashMap::new(), &[], body, "https://x");
+        assert!(find(&dets, "wordpress").is_some());
+        // WordPress is PHP-based -> php inventoried (versionless).
+        let php = find(&dets, "php").expect("php implied by wordpress");
+        assert_eq!(php.version, None);
+    }
+
+    #[test]
+    fn detects_typo3_from_path_markers() {
+        let body = r#"<link href="/typo3conf/ext/theme/style.css"><script src="/typo3temp/assets/app.js"></script>"#;
+        let dets = engine().detect(&HashMap::new(), &[], body, "https://x");
+        assert!(find(&dets, "typo3").is_some());
     }
 
     #[test]

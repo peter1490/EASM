@@ -2,258 +2,703 @@
   {
     "name": "WordPress",
     "product": "wordpress",
-    "categories": ["cms"],
+    "categories": [
+      "cms"
+    ],
     "cpe": "cpe:2.3:a:wordpress:wordpress",
     "confidence": 90,
-    "meta": ["(?i)<meta[^>]+name=[\"']generator[\"'][^>]+content=[\"']WordPress\\s*([0-9][0-9.]*)?"],
-    "html": ["wp-content/", "wp-includes/"]
+    "meta": [
+      "(?i)<meta[^>]+name=[\"']generator[\"'][^>]+content=[\"']WordPress\\s*([0-9][0-9.]*)?"
+    ],
+    "html": [
+      "wp-content/",
+      "wp-includes/",
+      "(?i)/wp-json/"
+    ],
+    "implies": [
+      "php"
+    ],
+    "cookies": [
+      "(?i)wordpress_logged_in_",
+      "(?i)wp-settings-time-"
+    ],
+    "headers": [
+      {
+        "name": "x-pingback"
+      }
+    ]
   },
   {
     "name": "Drupal",
     "product": "drupal",
-    "categories": ["cms"],
+    "categories": [
+      "cms"
+    ],
     "cpe": "cpe:2.3:a:drupal:drupal",
     "confidence": 85,
-    "headers": [{ "name": "x-generator", "pattern": "(?i)Drupal\\s*([0-9]+)?" }],
-    "meta": ["(?i)content=[\"']Drupal\\s*([0-9]+)?"],
-    "html": ["sites/all/", "sites/default/files"]
+    "headers": [
+      {
+        "name": "x-generator",
+        "pattern": "(?i)Drupal\\s*([0-9]+)?"
+      },
+      {
+        "name": "x-drupal-cache"
+      },
+      {
+        "name": "x-drupal-dynamic-cache"
+      }
+    ],
+    "meta": [
+      "(?i)content=[\"']Drupal\\s*([0-9]+)?"
+    ],
+    "html": [
+      "sites/all/",
+      "sites/default/files",
+      "(?i)core/misc/drupal",
+      "(?i)drupal-settings-json"
+    ],
+    "implies": [
+      "php"
+    ],
+    "cookies": [
+      "(?i)\\bS?SESS[a-f0-9]{32}="
+    ]
   },
   {
     "name": "Joomla",
     "product": "joomla",
-    "categories": ["cms"],
+    "categories": [
+      "cms"
+    ],
     "cpe": "cpe:2.3:a:joomla:joomla",
     "confidence": 80,
-    "meta": ["(?i)content=[\"']Joomla!?\\s*-?\\s*([0-9.]+)?"],
-    "html": ["/media/jui/", "(?i)Joomla!"]
+    "meta": [
+      "(?i)content=[\"']Joomla!?\\s*-?\\s*([0-9.]+)?"
+    ],
+    "html": [
+      "/media/jui/",
+      "(?i)Joomla!"
+    ],
+    "implies": [
+      "php"
+    ]
   },
   {
     "name": "jQuery",
     "product": "jquery",
-    "categories": ["javascript-library"],
+    "categories": [
+      "javascript-library"
+    ],
     "cpe": "cpe:2.3:a:jquery:jquery",
     "confidence": 80,
-    "scripts": ["(?i)jquery[-.]([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)(?:\\.min)?\\.js"],
-    "html": ["(?i)jQuery v([0-9.]+)"]
+    "scripts": [
+      "(?i)jquery[-.]([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)(?:\\.slim)?(?:\\.min)?\\.js",
+      "(?i)/([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)/(?:[^\\\"']*?/)?jquery(?:\\.slim)?(?:\\.min)?\\.js",
+      "(?i)\\bjquery(?:\\.slim)?(?:\\.min)?\\.js\\?(?:ver|v)=([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
+      "(?i)\\bjquery(?:\\.slim)?(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)jquery(?:\\s+javascript\\s+library)?\\s+v?([0-9]+\\.[0-9]+\\.[0-9]+)",
+      "(?i)\\.fn\\.jquery\\s*=\\s*[\"']([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ],
+    "html": [
+      "(?i)jQuery v([0-9.]+)"
+    ]
   },
   {
     "name": "Bootstrap",
     "product": "bootstrap",
-    "categories": ["ui-framework"],
+    "categories": [
+      "ui-framework"
+    ],
     "cpe": "cpe:2.3:a:getbootstrap:bootstrap",
     "confidence": 75,
-    "scripts": ["(?i)bootstrap[-.]([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)(?:\\.min)?\\.(?:js|css)"],
-    "html": ["(?i)Bootstrap v([0-9.]+)"]
+    "scripts": [
+      "(?i)bootstrap[-.]([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)(?:\\.min)?\\.(?:js|css)",
+      "(?i)/([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)/(?:[^\\\"']*?/)?bootstrap(?:\\.bundle)?(?:\\.min)?\\.(?:js|css)",
+      "(?i)\\bbootstrap(?:\\.bundle)?(?:\\.min)?\\.(?:js|css)"
+    ],
+    "js_content": [
+      "(?i)bootstrap\\s+v?([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ],
+    "html": [
+      "(?i)Bootstrap v([0-9.]+)"
+    ]
   },
   {
     "name": "React",
     "product": "react",
-    "categories": ["javascript-framework"],
+    "categories": [
+      "javascript-framework"
+    ],
     "cpe": "cpe:2.3:a:facebook:react",
     "confidence": 60,
-    "scripts": ["(?i)react(?:-dom)?[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js"],
-    "html": ["data-reactroot", "__REACT_DEVTOOLS"]
+    "scripts": [
+      "(?i)react(?:-dom)?[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js",
+      "(?i)/([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)/(?:[^\\\"']*?/)?react(?:-dom)?(?:\\.production|\\.development)?(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)reactversion\\s*=\\s*[\"']([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ],
+    "html": [
+      "data-reactroot",
+      "__REACT_DEVTOOLS"
+    ]
   },
   {
     "name": "Vue.js",
     "product": "vue",
-    "categories": ["javascript-framework"],
+    "categories": [
+      "javascript-framework"
+    ],
     "cpe": "cpe:2.3:a:vuejs:vue",
     "confidence": 55,
-    "scripts": ["(?i)vue(?:@|[-.])([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js"],
-    "html": ["__vue__", "data-v-app"]
+    "scripts": [
+      "(?i)vue(?:@|[-.])([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js",
+      "(?i)/([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)/(?:[^\\\"']*?/)?vue(?:[.-][a-z.]+)?(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)vue(?:\\.js)?\\s+v?([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ],
+    "html": [
+      "__vue__",
+      "data-v-app"
+    ]
   },
   {
     "name": "Angular",
     "product": "angular",
-    "categories": ["javascript-framework"],
+    "categories": [
+      "javascript-framework"
+    ],
     "cpe": "cpe:2.3:a:angular:angular",
     "confidence": 70,
-    "html": ["(?i)ng-version=[\"']([0-9.]+)[\"']", "ng-app="]
+    "html": [
+      "(?i)ng-version=[\"']([0-9.]+)[\"']",
+      "ng-app="
+    ]
   },
   {
     "name": "Next.js",
     "product": "next.js",
-    "categories": ["javascript-framework"],
+    "categories": [
+      "javascript-framework"
+    ],
     "cpe": "cpe:2.3:a:vercel:next.js",
     "confidence": 80,
-    "headers": [{ "name": "x-powered-by", "pattern": "(?i)Next\\.js" }],
-    "html": ["/_next/static/", "__NEXT_DATA__"]
+    "headers": [
+      {
+        "name": "x-powered-by",
+        "pattern": "(?i)Next\\.js"
+      }
+    ],
+    "html": [
+      "/_next/static/",
+      "__NEXT_DATA__"
+    ]
   },
   {
     "name": "nginx",
     "product": "nginx",
-    "categories": ["web-server"],
+    "categories": [
+      "web-server"
+    ],
     "cpe": "cpe:2.3:a:nginx:nginx",
     "confidence": 95,
-    "headers": [{ "name": "server", "pattern": "(?i)nginx(?:/([0-9][0-9.]*))?" }]
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)nginx(?:/([0-9][0-9.]*))?"
+      }
+    ]
   },
   {
     "name": "Apache",
     "product": "apache",
-    "categories": ["web-server"],
+    "categories": [
+      "web-server"
+    ],
     "cpe": "cpe:2.3:a:apache:http_server",
     "confidence": 95,
-    "headers": [{ "name": "server", "pattern": "(?i)Apache(?:/([0-9][0-9.]*))?" }]
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)Apache(?:/([0-9][0-9.]*))?"
+      }
+    ]
   },
   {
     "name": "Apache Tomcat",
     "product": "tomcat",
-    "categories": ["app-server"],
+    "categories": [
+      "app-server"
+    ],
     "cpe": "cpe:2.3:a:apache:tomcat",
     "confidence": 80,
-    "headers": [{ "name": "server", "pattern": "(?i)Apache-Coyote" }],
-    "html": ["(?i)Apache Tomcat/?\\s*([0-9.]+)?"]
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)Apache-Coyote"
+      }
+    ],
+    "html": [
+      "(?i)Apache Tomcat/?\\s*([0-9.]+)?"
+    ]
   },
   {
     "name": "Microsoft IIS",
     "product": "iis",
-    "categories": ["web-server"],
+    "categories": [
+      "web-server"
+    ],
     "cpe": "cpe:2.3:a:microsoft:internet_information_services",
     "confidence": 90,
-    "headers": [{ "name": "server", "pattern": "(?i)Microsoft-IIS(?:/([0-9.]+))?" }]
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)Microsoft-IIS(?:/([0-9.]+))?"
+      }
+    ]
   },
   {
     "name": "PHP",
     "product": "php",
-    "categories": ["language"],
+    "categories": [
+      "language"
+    ],
     "cpe": "cpe:2.3:a:php:php",
     "confidence": 90,
-    "headers": [{ "name": "x-powered-by", "pattern": "(?i)PHP(?:/([0-9][0-9.]*))?" }]
+    "headers": [
+      {
+        "name": "x-powered-by",
+        "pattern": "(?i)PHP(?:/([0-9][0-9.]*))?"
+      }
+    ],
+    "cookies": [
+      "(?i)PHPSESSID="
+    ]
   },
   {
     "name": "ASP.NET",
     "product": "asp.net",
-    "categories": ["framework"],
+    "categories": [
+      "framework"
+    ],
     "cpe": "cpe:2.3:a:microsoft:asp.net",
     "confidence": 85,
     "headers": [
-      { "name": "x-powered-by", "pattern": "(?i)ASP\\.NET" },
-      { "name": "x-aspnet-version", "pattern": "([0-9][0-9.]*)" }
+      {
+        "name": "x-powered-by",
+        "pattern": "(?i)ASP\\.NET"
+      },
+      {
+        "name": "x-aspnet-version",
+        "pattern": "([0-9][0-9.]*)"
+      }
+    ],
+    "cookies": [
+      "(?i)ASP\\.NET_SessionId=",
+      "(?i)\\.ASPXAUTH="
     ]
   },
   {
     "name": "OpenSSL",
     "product": "openssl",
-    "categories": ["crypto"],
+    "categories": [
+      "crypto"
+    ],
     "cpe": "cpe:2.3:a:openssl:openssl",
     "confidence": 85,
-    "headers": [{ "name": "server", "pattern": "(?i)OpenSSL/([0-9][0-9a-z.]*)" }]
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)OpenSSL/([0-9][0-9a-z.]*)"
+      }
+    ]
   },
   {
     "name": "Express",
     "product": "express",
-    "categories": ["framework"],
+    "categories": [
+      "framework"
+    ],
     "cpe": "cpe:2.3:a:openjsf:express",
     "confidence": 80,
-    "headers": [{ "name": "x-powered-by", "pattern": "(?i)Express" }]
+    "headers": [
+      {
+        "name": "x-powered-by",
+        "pattern": "(?i)Express"
+      }
+    ]
   },
   {
     "name": "Laravel",
     "product": "laravel",
-    "categories": ["framework"],
+    "categories": [
+      "framework"
+    ],
     "cpe": "cpe:2.3:a:laravel:laravel",
     "confidence": 70,
-    "cookies": ["(?i)laravel_session="],
-    "html": ["(?i)laravel"]
+    "cookies": [
+      "(?i)laravel_session="
+    ],
+    "html": [
+      "(?i)laravel"
+    ],
+    "implies": [
+      "php"
+    ]
   },
   {
     "name": "Grafana",
     "product": "grafana",
-    "categories": ["monitoring"],
+    "categories": [
+      "monitoring"
+    ],
     "cpe": "cpe:2.3:a:grafana:grafana",
     "confidence": 80,
-    "html": ["(?i)<title>Grafana</title>", "grafanaBootData"]
+    "html": [
+      "(?i)<title>Grafana</title>",
+      "grafanaBootData"
+    ]
   },
   {
     "name": "Kibana",
     "product": "kibana",
-    "categories": ["monitoring"],
+    "categories": [
+      "monitoring"
+    ],
     "cpe": "cpe:2.3:a:elastic:kibana",
     "confidence": 80,
-    "headers": [{ "name": "kbn-name" }],
-    "html": ["(?i)kbn-(?:name|version)"]
+    "headers": [
+      {
+        "name": "kbn-name"
+      }
+    ],
+    "html": [
+      "(?i)kbn-(?:name|version)"
+    ]
   },
   {
     "name": "phpMyAdmin",
     "product": "phpmyadmin",
-    "categories": ["database-admin"],
+    "categories": [
+      "database-admin"
+    ],
     "cpe": "cpe:2.3:a:phpmyadmin:phpmyadmin",
     "confidence": 80,
-    "cookies": ["(?i)phpMyAdmin="],
-    "html": ["(?i)phpMyAdmin"]
+    "cookies": [
+      "(?i)phpMyAdmin="
+    ],
+    "html": [
+      "(?i)phpMyAdmin"
+    ],
+    "implies": [
+      "php"
+    ]
   },
   {
     "name": "Jenkins",
     "product": "jenkins",
-    "categories": ["ci"],
+    "categories": [
+      "ci"
+    ],
     "cpe": "cpe:2.3:a:jenkins:jenkins",
     "confidence": 90,
-    "headers": [{ "name": "x-jenkins", "pattern": "([0-9][0-9.]*)" }]
+    "headers": [
+      {
+        "name": "x-jenkins",
+        "pattern": "([0-9][0-9.]*)"
+      }
+    ]
   },
   {
     "name": "GitLab",
     "product": "gitlab",
-    "categories": ["devops"],
+    "categories": [
+      "devops"
+    ],
     "cpe": "cpe:2.3:a:gitlab:gitlab",
     "confidence": 75,
-    "headers": [{ "name": "x-gitlab-feature-category" }],
-    "html": ["(?i)gon\\.gitlab", "(?i)GitLab"]
+    "headers": [
+      {
+        "name": "x-gitlab-feature-category"
+      }
+    ],
+    "html": [
+      "(?i)gon\\.gitlab",
+      "(?i)GitLab"
+    ]
   },
   {
     "name": "Magento",
     "product": "magento",
-    "categories": ["ecommerce"],
+    "categories": [
+      "ecommerce"
+    ],
     "cpe": "cpe:2.3:a:magento:magento",
     "confidence": 70,
-    "html": ["(?i)Mage\\.Cookies", "/static/version"]
+    "html": [
+      "(?i)Mage\\.Cookies",
+      "/static/version"
+    ],
+    "implies": [
+      "php"
+    ],
+    "cookies": [
+      "(?i)X-Magento-Vary="
+    ],
+    "headers": [
+      {
+        "name": "x-magento-cache-debug"
+      }
+    ]
   },
   {
     "name": "WooCommerce",
     "product": "woocommerce",
-    "categories": ["ecommerce"],
+    "categories": [
+      "ecommerce"
+    ],
     "cpe": "cpe:2.3:a:woocommerce:woocommerce",
     "confidence": 70,
-    "implies": ["wordpress"],
-    "html": ["(?i)woocommerce"]
+    "implies": [
+      "wordpress"
+    ],
+    "html": [
+      "(?i)woocommerce"
+    ]
   },
   {
     "name": "Cloudflare",
     "product": "cloudflare",
-    "categories": ["cdn"],
+    "categories": [
+      "cdn"
+    ],
     "confidence": 90,
     "headers": [
-      { "name": "cf-ray" },
-      { "name": "server", "pattern": "(?i)cloudflare" }
+      {
+        "name": "cf-ray"
+      },
+      {
+        "name": "server",
+        "pattern": "(?i)cloudflare"
+      }
     ]
   },
   {
     "name": "Varnish",
     "product": "varnish",
-    "categories": ["caching"],
+    "categories": [
+      "caching"
+    ],
     "cpe": "cpe:2.3:a:varnish-cache:varnish",
     "confidence": 80,
     "headers": [
-      { "name": "x-varnish" },
-      { "name": "via", "pattern": "(?i)varnish" }
+      {
+        "name": "x-varnish"
+      },
+      {
+        "name": "via",
+        "pattern": "(?i)varnish"
+      }
     ]
   },
   {
     "name": "Microsoft Exchange",
     "product": "exchange",
-    "categories": ["mail"],
+    "categories": [
+      "mail"
+    ],
     "cpe": "cpe:2.3:a:microsoft:exchange_server",
     "confidence": 80,
-    "headers": [{ "name": "x-owa-version", "pattern": "([0-9][0-9.]*)" }],
-    "html": ["(?i)/owa/auth"]
+    "headers": [
+      {
+        "name": "x-owa-version",
+        "pattern": "([0-9][0-9.]*)"
+      }
+    ],
+    "html": [
+      "(?i)/owa/auth"
+    ]
   },
   {
     "name": "Roundcube",
     "product": "roundcube",
-    "categories": ["mail"],
+    "categories": [
+      "mail"
+    ],
     "cpe": "cpe:2.3:a:roundcube:webmail",
     "confidence": 75,
-    "meta": ["(?i)content=[\"']Roundcube"],
-    "html": ["(?i)roundcube"]
+    "meta": [
+      "(?i)content=[\"']Roundcube"
+    ],
+    "html": [
+      "(?i)roundcube"
+    ],
+    "implies": [
+      "php"
+    ]
+  },
+  {
+    "name": "Lodash",
+    "product": "lodash",
+    "categories": [
+      "javascript-library"
+    ],
+    "cpe": "cpe:2.3:a:lodash:lodash",
+    "confidence": 75,
+    "scripts": [
+      "(?i)lodash[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js",
+      "(?i)/([0-9]+\\.[0-9]+\\.[0-9]+)/lodash(?:\\.min)?\\.js",
+      "(?i)\\blodash(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)\\bVERSION\\s*=\\s*[\\\"']([0-9]+\\.[0-9]+\\.[0-9]+)[\\\"']"
+    ]
+  },
+  {
+    "name": "Moment.js",
+    "product": "moment",
+    "categories": [
+      "javascript-library"
+    ],
+    "cpe": "cpe:2.3:a:momentjs:moment",
+    "confidence": 75,
+    "scripts": [
+      "(?i)moment[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js",
+      "(?i)/([0-9]+\\.[0-9]+\\.[0-9]+)/moment(?:\\.min)?\\.js",
+      "(?i)\\bmoment(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)\\.version\\s*=\\s*[\\\"']([0-9]+\\.[0-9]+\\.[0-9]+)[\\\"']"
+    ]
+  },
+  {
+    "name": "AngularJS",
+    "product": "angularjs",
+    "categories": [
+      "javascript-framework"
+    ],
+    "cpe": "cpe:2.3:a:angularjs:angularjs",
+    "confidence": 75,
+    "scripts": [
+      "(?i)angular[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js",
+      "(?i)/([0-9]+\\.[0-9]+\\.[0-9]+)/angular(?:\\.min)?\\.js",
+      "(?i)\\bangular(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)angularjs\\s+v?([0-9]+\\.[0-9]+\\.[0-9]+)",
+      "(?i)full\\s*:\\s*[\\\"']([0-9]+\\.[0-9]+\\.[0-9]+)[\\\"']"
+    ]
+  },
+  {
+    "name": "Underscore.js",
+    "product": "underscore",
+    "categories": [
+      "javascript-library"
+    ],
+    "cpe": "cpe:2.3:a:underscorejs:underscore",
+    "confidence": 70,
+    "scripts": [
+      "(?i)underscore[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js",
+      "(?i)/([0-9]+\\.[0-9]+\\.[0-9]+)/underscore(?:\\.min)?\\.js",
+      "(?i)\\bunderscore(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)underscore\\.js\\s+([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ]
+  },
+  {
+    "name": "Modernizr",
+    "product": "modernizr",
+    "categories": [
+      "javascript-library"
+    ],
+    "cpe": "cpe:2.3:a:modernizr:modernizr",
+    "confidence": 70,
+    "scripts": [
+      "(?i)modernizr[-.]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js",
+      "(?i)\\bmodernizr(?:\\.custom)?(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)modernizr\\s+([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ]
+  },
+  {
+    "name": "Font Awesome",
+    "product": "fontawesome",
+    "categories": [
+      "ui-framework"
+    ],
+    "cpe": "cpe:2.3:a:fontawesome:fontawesome",
+    "confidence": 65,
+    "scripts": [
+      "(?i)font-?awesome[-.]([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)(?:\\.min)?\\.(?:css|js)",
+      "(?i)/([0-9]+\\.[0-9]+\\.[0-9]+)/(?:css|js)/(?:all|fontawesome|font-awesome)",
+      "(?i)\\bfont-?awesome(?:\\.min)?\\.(?:css|js)"
+    ],
+    "js_content": [
+      "(?i)font\\s*awesome\\s+(?:free\\s+|pro\\s+)?([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ]
+  },
+  {
+    "name": "Swiper",
+    "product": "swiper",
+    "categories": [
+      "javascript-library"
+    ],
+    "cpe": "cpe:2.3:a:swiperjs:swiper",
+    "confidence": 65,
+    "scripts": [
+      "(?i)swiper(?:-bundle)?[-.]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.(?:js|css)",
+      "(?i)\\bswiper(?:-bundle)?(?:\\.min)?\\.(?:js|css)"
+    ],
+    "js_content": [
+      "(?i)swiper\\s+v?([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ]
+  },
+  {
+    "name": "TYPO3",
+    "product": "typo3",
+    "categories": [
+      "cms"
+    ],
+    "cpe": "cpe:2.3:a:typo3:typo3",
+    "confidence": 80,
+    "implies": [
+      "php"
+    ],
+    "meta": [
+      "(?i)content=[\\\"']TYPO3\\s*([0-9.]+)?"
+    ],
+    "html": [
+      "(?i)typo3temp/",
+      "(?i)typo3conf/"
+    ]
+  },
+  {
+    "name": "Shopify",
+    "product": "shopify",
+    "categories": [
+      "ecommerce"
+    ],
+    "cpe": null,
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "x-shopify-stage"
+      },
+      {
+        "name": "x-shopid"
+      },
+      {
+        "name": "x-sorting-hat-shopid"
+      }
+    ],
+    "html": [
+      "(?i)cdn\\.shopify\\.com",
+      "(?i)Shopify\\.theme"
+    ]
   }
 ]

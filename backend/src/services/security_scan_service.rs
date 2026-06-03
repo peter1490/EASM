@@ -30,7 +30,7 @@ use crate::{
     },
     repositories::{AssetRepository, SecurityFindingRepository, SecurityScanRepository},
     services::{
-        external::{DnsResolver, EuvdClient, ExternalServicesManager, HttpProber, TlsAnalyzer},
+        external::{DnsResolver, ExternalServicesManager, HttpProber, NvdClient, TlsAnalyzer},
         risk_service::RiskService,
         task_manager::{TaskContext, TaskManager, TaskType},
     },
@@ -44,6 +44,19 @@ use crate::{
 };
 
 const DEFAULT_IP_HTTP_FALLBACK_PORTS: [u16; 4] = [443, 8443, 80, 8080];
+
+/// Cap on how many referenced JS/CSS assets we fetch per page when recovering
+/// version banners for versionless technology detections.
+const MAX_ASSET_FETCHES: usize = 8;
+/// Skip assets larger than this (bytes) when banner-parsing — bounds work/memory.
+const MAX_ASSET_BYTES: usize = 5_000_000;
+/// Browser-like User-Agent for HTTP analysis fetches. Many WAFs/CDNs serve a
+/// challenge or reduced page to obvious bot agents (e.g. the default
+/// `reqwest/x`), which hides the very markup we fingerprint. Presenting a real
+/// browser UA gets the actual page so detection sees what a browser would.
+const BROWSER_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
+     Chrome/124.0.0.0 Safari/537.36";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct HttpTechnologyFingerprint {
@@ -74,7 +87,7 @@ pub struct SecurityScanService {
     dns_resolver: Arc<DnsResolver>,
     http_prober: Arc<HttpProber>,
     tls_analyzer: Arc<TlsAnalyzer>,
-    euvd_client: Arc<EuvdClient>,
+    nvd_client: Arc<NvdClient>,
 
     // Utilities
     task_manager: Arc<TaskManager>,
@@ -94,8 +107,8 @@ impl SecurityScanService {
         task_manager: Arc<TaskManager>,
         settings: SharedSettings,
     ) -> Self {
-        // Create EUVD client for vulnerability lookups
-        let euvd_client = Arc::new(EuvdClient::new().expect("Failed to create EUVD client"));
+        // Create NVD client for vulnerability lookups
+        let nvd_client = Arc::new(NvdClient::new().expect("Failed to create NVD client"));
 
         Self {
             asset_repo,
@@ -105,7 +118,7 @@ impl SecurityScanService {
             external_services,
             dns_resolver,
             http_prober,
-            euvd_client,
+            nvd_client,
             tls_analyzer,
             task_manager,
             settings,
@@ -1146,23 +1159,23 @@ impl SecurityScanService {
             )
             .await?;
 
-            // Check for known vulnerabilities using EUVD API
+            // Check for known vulnerabilities using NVD API
             // Use product name if available (more specific than generic service name)
             let product_for_cve = service_info
                 .and_then(|s| s.product.clone())
                 .unwrap_or_else(|| service_name.clone());
 
             if let Some(ver) = &version {
-                // First, try EUVD API for real-time vulnerability data
-                let euvd_vulns = self
-                    .lookup_vulnerabilities_from_euvd(&product_for_cve, ver)
+                // First, try NVD API for real-time vulnerability data
+                let nvd_vulns = self
+                    .lookup_vulnerabilities_from_nvd(&product_for_cve, ver)
                     .await;
 
-                // Fall back to local database if EUVD fails or returns nothing
-                let vulns = if euvd_vulns.is_empty() {
+                // Fall back to local database if NVD fails or returns nothing
+                let vulns = if nvd_vulns.is_empty() {
                     get_known_vulnerabilities(&product_for_cve, ver)
                 } else {
-                    euvd_vulns
+                    nvd_vulns
                 };
 
                 for vuln in vulns {
@@ -1173,8 +1186,8 @@ impl SecurityScanService {
                         _ => FindingSeverity::Low,
                     };
 
-                    // Generate EUVD link for the CVE
-                    let euvd_url = EuvdClient::get_vulnerability_url(&vuln.cve_id);
+                    // Generate NVD link for the CVE
+                    let nvd_url = NvdClient::vulnerability_url(&vuln.cve_id);
 
                     self.create_finding_with_cvss(
                         scan_id,
@@ -1193,8 +1206,8 @@ impl SecurityScanService {
                             "has_public_exploit": vuln.has_public_exploit,
                             "detection_method": "port_service_detection",
                             "references": vuln.references,
-                            "source_url": euvd_url,
-                            "source_name": "EUVD (ENISA)",
+                            "source_url": nvd_url,
+                            "source_name": "NVD (NIST)",
                         }),
                         vuln.cvss_score, // Pass CVSS score to the finding
                         Some(vec![vuln.cve_id.clone()]), // Pass CVE ID
@@ -1227,7 +1240,7 @@ impl SecurityScanService {
                         severity: vuln.severity.clone(),
                         description: vuln.description.clone(),
                         impact_score: impact,
-                        data: json!({ "cve_id": vuln.cve_id, "cvss_score": vuln.cvss_score, "euvd_url": euvd_url }),
+                        data: json!({ "cve_id": vuln.cve_id, "cvss_score": vuln.cvss_score, "nvd_url": nvd_url }),
                     });
                 }
             }
@@ -1388,6 +1401,7 @@ impl SecurityScanService {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .danger_accept_invalid_certs(true)
+            .user_agent(BROWSER_USER_AGENT)
             .build()
             .map_err(|e| ApiError::HttpClient(e))?;
 
@@ -1430,8 +1444,15 @@ impl SecurityScanService {
 
         // Wappalyzer-style detection across headers, cookies, HTML body, meta
         // tags and script sources — broader than the header-only fingerprints.
-        let detections =
+        let mut detections =
             crate::services::fingerprint::engine().detect(&headers_map, &set_cookies, &body, &url);
+
+        // Thoroughness pass: for JS libraries detected *without* a version (e.g. a
+        // bare `jquery.min.js`), fetch the referenced asset and recover the
+        // version from its embedded banner. This unlocks CVE matching for libs
+        // whose version is only inside the file, not in the URL or HTML.
+        self.enrich_versions_from_assets(&url, &body, &mut detections)
+            .await;
 
         // Build the combined technology stack summary (header + body sources).
         technology_stack = {
@@ -1792,7 +1813,7 @@ impl SecurityScanService {
         })
     }
 
-    /// Look up known CVEs for a detected (product, version) via EUVD (with a
+    /// Look up known CVEs for a detected (product, version) via NVD (with a
     /// local fallback) and record `known_cve` findings, vulnerability results
     /// and risk factors. Shared by the header- and body-based detectors.
     #[allow(clippy::too_many_arguments)]
@@ -1809,13 +1830,11 @@ impl SecurityScanService {
         risk_factors: &mut Vec<RiskFactor>,
         company_id: Uuid,
     ) -> Result<(), ApiError> {
-        let euvd_vulns = self
-            .lookup_vulnerabilities_from_euvd(product, version)
-            .await;
-        let matched_vulns = if euvd_vulns.is_empty() {
+        let nvd_vulns = self.lookup_vulnerabilities_from_nvd(product, version).await;
+        let matched_vulns = if nvd_vulns.is_empty() {
             get_known_vulnerabilities(product, version)
         } else {
-            euvd_vulns
+            nvd_vulns
         };
 
         for vuln in matched_vulns {
@@ -1826,7 +1845,7 @@ impl SecurityScanService {
                 _ => FindingSeverity::Low,
             };
 
-            let euvd_url = EuvdClient::get_vulnerability_url(&vuln.cve_id);
+            let nvd_url = NvdClient::vulnerability_url(&vuln.cve_id);
 
             self.create_finding_with_cvss(
                 scan_id,
@@ -1849,8 +1868,8 @@ impl SecurityScanService {
                     "fingerprint_value": detection_evidence,
                     "detected_version": version,
                     "references": vuln.references,
-                    "source_url": euvd_url,
-                    "source_name": "EUVD (ENISA)",
+                    "source_url": nvd_url,
+                    "source_name": "NVD (NIST)",
                 }),
                 vuln.cvss_score,
                 Some(vec![vuln.cve_id.clone()]),
@@ -1885,12 +1904,167 @@ impl SecurityScanService {
                     "detection_method": detection_method,
                     "product": product,
                     "version": version,
-                    "euvd_url": euvd_url,
+                    "nvd_url": nvd_url,
                 }),
             });
         }
 
         Ok(())
+    }
+
+    /// For technology detections that lack a version but whose product can be
+    /// banner-parsed (e.g. jQuery, Bootstrap, Vue), fetch the referenced JS/CSS
+    /// assets from the page and recover the version from the file's embedded
+    /// banner. Mutates `detections` in place, filling `version` where found.
+    ///
+    /// Bounded for safety: only http(s) assets, internal-IP hosts skipped, at
+    /// most `MAX_ASSET_FETCHES` fetches per page, `MAX_ASSET_BYTES` per asset.
+    async fn enrich_versions_from_assets(
+        &self,
+        page_url: &str,
+        body: &str,
+        detections: &mut [crate::services::fingerprint::TechDetection],
+    ) {
+        use crate::services::fingerprint::engine;
+
+        // Which versionless detections can we recover a version for?
+        let targets: Vec<usize> = detections
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.version.is_none() && engine().supports_asset_version(&d.product))
+            .map(|(i, _)| i)
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+
+        // Resolve candidate asset URLs from the page (absolute, http(s), external).
+        let mut srcs: Vec<String> = Vec::new();
+        for raw in Self::extract_asset_urls(body) {
+            if let Some(abs) = Self::resolve_asset_url(page_url, &raw) {
+                if !Self::asset_host_is_internal(&abs) && !srcs.contains(&abs) {
+                    srcs.push(abs);
+                }
+            }
+        }
+        if srcs.is_empty() {
+            return;
+        }
+
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(6))
+            .danger_accept_invalid_certs(true)
+            .user_agent(BROWSER_USER_AGENT)
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        let mut fetched = 0usize;
+        let mut cache: HashMap<String, String> = HashMap::new();
+
+        for idx in targets {
+            let product = detections[idx].product.clone();
+            for src in &srcs {
+                if fetched >= MAX_ASSET_FETCHES {
+                    return;
+                }
+                // Only fetch assets whose URL references this product.
+                if !src.to_lowercase().contains(&product) {
+                    continue;
+                }
+                let content = if let Some(c) = cache.get(src) {
+                    c.clone()
+                } else {
+                    fetched += 1;
+                    let c = Self::fetch_asset_body(&client, src).await.unwrap_or_default();
+                    cache.insert(src.clone(), c.clone());
+                    c
+                };
+                if content.is_empty() {
+                    continue;
+                }
+                if let Some(version) = engine().version_from_asset(&product, &content) {
+                    tracing::info!(
+                        "Recovered {} version '{}' from asset banner: {}",
+                        product,
+                        version,
+                        src
+                    );
+                    detections[idx].version = Some(version);
+                    detections[idx].source = format!("{}+banner", detections[idx].source);
+                    detections[idx].evidence = format!("version banner in {}", src);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Extract referenced asset URLs from an HTML body — both `<script src>`
+    /// and `<link href>` (stylesheets), so CSS-delivered libraries (Bootstrap,
+    /// Font Awesome) can be banner-parsed alongside JS ones.
+    fn extract_asset_urls(body: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for pat in [
+            r#"(?i)<script\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']"#,
+            r#"(?i)<link\b[^>]*?\bhref\s*=\s*["']([^"']+)["']"#,
+        ] {
+            let re = match regex::Regex::new(pat) {
+                Ok(re) => re,
+                Err(_) => continue,
+            };
+            for caps in re.captures_iter(body) {
+                if let Some(m) = caps.get(1) {
+                    let s = m.as_str().trim();
+                    if !s.is_empty() && !out.iter().any(|x| x == s) {
+                        out.push(s.to_string());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Resolve a possibly-relative asset URL against the page URL, keeping only
+    /// http(s) results.
+    fn resolve_asset_url(base: &str, src: &str) -> Option<String> {
+        let base = url::Url::parse(base).ok()?;
+        let joined = base.join(src.trim()).ok()?;
+        match joined.scheme() {
+            "http" | "https" => Some(joined.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Guard against SSRF to internal hosts: skip assets whose host is an
+    /// internal IP literal.
+    fn asset_host_is_internal(asset_url: &str) -> bool {
+        url::Url::parse(asset_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_string()))
+            .and_then(|h| h.parse::<IpAddr>().ok())
+            .map(is_internal_ip)
+            .unwrap_or(false)
+    }
+
+    /// Fetch an asset body (bounded by size), returning its text.
+    async fn fetch_asset_body(client: &reqwest::Client, url: &str) -> Option<String> {
+        let resp = client.get(url).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        if let Some(len) = resp.content_length() {
+            if len > MAX_ASSET_BYTES as u64 {
+                return None;
+            }
+        }
+        let text = resp.text().await.ok()?;
+        if text.len() > MAX_ASSET_BYTES {
+            Some(text.chars().take(MAX_ASSET_BYTES).collect())
+        } else {
+            Some(text)
+        }
     }
 
     fn extract_http_technology_fingerprints(
@@ -2780,7 +2954,7 @@ impl SecurityScanService {
     }
 
     // ========================================================================
-    // EUVD VULNERABILITY LOOKUP
+    // NVD VULNERABILITY LOOKUP
     // ========================================================================
 
     /// Check if a service name is a generic protocol name (not a specific software product)
@@ -2839,26 +3013,40 @@ impl SecurityScanService {
         GENERIC_PROTOCOLS.contains(&normalized.as_str())
     }
 
-    /// Check if a version string looks like a real software version (not a protocol version)
+    /// Check if a version string is worth a CVE lookup.
+    ///
+    /// This only filters out non-version junk (empty, "unknown", "n/a", a bare
+    /// protocol token). It deliberately accepts *major-only* versions like Drupal
+    /// "10" or PHP "8" — those are real product versions, and NVD matches them.
+    /// Generic protocol *services* (ssh, http, …) are already excluded upstream by
+    /// `is_generic_protocol`, so we don't second-guess "simple" version numbers
+    /// here (doing so wrongly skipped real products such as Drupal 10).
     fn is_valid_software_version(version: &str) -> bool {
-        // Protocol versions are typically simple: 1.0, 1.1, 2.0, 2, 3
-        // Software versions are more complex: 2.4.63, 1.19.0, 8.0.32, 7.4-p1
+        let v = version.trim();
+        if v.is_empty() {
+            return false;
+        }
 
-        // Must have at least 2 dots for a meaningful version (e.g., 2.4.63)
-        // OR have additional qualifiers like -p1, -rc1, etc.
-        let has_multiple_dots = version.matches('.').count() >= 2;
-        let has_qualifiers =
-            version.contains('-') || version.contains('_') || version.contains('+');
-        let is_long_enough = version.len() >= 5; // e.g., "1.2.3" is 5 chars
+        // Parses as a numeric version (e.g. "10", "8", "1.0", "2.4.63", "7.4-p1").
+        if crate::utils::version_rs::Version::from(v).is_some() {
+            return true;
+        }
 
-        // Also accept versions with letters like "8u202" (Java) or "5.7.42-log" (MySQL)
-        let has_letter_prefix_suffix = version.chars().any(|c| c.is_alphabetic());
-
-        has_multiple_dots || has_qualifiers || (is_long_enough && has_letter_prefix_suffix)
+        // Otherwise accept odd-but-real formats that carry a digit plus a letter
+        // or build/patch qualifier (e.g. "8u202", "1.0.2k"), while still rejecting
+        // pure text like "unknown" / "n/a".
+        let has_digit = v.chars().any(|c| c.is_ascii_digit());
+        let has_letter = v.chars().any(|c| c.is_alphabetic());
+        let has_qualifier = v.contains('-') || v.contains('_') || v.contains('+');
+        has_digit && (has_letter || has_qualifier)
     }
 
-    /// Lookup vulnerabilities from EUVD (European Union Vulnerability Database)
-    async fn lookup_vulnerabilities_from_euvd(
+    /// Lookup vulnerabilities from NVD (NIST National Vulnerability Database).
+    ///
+    /// Delegates to a version-aware CPE query (`virtualMatchString`), so NVD
+    /// returns only the CVEs whose affected version ranges cover the detected
+    /// version of this product.
+    async fn lookup_vulnerabilities_from_nvd(
         &self,
         product: &str,
         version: &str,
@@ -2868,7 +3056,7 @@ impl SecurityScanService {
         // Skip CVE search for generic protocol names
         if Self::is_generic_protocol(product) {
             tracing::debug!(
-                "Skipping EUVD lookup for generic protocol '{}' (version '{}')",
+                "Skipping NVD lookup for generic protocol '{}' (version '{}')",
                 product,
                 version
             );
@@ -2878,72 +3066,61 @@ impl SecurityScanService {
         // Skip if version looks like a protocol version rather than software version
         if !Self::is_valid_software_version(version) {
             tracing::debug!(
-                "Skipping EUVD lookup for '{}' - version '{}' appears to be a protocol version",
+                "Skipping NVD lookup for '{}' - version '{}' appears to be a protocol version",
                 product,
                 version
             );
             return Vec::new();
         }
 
-        // Normalize product name for EUVD search
+        // Normalize product name for the NVD CPE lookup
         let normalized_product = product.to_lowercase();
 
         tracing::info!(
-            "Searching EUVD for vulnerabilities in '{}' version '{}'",
+            "Searching NVD for vulnerabilities in '{}' version '{}'",
             normalized_product,
             version
         );
 
-        // Search EUVD for vulnerabilities affecting this product
+        // NVD performs the version-range matching server-side (via a
+        // virtualMatchString CPE query), so results already cover this version.
         match self
-            .euvd_client
-            .search_by_product(&normalized_product, None)
+            .nvd_client
+            .search_affecting(&normalized_product, version)
             .await
         {
-            Ok(euvd_vulns) => {
+            Ok(nvd_vulns) => {
                 let mut results = Vec::new();
 
-                for euvd_vuln in euvd_vulns {
-                    // Check version match first
-                    if !EuvdClient::is_version_affected(&euvd_vuln, &normalized_product, version) {
-                        continue;
-                    } else {
-                        tracing::info!(
-                            "Found vulnerability in '{}' version '{}' - {}",
-                            normalized_product,
-                            version,
-                            euvd_vuln.id.clone().unwrap_or_default()
-                        );
-                    }
+                for nvd_vuln in nvd_vulns {
+                    tracing::info!(
+                        "Found vulnerability in '{}' version '{}' - {}",
+                        normalized_product,
+                        version,
+                        nvd_vuln.id
+                    );
 
-                    // Extract CVE ID from aliases
-                    let cve_id = euvd_vuln
-                        .aliases
-                        .as_ref()
-                        .and_then(|aliases| aliases.iter().find(|a| a.starts_with("CVE-")).cloned())
-                        .or_else(|| euvd_vuln.id.clone())
-                        .unwrap_or_else(|| "Unknown".to_string());
+                    let cve_id = nvd_vuln.id.clone();
 
-                    // Determine severity from CVSS score
-                    let severity = match euvd_vuln.base_score {
+                    // Determine severity from CVSS score (fall back to label)
+                    let severity = match nvd_vuln.base_score {
                         Some(score) if score >= 9.0 => "critical".to_string(),
                         Some(score) if score >= 7.0 => "high".to_string(),
                         Some(score) if score >= 4.0 => "medium".to_string(),
                         Some(_) => "low".to_string(),
-                        None => euvd_vuln
+                        None => nvd_vuln
                             .base_severity
                             .clone()
                             .unwrap_or_else(|| "medium".to_string())
                             .to_lowercase(),
                     };
 
-                    // Build references list
-                    let mut references = euvd_vuln.references.clone();
-                    // Add EUVD link as primary reference
-                    references.insert(0, EuvdClient::get_vulnerability_url(&cve_id));
+                    // Build references list, with the NVD link as primary reference
+                    let mut references = nvd_vuln.references.clone();
+                    references.insert(0, NvdClient::vulnerability_url(&cve_id));
 
                     // Extract title from description or use CVE ID
-                    let title = euvd_vuln
+                    let title = nvd_vuln
                         .description
                         .as_ref()
                         .map(|d| {
@@ -2957,45 +3134,38 @@ impl SecurityScanService {
                         })
                         .unwrap_or_else(|| format!("{} Vulnerability", cve_id));
 
-                    // tracing affected_products
-                    tracing::info!("Affected products: {:?}", euvd_vuln.affected_products);
-
-                    // Update affected versions to show the actual range from EUVD if available
-                    let affected_versions_display =
-                        if let Some(affected_products) = &euvd_vuln.affected_products {
-                            let tmp: Vec<String> = affected_products
-                                .iter()
-                                .map(|ap| ap.product_version.clone())
-                                .collect();
-                            // tracing affected_versions_display
-                            tracing::info!("Affected versions: {}", tmp.join(", "));
-                            tmp
-                        } else {
-                            vec!["Unknown".to_string()]
-                        };
+                    // Show the actual affected version range(s) reported by NVD
+                    let affected_versions_display = match NvdClient::affected_version_ranges(
+                        &nvd_vuln,
+                        &normalized_product,
+                        version,
+                    ) {
+                        ranges if ranges.is_empty() => vec!["Unknown".to_string()],
+                        ranges => {
+                            tracing::info!("Affected versions: {}", ranges.join(", "));
+                            ranges
+                        }
+                    };
 
                     results.push(VulnerabilityInfo {
                         cve_id,
                         title,
-                        description: euvd_vuln
+                        description: nvd_vuln
                             .description
                             .unwrap_or_else(|| "No description available".to_string()),
                         severity,
-                        cvss_score: euvd_vuln.base_score,
-                        cvss_vector: euvd_vuln.base_score_vector,
+                        cvss_score: nvd_vuln.base_score,
+                        cvss_vector: nvd_vuln.base_score_vector,
                         affected_versions: affected_versions_display,
                         references,
-                        exploitable: euvd_vuln.exploited.unwrap_or(false),
-                        has_public_exploit: euvd_vuln.exploited.unwrap_or(false),
+                        exploitable: nvd_vuln.exploited,
+                        has_public_exploit: nvd_vuln.exploited,
                     });
                 }
 
-                // Limit results to avoid too many findings
-                //results.truncate(10);
-
                 if !results.is_empty() {
                     tracing::info!(
-                        "EUVD returned {} vulnerabilities for product '{}' version '{}'",
+                        "NVD returned {} matching vulnerabilities for product '{}' version '{}'",
                         results.len(),
                         product,
                         version
@@ -3005,7 +3175,7 @@ impl SecurityScanService {
                 results
             }
             Err(e) => {
-                tracing::warn!("EUVD lookup failed for {}: {}", product, e);
+                tracing::warn!("NVD lookup failed for {}: {}", product, e);
                 Vec::new()
             }
         }
@@ -3258,7 +3428,7 @@ impl Clone for SecurityScanService {
             dns_resolver: Arc::clone(&self.dns_resolver),
             http_prober: Arc::clone(&self.http_prober),
             tls_analyzer: Arc::clone(&self.tls_analyzer),
-            euvd_client: Arc::clone(&self.euvd_client),
+            nvd_client: Arc::clone(&self.nvd_client),
             task_manager: Arc::clone(&self.task_manager),
             settings: Arc::clone(&self.settings),
         }
@@ -3420,5 +3590,81 @@ mod tests {
         let ip: IpAddr = "127.0.0.1".parse().expect("valid localhost IP");
         let target = SecurityScanService::resolve_http_target_from_ports(ip, &[], &[8080]);
         assert_eq!(target, Some("127.0.0.1:8080".to_string()));
+    }
+
+    #[test]
+    fn version_gate_accepts_major_only_and_rejects_junk() {
+        // Major-only versions are real product versions (Drupal 10, PHP 8) and
+        // must be looked up — this was the regression that hid Drupal 10 CVEs.
+        assert!(SecurityScanService::is_valid_software_version("10"));
+        assert!(SecurityScanService::is_valid_software_version("8"));
+        assert!(SecurityScanService::is_valid_software_version("1.0"));
+        assert!(SecurityScanService::is_valid_software_version("2.4.63"));
+        assert!(SecurityScanService::is_valid_software_version("7.4-p1"));
+        assert!(SecurityScanService::is_valid_software_version("8u202"));
+        assert!(SecurityScanService::is_valid_software_version("1.0.2k"));
+
+        // Non-version junk is still skipped.
+        assert!(!SecurityScanService::is_valid_software_version(""));
+        assert!(!SecurityScanService::is_valid_software_version("unknown"));
+        assert!(!SecurityScanService::is_valid_software_version("n/a"));
+    }
+
+    #[test]
+    fn extracts_asset_urls_from_body() {
+        let body = r#"
+            <script src="js/lib/jquery.min.js"></script>
+            <script type="text/javascript" src='https://cdn.example.com/vue.min.js'></script>
+            <script>var x = 1; // inline, no src</script>
+            <script defer src="js/lib/jquery.min.js"></script>
+            <link rel="stylesheet" href="/css/bootstrap.min.css">
+        "#;
+        let srcs = SecurityScanService::extract_asset_urls(body);
+        // Inline script excluded; duplicate jquery deduped; stylesheet included.
+        assert_eq!(srcs.len(), 3);
+        assert!(srcs.iter().any(|s| s == "js/lib/jquery.min.js"));
+        assert!(srcs.iter().any(|s| s == "https://cdn.example.com/vue.min.js"));
+        assert!(srcs.iter().any(|s| s == "/css/bootstrap.min.css"));
+    }
+
+    #[test]
+    fn resolves_relative_and_absolute_asset_urls() {
+        assert_eq!(
+            SecurityScanService::resolve_asset_url(
+                "https://site.test/some/page",
+                "js/lib/jquery.min.js"
+            ),
+            Some("https://site.test/some/js/lib/jquery.min.js".to_string())
+        );
+        assert_eq!(
+            SecurityScanService::resolve_asset_url("https://site.test/", "/static/jquery.js"),
+            Some("https://site.test/static/jquery.js".to_string())
+        );
+        assert_eq!(
+            SecurityScanService::resolve_asset_url("https://site.test/", "https://cdn.x/vue.js"),
+            Some("https://cdn.x/vue.js".to_string())
+        );
+        // Non-http(s) schemes are rejected.
+        assert_eq!(
+            SecurityScanService::resolve_asset_url("https://site.test/", "data:application/js,1"),
+            None
+        );
+    }
+
+    #[test]
+    fn asset_internal_host_guard_blocks_internal_ips() {
+        assert!(SecurityScanService::asset_host_is_internal(
+            "http://127.0.0.1/jquery.js"
+        ));
+        assert!(SecurityScanService::asset_host_is_internal(
+            "http://10.0.0.5/jquery.min.js"
+        ));
+        assert!(SecurityScanService::asset_host_is_internal(
+            "http://192.168.1.1/x.js"
+        ));
+        // Public CDN host (non-IP) is allowed.
+        assert!(!SecurityScanService::asset_host_is_internal(
+            "https://code.jquery.com/jquery-3.6.0.min.js"
+        ));
     }
 }

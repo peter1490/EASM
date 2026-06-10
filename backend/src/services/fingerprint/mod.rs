@@ -650,6 +650,9 @@ mod tests {
         assert_eq!(engine().version_from_asset("moment", r#"e.version="2.29.4",e.fn"#).as_deref(), Some("2.29.4"));
         assert_eq!(engine().version_from_asset("angularjs", "/*! AngularJS v1.8.2 */").as_deref(), Some("1.8.2"));
         assert_eq!(engine().version_from_asset("underscore", "//     Underscore.js 1.13.6").as_deref(), Some("1.13.6"));
+        assert_eq!(engine().version_from_asset("axios", "// axios v1.6.2").as_deref(), Some("1.6.2"));
+        assert_eq!(engine().version_from_asset("three.js", "const REVISION = '158';").as_deref(), Some("158"));
+        assert_eq!(engine().version_from_asset("chart.js", "/*! Chart.js v4.4.1 */").as_deref(), Some("4.4.1"));
     }
 
     #[test]
@@ -748,5 +751,67 @@ mod tests {
         let dets = engine().detect(&h, &[], "", "https://x");
         let express = find(&dets, "express").expect("express detected");
         assert!(express.version.is_none());
+    }
+
+    #[test]
+    fn detects_webpack_from_runtime_chunk() {
+        let body = r#"<script src="/static/js/runtime.8f3a9c2b1d.js"></script>"#;
+        let dets = engine().detect(&HashMap::new(), &[], body, "https://x");
+        let w = find(&dets, "webpack").expect("webpack detected from runtime chunk");
+        // Bundled-asset detection is presence-only; the bundle does not expose a version.
+        assert_eq!(w.version, None);
+    }
+
+    #[test]
+    fn detects_webpack_from_inline_marker() {
+        let body = r#"<script>window.webpackChunk_app=[];__webpack_require__(0);</script>"#;
+        let dets = engine().detect(&HashMap::new(), &[], body, "https://x");
+        assert!(find(&dets, "webpack").is_some());
+    }
+
+    #[test]
+    fn does_not_flag_webpack_on_plain_main_js() {
+        // A generic, unhashed main.js with no webpack runtime marker must not trip
+        // the bundled-SPA heuristic.
+        let body = r#"<script src="/js/main.js"></script>"#;
+        let dets = engine().detect(&HashMap::new(), &[], body, "https://x");
+        assert!(find(&dets, "webpack").is_none());
+    }
+
+    #[test]
+    fn detects_new_libs_versionless_from_bare_filenames() {
+        for (src, product) in [
+            ("/js/chart.umd.js", "chart.js"),
+            ("/vendor/d3.min.js", "d3"),
+            ("/js/gsap.min.js", "gsap"),
+            ("/js/select2.full.min.js", "select2"),
+            ("/js/axios.min.js", "axios"),
+            ("/js/three.module.js", "three.js"),
+        ] {
+            let body = format!(r#"<script src="{}"></script>"#, src);
+            let dets = engine().detect(&HashMap::new(), &[], &body, "https://x");
+            let d = find(&dets, product)
+                .unwrap_or_else(|| panic!("{} not detected from {}", product, src));
+            assert_eq!(d.version, None, "{} should be versionless from {}", product, src);
+        }
+    }
+
+    #[test]
+    fn detects_new_libs_versioned_from_filename_and_cdn() {
+        let b1 = r#"<script src="/lib/axios-1.6.2.min.js"></script>"#;
+        assert_eq!(
+            find(&engine().detect(&HashMap::new(), &[], b1, "https://x"), "axios")
+                .and_then(|d| d.version.clone())
+                .as_deref(),
+            Some("1.6.2")
+        );
+        let b2 =
+            r#"<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>"#;
+        assert_eq!(
+            find(&engine().detect(&HashMap::new(), &[], b2, "https://x"), "d3")
+                .and_then(|d| d.version.clone())
+                .as_deref(),
+            Some("7.8.5")
+        );
     }
 }

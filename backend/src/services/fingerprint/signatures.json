@@ -700,5 +700,227 @@
       "(?i)cdn\\.shopify\\.com",
       "(?i)Shopify\\.theme"
     ]
+  },
+  {
+    "name": "webpack",
+    "product": "webpack",
+    "categories": [
+      "build-tool",
+      "spa"
+    ],
+    "cpe": null,
+    "confidence": 50,
+    "scripts": [
+      "(?i)\\bruntime[.~][0-9a-f]{8,}\\.js",
+      "(?i)\\bvendors[.~][^\\\"'/]*\\.js",
+      "(?i)\\b[0-9]+\\.[0-9a-f]{8,}\\.chunk\\.js",
+      "(?i)\\bmain\\.[0-9a-f]{8,}\\.chunk\\.js"
+    ],
+    "html": [
+      "webpackJsonp",
+      "(?i)webpackChunk",
+      "__webpack_require__"
+    ]
+  },
+  {
+    "name": "Chart.js",
+    "product": "chart.js",
+    "categories": [
+      "javascript-library"
+    ],
+    "cpe": null,
+    "confidence": 65,
+    "scripts": [
+      "(?i)chart(?:\\.min)?[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js",
+      "(?i)/([0-9]+\\.[0-9]+\\.[0-9]+)/(?:[^\\\"']*?/)?chart(?:\\.min|\\.umd)?\\.js",
+      "(?i)\\bchart(?:\\.min|\\.umd)?\\.js\\?(?:ver|v)=([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
+      "(?i)\\bchart\\.(?:umd\\.)?(?:min\\.)?js"
+    ],
+    "js_content": [
+      "(?i)chart\\.js\\s+v?([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ]
+  },
+  {
+    "name": "D3.js",
+    "product": "d3",
+    "categories": [
+      "javascript-library",
+      "data-visualization"
+    ],
+    "cpe": null,
+    "confidence": 65,
+    "scripts": [
+      "(?i)\\bd3[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js",
+      "(?i)/([0-9]+\\.[0-9]+\\.[0-9]+)/(?:[^\\\"']*?/)?d3(?:\\.min)?\\.js",
+      "(?i)\\bd3(?:\\.min)?\\.js\\?(?:ver|v)=([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
+      "(?i)\\bd3(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)\\bd3\\b[^\\n]{0,40}?\\bversion\\b[\"':=\\s]+([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ]
+  },
+  {
+    "name": "GSAP",
+    "product": "gsap",
+    "categories": [
+      "javascript-library",
+      "animation"
+    ],
+    "cpe": null,
+    "confidence": 65,
+    "scripts": [
+      "(?i)\\bgsap[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js",
+      "(?i)/([0-9]+\\.[0-9]+\\.[0-9]+)/(?:[^\\\"']*?/)?gsap(?:\\.min)?\\.js",
+      "(?i)\\bgsap(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)gsap\\s+([0-9]+\\.[0-9]+\\.[0-9]+)",
+      "(?i)\\bGreenSock\\b[^\\n]{0,40}?([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ]
+  },
+  {
+    "name": "Select2",
+    "product": "select2",
+    "categories": [
+      "javascript-library",
+      "ui-component"
+    ],
+    "cpe": null,
+    "confidence": 65,
+    "scripts": [
+      "(?i)select2[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.(?:js|css)",
+      "(?i)/([0-9]+\\.[0-9]+\\.[0-9]+)/(?:[^\\\"']*?/)?select2(?:\\.full)?(?:\\.min)?\\.(?:js|css)",
+      "(?i)\\bselect2(?:\\.full)?(?:\\.min)?\\.(?:js|css)"
+    ],
+    "js_content": [
+      "(?i)select2[^\\n]{0,30}?version[\"':=\\s]+([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ]
+  },
+  {
+    "name": "Three.js",
+    "product": "three.js",
+    "categories": [
+      "javascript-library",
+      "3d-graphics"
+    ],
+    "cpe": null,
+    "confidence": 65,
+    "scripts": [
+      "(?i)\\bthree(?:\\.module)?[-.@]r?([0-9]+(?:\\.[0-9]+){0,2})(?:\\.min)?\\.js",
+      "(?i)/r?([0-9]+(?:\\.[0-9]+){0,2})/(?:[^\\\"']*?/)?three(?:\\.module)?(?:\\.min)?\\.js",
+      "(?i)\\bthree(?:\\.module)?(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)\\bREVISION\\s*[=:]\\s*[\"']?r?([0-9]+(?:\\.[0-9]+){0,2})"
+    ]
+  },
+  {
+    "name": "Slick Carousel",
+    "product": "slick",
+    "categories": [
+      "javascript-library",
+      "ui-component"
+    ],
+    "cpe": null,
+    "confidence": 60,
+    "scripts": [
+      "(?i)slick[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.(?:js|css)",
+      "(?i)/([0-9]+\\.[0-9]+\\.[0-9]+)/(?:[^\\\"']*?/)?slick(?:\\.min)?\\.(?:js|css)",
+      "(?i)\\bslick(?:\\.min)?\\.(?:js|css)"
+    ],
+    "js_content": [
+      "(?i)slick(?:\\.js)?\\s+v?([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ]
+  },
+  {
+    "name": "Popper.js",
+    "product": "popper",
+    "categories": [
+      "javascript-library"
+    ],
+    "cpe": null,
+    "confidence": 55,
+    "scripts": [
+      "(?i)popper[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js",
+      "(?i)/([0-9]+\\.[0-9]+\\.[0-9]+)/(?:[^\\\"']*?/)?popper(?:\\.min)?\\.js",
+      "(?i)\\bpopper(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)@popperjs/core\\s+v?([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ]
+  },
+  {
+    "name": "Alpine.js",
+    "product": "alpine.js",
+    "categories": [
+      "javascript-framework"
+    ],
+    "cpe": null,
+    "confidence": 65,
+    "scripts": [
+      "(?i)alpine(?:js)?[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js",
+      "(?i)/([0-9]+\\.[0-9]+\\.[0-9]+)/(?:[^\\\"']*?/)?alpine(?:js)?(?:\\.min)?\\.js",
+      "(?i)\\balpine(?:js)?(?:\\.min)?\\.js"
+    ],
+    "html": [
+      "(?i)\\bx-data\\s*=",
+      "(?i)@alpinejs/"
+    ],
+    "js_content": [
+      "(?i)alpine[^\\n]{0,20}?version[\"':=\\s]+([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ]
+  },
+  {
+    "name": "Axios",
+    "product": "axios",
+    "categories": [
+      "javascript-library",
+      "http-client"
+    ],
+    "cpe": "cpe:2.3:a:axios:axios",
+    "confidence": 65,
+    "scripts": [
+      "(?i)axios[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js",
+      "(?i)/([0-9]+\\.[0-9]+\\.[0-9]+)/(?:[^\\\"']*?/)?axios(?:\\.min)?\\.js",
+      "(?i)\\baxios(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)axios\\s+v?([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ]
+  },
+  {
+    "name": "Day.js",
+    "product": "dayjs",
+    "categories": [
+      "javascript-library"
+    ],
+    "cpe": null,
+    "confidence": 60,
+    "scripts": [
+      "(?i)dayjs[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js",
+      "(?i)/([0-9]+\\.[0-9]+\\.[0-9]+)/(?:[^\\\"']*?/)?dayjs(?:\\.min)?\\.js",
+      "(?i)\\bdayjs(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)dayjs[^\\n]{0,20}?version[\"':=\\s]+([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ]
+  },
+  {
+    "name": "Backbone.js",
+    "product": "backbone",
+    "categories": [
+      "javascript-framework"
+    ],
+    "cpe": null,
+    "confidence": 60,
+    "scripts": [
+      "(?i)backbone[-.@]([0-9]+\\.[0-9]+\\.[0-9]+)(?:\\.min)?\\.js",
+      "(?i)/([0-9]+\\.[0-9]+\\.[0-9]+)/(?:[^\\\"']*?/)?backbone(?:\\.min)?\\.js",
+      "(?i)\\bbackbone(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)backbone\\.VERSION\\s*=\\s*[\"']([0-9]+\\.[0-9]+\\.[0-9]+)",
+      "(?i)backbone\\.js\\s+([0-9]+\\.[0-9]+\\.[0-9]+)"
+    ]
   }
 ]

@@ -1,13 +1,9 @@
-import LoadingSpinner from "@/components/ui/LoadingSpinner";
+import { LoadingBlock } from "@/components/kit/States";
 
 export default function Loading() {
   return (
-    <div className="flex items-center justify-center min-h-[70vh]">
-      <div className="text-center">
-        <LoadingSpinner size="lg" />
-        <p className="mt-4 text-muted-foreground">Loading...</p>
-      </div>
+    <div className="h-full grid place-items-center">
+      <LoadingBlock />
     </div>
   );
 }
-

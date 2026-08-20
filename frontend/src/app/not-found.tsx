@@ -1,25 +1,21 @@
 import Link from "next/link";
-import Button from "@/components/ui/Button";
-import { Card, CardContent } from "@/components/ui/Card";
 
 export default function NotFound() {
   return (
-    <div className="flex items-center justify-center min-h-[70vh]">
-      <Card className="max-w-md">
-        <CardContent className="py-12 text-center">
-          <div className="text-6xl mb-4">🔍</div>
-          <h1 className="text-3xl font-bold mb-2">Page Not Found</h1>
-          <p className="text-muted-foreground mb-6">
-            The page you&apos;re looking for doesn&apos;t exist or has been moved.
-          </p>
-          <Link href="/">
-            <Button size="lg">
-              Return to Dashboard
-            </Button>
-          </Link>
-        </CardContent>
-      </Card>
+    <div className="h-full grid place-items-center px-6">
+      <div className="text-center max-w-md">
+        <div className="mono text-[11px] tracking-[0.1em] uppercase text-ink-3">404</div>
+        <h1 className="text-[23px] font-semibold tracking-[-0.025em] mt-2">This page does not exist</h1>
+        <p className="text-[12.5px] text-ink-2 mt-2">
+          The link may be stale, or the record may belong to a different company than the one you have active.
+        </p>
+        <Link
+          href="/"
+          className="inline-flex items-center h-[30px] px-3 mt-5 rounded-md border border-rule-2 bg-surface text-[12.5px] font-medium hover:bg-surface-2"
+        >
+          Back to Overview
+        </Link>
+      </div>
     </div>
   );
 }
-

@@ -97,6 +97,17 @@ pub async fn reindex_all(
     State(app_state): State<AppState>,
     Extension(user): Extension<UserContext>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Rebuilding the whole index is expensive and disruptive; it was reachable
+    // by any authenticated user, including a Viewer, with only a rate limiter
+    // in front of it.
+    if !user.has_role(crate::auth::rbac::Role::Operator)
+        && !user.has_role(crate::auth::rbac::Role::Admin)
+    {
+        return Err(ApiError::Authorization(
+            "Operator role or higher required to rebuild the search index".to_string(),
+        ));
+    }
+
     let company_id = user
         .company_id
         .ok_or_else(|| ApiError::Authorization("Company scope required for reindex".to_string()))?;

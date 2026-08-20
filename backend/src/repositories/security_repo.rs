@@ -16,6 +16,20 @@ use crate::{
 // Security Scan Repository
 // ============================================================================
 
+/// Every finding read path selects through this, so a finding always arrives
+/// with the asset it belongs to. Without it a findings table has to resolve
+/// each distinct `asset_id` separately just to print a hostname.
+const FINDING_SELECT: &str = r#"
+            SELECT f.*, a.identifier AS asset_value, a.asset_type::text AS asset_type
+            FROM security_findings f
+            JOIN assets a ON a.id = f.asset_id
+        "#;
+
+/// `severity` is a VARCHAR, so `ORDER BY severity` sorts alphabetically and puts
+/// `info` above `medium` and `low`. Order by rank instead.
+const SEVERITY_RANK_ORDER: &str =
+    "CASE f.severity WHEN 'critical' THEN 5 WHEN 'high' THEN 4 WHEN 'medium' THEN 3 WHEN 'low' THEN 2 ELSE 1 END";
+
 #[async_trait]
 pub trait SecurityScanRepository: Send + Sync {
     async fn create(
@@ -28,6 +42,7 @@ pub trait SecurityScanRepository: Send + Sync {
         id: &Uuid,
         company_id: Uuid,
     ) -> Result<Option<SecurityScan>, ApiError>;
+
     async fn list_by_asset(
         &self,
         asset_id: &Uuid,
@@ -45,6 +60,17 @@ pub trait SecurityScanRepository: Send + Sync {
         offset: i64,
         company_id: Uuid,
     ) -> Result<Vec<SecurityScan>, ApiError>;
+    /// Scan list with optional status/type filters, each row carrying its asset
+    /// and finding count, plus the total for pagination.
+    async fn list_filtered(
+        &self,
+        limit: i64,
+        offset: i64,
+        asset_id: Option<Uuid>,
+        statuses: Option<Vec<String>>,
+        scan_types: Option<Vec<String>>,
+        company_id: Uuid,
+    ) -> Result<(Vec<SecurityScan>, i64), ApiError>;
     async fn update_status(
         &self,
         id: &Uuid,
@@ -196,6 +222,76 @@ impl SecurityScanRepository for SqlxSecurityScanRepository {
         .await?;
 
         Ok(rows)
+    }
+
+    async fn list_filtered(
+        &self,
+        limit: i64,
+        offset: i64,
+        asset_id: Option<Uuid>,
+        statuses: Option<Vec<String>>,
+        scan_types: Option<Vec<String>>,
+        company_id: Uuid,
+    ) -> Result<(Vec<SecurityScan>, i64), ApiError> {
+        // `result_summary` is returned in full. It is heavy — TLS chains,
+        // detected services, DNS records — and a queue table shows none of it,
+        // but the asset detail's technology/port panel and activity timeline
+        // both read it off this list. Narrowing it here silently emptied them.
+        // Slimming this is worth doing behind an explicit `fields` parameter,
+        // not by guessing what callers need.
+        let predicates = r#"
+            WHERE s.company_id = $1
+              AND ($2::uuid IS NULL OR s.asset_id = $2)
+              AND ($3::text[] IS NULL OR s.status = ANY($3))
+              AND ($4::text[] IS NULL OR s.scan_type = ANY($4))
+        "#;
+
+        let query_sql = format!(
+            r#"
+            SELECT
+                s.id, s.asset_id, s.scan_type, s.status, s.trigger_type, s.priority,
+                s.started_at, s.completed_at, s.note, s.config, s.company_id,
+                s.created_at, s.updated_at,
+                s.result_summary,
+                a.identifier AS asset_value,
+                a.asset_type::text AS asset_type,
+                (
+                    SELECT COUNT(*) FROM security_findings f
+                    WHERE f.security_scan_id = s.id AND f.company_id = s.company_id
+                ) AS findings_count
+            FROM security_scans s
+            JOIN assets a ON a.id = s.asset_id
+            {predicates}
+            ORDER BY s.created_at DESC
+            LIMIT $5 OFFSET $6
+            "#,
+            predicates = predicates,
+        );
+
+        let rows = sqlx::query_as::<_, SecurityScan>(&query_sql)
+            .bind(company_id)
+            .bind(asset_id)
+            .bind(statuses.as_ref().map(|v| v.as_slice()))
+            .bind(scan_types.as_ref().map(|v| v.as_slice()))
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM security_scans s JOIN assets a ON a.id = s.asset_id{predicates}",
+            predicates = predicates,
+        );
+
+        let total = sqlx::query_scalar::<_, i64>(&count_sql)
+            .bind(company_id)
+            .bind(asset_id)
+            .bind(statuses.as_ref().map(|v| v.as_slice()))
+            .bind(scan_types.as_ref().map(|v| v.as_slice()))
+            .fetch_one(&self.pool)
+            .await?;
+
+        Ok((rows, total))
     }
 
     async fn update_status(
@@ -356,6 +452,7 @@ pub trait SecurityFindingRepository: Send + Sync {
         filter: &SecurityFindingFilter,
         company_id: Uuid,
     ) -> Result<(Vec<SecurityFinding>, i64), ApiError>;
+
     async fn update(
         &self,
         id: &Uuid,
@@ -511,9 +608,9 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         limit: i64,
         company_id: Uuid,
     ) -> Result<Vec<SecurityFinding>, ApiError> {
-        let rows = sqlx::query_as::<_, SecurityFinding>(
-            "SELECT * FROM security_findings WHERE asset_id = $1 AND company_id = $2 ORDER BY first_seen_at DESC LIMIT $3"
-        )
+        let rows = sqlx::query_as::<_, SecurityFinding>(&format!(
+            "{FINDING_SELECT} WHERE f.asset_id = $1 AND f.company_id = $2 ORDER BY f.first_seen_at DESC LIMIT $3"
+        ))
         .bind(asset_id)
         .bind(company_id)
         .bind(limit)
@@ -528,9 +625,10 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         scan_id: &Uuid,
         company_id: Uuid,
     ) -> Result<Vec<SecurityFinding>, ApiError> {
-        let rows = sqlx::query_as::<_, SecurityFinding>(
-            "SELECT * FROM security_findings WHERE security_scan_id = $1 AND company_id = $2 ORDER BY severity, first_seen_at DESC"
-        )
+        let rows = sqlx::query_as::<_, SecurityFinding>(&format!(
+            "{FINDING_SELECT} WHERE f.security_scan_id = $1 AND f.company_id = $2 \
+             ORDER BY {SEVERITY_RANK_ORDER} DESC, f.first_seen_at DESC"
+        ))
         .bind(scan_id)
         .bind(company_id)
         .fetch_all(&self.pool)
@@ -544,43 +642,83 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         filter: &SecurityFindingFilter,
         company_id: Uuid,
     ) -> Result<(Vec<SecurityFinding>, i64), ApiError> {
-        // Filters are applied via parameterized query below.
+        // Every field on SecurityFindingFilter is honoured here. Seven of them
+        // used to be accepted and silently dropped — most visibly `scan_ids`,
+        // so `?scan_id=X` returned every finding in the company with a 200.
+        let sort_expression = match filter.sort_by.as_str() {
+            "severity" => SEVERITY_RANK_ORDER,
+            "cvss_score" => "f.cvss_score",
+            "last_seen_at" => "f.last_seen_at",
+            "status" => "f.status",
+            // Anything unrecognised falls back rather than being interpolated.
+            _ => "f.first_seen_at",
+        };
+        let direction = if filter.sort_direction.eq_ignore_ascii_case("asc") {
+            "ASC"
+        } else {
+            "DESC"
+        };
 
-        let rows = sqlx::query_as::<_, SecurityFinding>(
-            r#"
-            SELECT * FROM security_findings 
-            WHERE company_id = $6
-              AND ($1::uuid[] IS NULL OR asset_id = ANY($1))
-              AND ($2::text[] IS NULL OR severity = ANY($2))
-              AND ($3::text[] IS NULL OR status = ANY($3))
-            ORDER BY first_seen_at DESC
-            LIMIT $4 OFFSET $5
-            "#,
-        )
-        .bind(filter.asset_ids.as_ref().map(|v| v.as_slice()))
-        .bind(filter.severities.as_ref().map(|v| v.as_slice()))
-        .bind(filter.statuses.as_ref().map(|v| v.as_slice()))
-        .bind(filter.limit)
-        .bind(filter.offset)
-        .bind(company_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let predicates = r#"
+            WHERE f.company_id = $10
+              AND ($1::uuid[] IS NULL OR f.asset_id = ANY($1))
+              AND ($2::text[] IS NULL OR f.severity = ANY($2))
+              AND ($3::text[] IS NULL OR f.status = ANY($3))
+              AND ($4::uuid[] IS NULL OR f.security_scan_id = ANY($4))
+              AND ($5::text[] IS NULL OR f.finding_type = ANY($5))
+              AND ($6::text IS NULL OR f.title ILIKE $6 OR f.description ILIKE $6 OR f.finding_type ILIKE $6)
+              AND ($7::timestamptz IS NULL OR f.first_seen_at >= $7)
+              AND ($8::timestamptz IS NULL OR f.first_seen_at <= $8)
+              AND ($9::text[] IS NULL OR a.asset_type::text = ANY($9))
+        "#;
 
-        let total = sqlx::query_scalar::<_, i64>(
-            r#"
-            SELECT COUNT(*) FROM security_findings 
-            WHERE company_id = $4
-              AND ($1::uuid[] IS NULL OR asset_id = ANY($1))
-              AND ($2::text[] IS NULL OR severity = ANY($2))
-              AND ($3::text[] IS NULL OR status = ANY($3))
-            "#,
-        )
-        .bind(filter.asset_ids.as_ref().map(|v| v.as_slice()))
-        .bind(filter.severities.as_ref().map(|v| v.as_slice()))
-        .bind(filter.statuses.as_ref().map(|v| v.as_slice()))
-        .bind(company_id)
-        .fetch_one(&self.pool)
-        .await?;
+        let search_pattern = filter
+            .search_text
+            .as_ref()
+            .map(|text| format!("%{}%", text.replace('%', "\\%").replace('_', "\\_")));
+
+        let query_sql = format!(
+            "{select}{predicates} ORDER BY {sort} {direction} NULLS LAST, f.first_seen_at DESC LIMIT $11 OFFSET $12",
+            select = FINDING_SELECT,
+            predicates = predicates,
+            sort = sort_expression,
+            direction = direction,
+        );
+
+        let rows = sqlx::query_as::<_, SecurityFinding>(&query_sql)
+            .bind(filter.asset_ids.as_ref().map(|v| v.as_slice()))
+            .bind(filter.severities.as_ref().map(|v| v.as_slice()))
+            .bind(filter.statuses.as_ref().map(|v| v.as_slice()))
+            .bind(filter.scan_ids.as_ref().map(|v| v.as_slice()))
+            .bind(filter.finding_types.as_ref().map(|v| v.as_slice()))
+            .bind(search_pattern.as_deref())
+            .bind(filter.created_after)
+            .bind(filter.created_before)
+            .bind(filter.asset_types.as_ref().map(|v| v.as_slice()))
+            .bind(company_id)
+            .bind(filter.limit)
+            .bind(filter.offset)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM security_findings f JOIN assets a ON a.id = f.asset_id{predicates}",
+            predicates = predicates,
+        );
+
+        let total = sqlx::query_scalar::<_, i64>(&count_sql)
+            .bind(filter.asset_ids.as_ref().map(|v| v.as_slice()))
+            .bind(filter.severities.as_ref().map(|v| v.as_slice()))
+            .bind(filter.statuses.as_ref().map(|v| v.as_slice()))
+            .bind(filter.scan_ids.as_ref().map(|v| v.as_slice()))
+            .bind(filter.finding_types.as_ref().map(|v| v.as_slice()))
+            .bind(search_pattern.as_deref())
+            .bind(filter.created_after)
+            .bind(filter.created_before)
+            .bind(filter.asset_types.as_ref().map(|v| v.as_slice()))
+            .bind(company_id)
+            .fetch_one(&self.pool)
+            .await?;
 
         Ok((rows, total))
     }
@@ -589,12 +727,17 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         &self,
         id: &Uuid,
         update: &SecurityFindingUpdate,
-        _updated_by: Option<Uuid>,
+        updated_by: Option<Uuid>,
         company_id: Uuid,
     ) -> Result<SecurityFinding, ApiError> {
         let now = Utc::now();
         let status = update.status.as_ref().map(|s| s.to_string());
 
+        // Resolution bookkeeping belongs to whichever path sets the status.
+        // It used to live only in `resolve()`, so a finding resolved through
+        // this method — which is what the bulk endpoint calls — ended up
+        // `status = 'resolved'` with a NULL `resolved_at`, and reopening one
+        // left a stale resolution date behind.
         let row = sqlx::query_as::<_, SecurityFinding>(
             r#"
             UPDATE security_findings 
@@ -602,7 +745,17 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
                 description = COALESCE($3, description),
                 remediation = COALESCE($4, remediation),
                 tags = COALESCE($5, tags),
-                updated_at = $6
+                updated_at = $6,
+                resolved_at = CASE
+                    WHEN $2 IS NULL THEN resolved_at
+                    WHEN $2 IN ('resolved', 'false_positive') THEN COALESCE(resolved_at, $6)
+                    ELSE NULL
+                END,
+                resolved_by = CASE
+                    WHEN $2 IS NULL THEN resolved_by
+                    WHEN $2 IN ('resolved', 'false_positive') THEN COALESCE(resolved_by, $8)
+                    ELSE NULL
+                END
             WHERE id = $1 AND company_id = $7
             RETURNING *
             "#,
@@ -614,6 +767,7 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         .bind(update.tags.as_ref().map(|v| v.as_slice()))
         .bind(now)
         .bind(company_id)
+        .bind(updated_by)
         .fetch_one(&self.pool)
         .await?;
 
@@ -675,7 +829,8 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
         company_id: Uuid,
     ) -> Result<std::collections::HashMap<String, i64>, ApiError> {
         let rows = sqlx::query_as::<_, (String, i64)>(
-            "SELECT severity, COUNT(*) FROM security_findings WHERE status != 'resolved' AND company_id = $1 GROUP BY severity"
+            "SELECT severity, COUNT(*) FROM security_findings \
+             WHERE status IN ('open', 'acknowledged', 'in_progress') AND company_id = $1 GROUP BY severity"
         )
         .bind(company_id)
         .fetch_all(&self.pool)
@@ -712,7 +867,8 @@ impl SecurityFindingRepository for SqlxSecurityFindingRepository {
 
     async fn count_active(&self, company_id: Uuid) -> Result<i64, ApiError> {
         let count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM security_findings WHERE status NOT IN ('resolved', 'false_positive') AND company_id = $1",
+            "SELECT COUNT(*) FROM security_findings \
+             WHERE status IN ('open', 'acknowledged', 'in_progress') AND company_id = $1",
         )
         .bind(company_id)
         .fetch_one(&self.pool)

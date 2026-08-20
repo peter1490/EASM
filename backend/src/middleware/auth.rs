@@ -10,6 +10,36 @@ use axum::{
 };
 use axum_extra::extract::cookie::PrivateCookieJar;
 
+/// Fold the active company's membership role into the request's role set.
+///
+/// `user_roles` — the table the session is built from — holds *global*
+/// roles, and migration 025 moved every row in it to `global_admin`. Day to
+/// day access is granted per company in `user_companies`, which nothing
+/// outside `require_company_admin` ever read. The result was that every
+/// `has_role(Role::Analyst | Operator | Admin)` gate in the codebase —
+/// finding triage, asset importance and comments, tagging, the blacklist,
+/// risk recalculation, search reindex — answered 403 for everyone except a
+/// global admin, however the company had been set up.
+///
+/// The company role is merged here so those gates mean what the membership
+/// UI says they mean. `global_admin` is deliberately not reachable this
+/// way: it is a system role, and `user_companies.role` is a plain VARCHAR.
+fn merge_company_role(roles: &mut Vec<crate::auth::rbac::Role>, company_role: Option<&str>) {
+    let Some(parsed) = company_role.and_then(crate::auth::rbac::Role::from_str) else {
+        return;
+    };
+    if parsed == crate::auth::rbac::Role::GlobalAdmin {
+        tracing::warn!(
+            role = %company_role.unwrap_or_default(),
+            "Ignoring company membership row claiming a global role"
+        );
+        return;
+    }
+    if !roles.contains(&parsed) {
+        roles.push(parsed);
+    }
+}
+
 /// Session authentication middleware
 /// Checks for a valid session cookie or falls back to API key
 pub async fn auth_middleware(
@@ -21,9 +51,10 @@ pub async fn auth_middleware(
 ) -> Result<Response, StatusCode> {
     let settings = state.config.load();
 
-    // Resolution outcomes for the active company on a request.
+    // Resolution outcomes for the active company on a request. `Resolved` also
+    // carries the role the user holds *in that company* — see `merge_company_role`.
     enum CompanyResolution {
-        Resolved(uuid::Uuid),
+        Resolved(uuid::Uuid, Option<String>),
         NoMembership, // User exists but belongs to no company → pass through with no company.
         Forbidden,    // User explicitly requested a company they don't belong to.
     }
@@ -50,14 +81,15 @@ pub async fn auth_middleware(
         }
 
         if let Some(req_id) = requested_id {
-            if companies.iter().any(|c| c.company_id == req_id) {
-                CompanyResolution::Resolved(req_id)
-            } else {
-                CompanyResolution::Forbidden
+            match companies.iter().find(|c| c.company_id == req_id) {
+                Some(membership) => {
+                    CompanyResolution::Resolved(req_id, Some(membership.role.clone()))
+                }
+                None => CompanyResolution::Forbidden,
             }
         } else {
             // No header — default to first company.
-            CompanyResolution::Resolved(companies[0].company_id)
+            CompanyResolution::Resolved(companies[0].company_id, Some(companies[0].role.clone()))
         }
     }
 
@@ -129,15 +161,15 @@ pub async fn auth_middleware(
     if let Some(cookie) = jar.get("session") {
         if let Ok(session) = serde_json::from_str::<UserSession>(cookie.value()) {
             if !session.is_expired() {
-                let company_id = match resolve_company(
+                let (company_id, company_role) = match resolve_company(
                     session.user_id,
                     &headers,
                     state.user_repository.as_ref(),
                 )
                 .await
                 {
-                    CompanyResolution::Resolved(id) => Some(id),
-                    CompanyResolution::NoMembership => None,
+                    CompanyResolution::Resolved(id, role) => (Some(id), role),
+                    CompanyResolution::NoMembership => (None, None),
                     CompanyResolution::Forbidden => {
                         tracing::warn!(
                             "User {} requested a company they are not a member of",
@@ -147,13 +179,12 @@ pub async fn auth_middleware(
                     }
                 };
 
+                let mut roles = session.roles;
+                merge_company_role(&mut roles, company_role.as_deref());
+
                 // Session valid: Attach User Context
-                let context = UserContext::new_user(
-                    session.user_id,
-                    session.email,
-                    session.roles,
-                    company_id,
-                );
+                let context =
+                    UserContext::new_user(session.user_id, session.email, roles, company_id);
                 request.extensions_mut().insert(context);
                 return Ok(next.run(request).await);
             }
@@ -173,4 +204,50 @@ pub async fn auth_middleware(
 
     tracing::debug!("Authentication failed");
     Err(StatusCode::UNAUTHORIZED)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_company_role;
+    use crate::auth::rbac::Role;
+
+    #[test]
+    fn company_role_becomes_a_request_role() {
+        let mut roles = vec![];
+        merge_company_role(&mut roles, Some("operator"));
+        assert_eq!(roles, vec![Role::Operator]);
+    }
+
+    #[test]
+    fn company_admin_is_not_a_global_admin() {
+        let mut roles = vec![];
+        merge_company_role(&mut roles, Some("admin"));
+        assert_eq!(roles, vec![Role::Admin]);
+        assert!(!roles.contains(&Role::GlobalAdmin));
+    }
+
+    #[test]
+    fn membership_row_cannot_claim_a_global_role() {
+        for claim in ["global_admin", "globaladmin", "superadmin", "super_admin"] {
+            let mut roles = vec![];
+            merge_company_role(&mut roles, Some(claim));
+            assert!(roles.is_empty(), "{claim} was merged");
+        }
+    }
+
+    #[test]
+    fn absent_or_unknown_role_changes_nothing() {
+        let mut roles = vec![Role::GlobalAdmin];
+        merge_company_role(&mut roles, None);
+        merge_company_role(&mut roles, Some(""));
+        merge_company_role(&mut roles, Some("auditor"));
+        assert_eq!(roles, vec![Role::GlobalAdmin]);
+    }
+
+    #[test]
+    fn an_existing_role_is_not_duplicated() {
+        let mut roles = vec![Role::Analyst];
+        merge_company_role(&mut roles, Some("analyst"));
+        assert_eq!(roles, vec![Role::Analyst]);
+    }
 }

@@ -389,13 +389,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             middleware::auth::auth_middleware,
         ));
 
+    // Cloned before `with_state` consumes it; the performance layer needs the
+    // same state so it can record into MetricsService.
+    let app_state_for_metrics = app_state.clone();
+
     // Build our application with routes
     let mut app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
         .with_state(app_state)
         // Apply middleware layers (global)
-        .layer(axum::middleware::from_fn(
+        .layer(axum::middleware::from_fn_with_state(
+            app_state_for_metrics,
             middleware::performance_middleware,
         ))
         .layer(axum::middleware::from_fn(

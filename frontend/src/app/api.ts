@@ -169,11 +169,27 @@ export type Seed = {
 
 export type AssetType = "domain" | "ip" | "port" | "certificate" | "organization" | "asn";
 
+/**
+ * Open-finding rollup carried on an asset. Populated by the list, search and
+ * detail endpoints via a lateral join, so a table can show "3 critical, 2 high"
+ * without a request per row.
+ */
+export type OpenFindingCounts = {
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  info: number;
+  total: number;
+};
+
 export type Asset = {
   id: string;
   asset_type: AssetType;
   value: string;
   ownership_confidence: number;
+  /** Absent when the endpoint does not compute it (e.g. /assets/:id/path). */
+  open_findings?: OpenFindingCounts;
   sources: string[];
   metadata: Record<string, unknown>;
   comment?: string | null;
@@ -269,22 +285,25 @@ export type DiscoveryRun = {
   updated_at: string;
 };
 
+/**
+ * `models::discovery::DiscoveryConfig`. A schedule stores the whole thing;
+ * `POST /api/discovery/run` reads only the four fields marked below, because
+ * `RunDiscoveryRequest` carries no others — anything else sent to it is
+ * accepted and dropped.
+ */
 export type DiscoveryConfig = {
-  /** Minimum confidence to auto-trigger security scans (0.0-1.0, 0 = disabled) */
+  /** Minimum confidence to auto-trigger security scans (0.0-1.0, 0 = disabled). Honoured by both. */
   auto_scan_threshold?: number;
-  /** Maximum recursion depth for pivoting */
+  /** Maximum recursion depth for pivoting. Honoured by both. */
   max_depth?: number;
-  /** Specific seed IDs to process (empty = all seeds) */
+  /** Specific seed IDs to process (omit for all seeds). Honoured by both. */
   seed_ids?: string[];
-  /** Skip recently processed seeds */
-  skip_recent?: boolean;
-  /** Recent threshold in hours */
-  recent_hours?: number;
-  /** Timezone for scheduled runs (IANA string) */
+  /** Timezone for scheduled runs (IANA string). Honoured by both. */
   timezone?: string;
-  // Compatibility fields (mapped by backend)
-  confidence_threshold?: number;
-  include_scan?: boolean;
+  /** Skip recently processed seeds. Schedules only. */
+  skip_recent?: boolean;
+  /** Recent threshold in hours. Schedules only. */
+  recent_hours?: number;
 };
 
 export type DiscoverySchedule = {
@@ -322,8 +341,6 @@ export type SecurityScanStatus = "pending" | "running" | "completed" | "failed" 
 export type FindingSeverity = "critical" | "high" | "medium" | "low" | "info";
 export type FindingStatus = "open" | "acknowledged" | "in_progress" | "resolved" | "false_positive" | "accepted";
 
-export type Finding = SecurityFinding; // Alias for drift analysis
-
 export type SecurityScan = {
   id: string;
   asset_id: string;
@@ -351,6 +368,9 @@ export type SecurityFinding = {
   id: string;
   security_scan_id: string | null;
   asset_id: string;
+  /** Joined from the asset; absent on endpoints that do not join. */
+  asset_value?: string | null;
+  asset_type?: string | null;
   finding_type: string;
   severity: string;
   title: string;
@@ -376,11 +396,21 @@ export type SecurityFindingListResponse = {
   offset: number;
 };
 
+export type FindingSortField = "first_seen_at" | "last_seen_at" | "severity" | "cvss_score" | "status";
+
 export type SecurityFindingFilter = {
   asset_id?: string;
   scan_id?: string;
-  severity?: string;
-  status?: string;
+  /** Single value or a list; a list is sent comma-separated. */
+  severity?: string | string[];
+  status?: string | string[];
+  finding_type?: string | string[];
+  /** Filters on the joined asset's type — server-side, not per page. */
+  asset_type?: string | string[];
+  /** Free text over title, description and finding type. */
+  q?: string;
+  sort_by?: FindingSortField;
+  sort_dir?: "asc" | "desc";
   limit?: number;
   offset?: number;
 };
@@ -396,13 +426,20 @@ export type SecurityFindingUpdate = {
 // RISK TYPES
 // ============================================================================
 
+/** Exactly what GET /api/risk/overview returns. */
 export type RiskOverview = {
   total_risk_score: number;
+  average_risk_score: number;
+  total_assets: number;
+  assets_with_scores: number;
+  assets_pending_calculation: number;
+  /** Always carries all five levels, zero-filled. */
   assets_by_level: Record<string, number>;
-  critical_count: number;
-  high_count: number;
-  medium_count: number;
-  low_count: number;
+  /** Always carries all six types, zero-filled. */
+  assets_by_type: Record<string, number>;
+  assets_never_scanned: number;
+  /** Sparse — an absent severity means zero. */
+  findings_by_severity: Record<string, number>;
 };
 
 // ============================================================================
@@ -543,11 +580,12 @@ export async function listAssets(min_confidence = 0, limit?: number, offset?: nu
 
 export type AssetSearchParams = {
   q?: string;
-  asset_type?: "domain" | "ip" | "all";
+  /** Single value or a list; a list is sent comma-separated. */
+  asset_type?: AssetType | "all" | AssetType[];
   min_confidence?: number;
   scan_status?: "all" | "scanned" | "never_scanned";
-  source?: string;
-  risk_level?: string;
+  source?: string | string[];
+  risk_level?: string | string[];
   sort_by?: "created_at" | "confidence" | "value" | "importance" | "risk_score";
   sort_dir?: "asc" | "desc";
   limit?: number;
@@ -562,15 +600,25 @@ export type AssetSearchResponse = {
   offset: number;
 };
 
+/** Comma-joins a list filter; the backend splits on commas for every list param. */
+function listParam(value: string | string[] | undefined): string | undefined {
+  if (!value) return undefined;
+  const joined = Array.isArray(value) ? value.join(",") : value;
+  return joined.length > 0 ? joined : undefined;
+}
+
 export async function searchAssetsAdvanced(params: AssetSearchParams): Promise<AssetSearchResponse> {
   const queryParams = new URLSearchParams();
 
   if (params.q) queryParams.append("q", params.q);
-  if (params.asset_type && params.asset_type !== "all") queryParams.append("asset_type", params.asset_type);
+  const assetType = listParam(params.asset_type === "all" ? undefined : params.asset_type);
+  if (assetType) queryParams.append("asset_type", assetType);
   if (params.min_confidence !== undefined) queryParams.append("min_confidence", params.min_confidence.toString());
   if (params.scan_status && params.scan_status !== "all") queryParams.append("scan_status", params.scan_status);
-  if (params.source) queryParams.append("source", params.source);
-  if (params.risk_level) queryParams.append("risk_level", params.risk_level);
+  const source = listParam(params.source);
+  if (source) queryParams.append("source", source);
+  const riskLevel = listParam(params.risk_level);
+  if (riskLevel) queryParams.append("risk_level", riskLevel);
   if (params.sort_by) queryParams.append("sort_by", params.sort_by);
   if (params.sort_dir) queryParams.append("sort_dir", params.sort_dir);
   if (params.limit !== undefined) queryParams.append("limit", params.limit.toString());
@@ -746,13 +794,43 @@ export async function createSecurityScan(assetId: string, scanType?: string, not
   return res.json();
 }
 
-export async function listSecurityScans(limit = 50, offset = 0, assetId?: string): Promise<SecurityScan[]> {
-  const params = new URLSearchParams();
-  params.append("limit", limit.toString());
-  params.append("offset", offset.toString());
-  if (assetId) params.append("asset_id", assetId);
+export type ScanListParams = {
+  limit?: number;
+  offset?: number;
+  asset_id?: string;
+  /** Single value or list: pending | running | completed | failed | cancelled. */
+  status?: string | string[];
+  scan_type?: string | string[];
+};
 
-  const res = await apiFetch(`${API_BASE}/api/security/scans?${params.toString()}`, { cache: "no-store", credentials: "include" });
+export type ScanListItem = SecurityScan & {
+  /** Joined from the asset so a queue table needs no request per row. */
+  asset_value?: string | null;
+  asset_type?: string | null;
+  findings_count?: number;
+};
+
+export type ScanListResponse = {
+  scans: ScanListItem[];
+  total_count: number;
+  limit: number;
+  offset: number;
+};
+
+export async function listScans(params?: ScanListParams): Promise<ScanListResponse> {
+  const query = new URLSearchParams();
+  if (params?.limit) query.append("limit", params.limit.toString());
+  if (params?.offset !== undefined) query.append("offset", params.offset.toString());
+  if (params?.asset_id) query.append("asset_id", params.asset_id);
+  const status = listParam(params?.status);
+  if (status) query.append("status", status);
+  const scanType = listParam(params?.scan_type);
+  if (scanType) query.append("scan_type", scanType);
+
+  const res = await apiFetch(`${API_BASE}/api/security/scans?${query.toString()}`, {
+    cache: "no-store",
+    credentials: "include",
+  });
   if (!res.ok) throw new Error(`Failed to list security scans: ${res.status}`);
   return res.json();
 }
@@ -775,10 +853,19 @@ export async function listSecurityFindings(filter?: SecurityFindingFilter): Prom
   const params = new URLSearchParams();
   if (filter?.asset_id) params.append("asset_id", filter.asset_id);
   if (filter?.scan_id) params.append("scan_id", filter.scan_id);
-  if (filter?.severity) params.append("severity", filter.severity);
-  if (filter?.status) params.append("status", filter.status);
+  const severity = listParam(filter?.severity);
+  if (severity) params.append("severity", severity);
+  const status = listParam(filter?.status);
+  if (status) params.append("status", status);
+  const findingType = listParam(filter?.finding_type);
+  if (findingType) params.append("finding_type", findingType);
+  const assetType = listParam(filter?.asset_type);
+  if (assetType) params.append("asset_type", assetType);
+  if (filter?.q) params.append("q", filter.q);
+  if (filter?.sort_by) params.append("sort_by", filter.sort_by);
+  if (filter?.sort_dir) params.append("sort_dir", filter.sort_dir);
   if (filter?.limit) params.append("limit", filter.limit.toString());
-  if (filter?.offset) params.append("offset", filter.offset.toString());
+  if (filter?.offset !== undefined) params.append("offset", filter.offset.toString());
 
   const res = await apiFetch(`${API_BASE}/api/security/findings?${params.toString()}`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to list security findings: ${res.status}`);
@@ -825,7 +912,14 @@ export async function resolveSecurityFinding(id: string): Promise<SecurityFindin
   return res.json();
 }
 
-export async function getSecurityFindingsSummary(): Promise<{ by_severity: Record<string, number> }> {
+export type FindingsSummary = {
+  /** Counts only open, acknowledged and in_progress. */
+  by_severity: Record<string, number>;
+  /** Every status, including resolved and false_positive. */
+  by_status: Record<string, number>;
+};
+
+export async function getSecurityFindingsSummary(): Promise<FindingsSummary> {
   const res = await apiFetch(`${API_BASE}/api/security/findings/summary`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get findings summary: ${res.status}`);
   return res.json();
@@ -884,7 +978,7 @@ export async function recalculateAssetRisk(assetId: string): Promise<Asset> {
   return res.json();
 }
 
-export async function getRiskOverview(): Promise<Record<string, unknown>> {
+export async function getRiskOverview(): Promise<RiskOverview> {
   const res = await apiFetch(`${API_BASE}/api/risk/overview`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error(`Failed to get risk overview: ${res.status}`);
   return res.json();
@@ -1242,6 +1336,8 @@ export type SettingsView = {
   dns_concurrency: number;
   rdns_concurrency: number;
   max_concurrent_scans: number;
+  max_active_scans_per_user: number;
+  max_active_discovery_per_user: number;
   block_internal_ip_scans: boolean;
   max_evidence_bytes: number;
   evidence_allowed_types: string[];
@@ -1261,6 +1357,9 @@ export type SettingsView = {
   max_orgs_per_domain: number;
   max_domains_per_org: number;
   skip_unresolved_domains: boolean;
+
+  // Search
+  reindex_min_interval_seconds: number;
 };
 
 export type SettingsResponse = {
@@ -1298,6 +1397,8 @@ export type SettingsUpdatePayload = {
   dns_concurrency?: number;
   rdns_concurrency?: number;
   max_concurrent_scans?: number;
+  max_active_scans_per_user?: number;
+  max_active_discovery_per_user?: number;
   block_internal_ip_scans?: boolean;
   max_evidence_bytes?: number;
   evidence_allowed_types?: string[];
@@ -1317,6 +1418,7 @@ export type SettingsUpdatePayload = {
   max_orgs_per_domain?: number;
   max_domains_per_org?: number;
   skip_unresolved_domains?: boolean;
+  reindex_min_interval_seconds?: number;
 };
 
 export async function getSettings(revealSecrets = false): Promise<SettingsResponse> {
@@ -1766,22 +1868,19 @@ export async function bulkUpdateFindingTypeConfigs(
 }
 
 // ============================================================================
-// DRIFT API
+// DRIFT API — deliberately not bound
 // ============================================================================
-
-export async function detectDrift(scanId: string): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/api/security/scans/${scanId}/drift`, {
-    method: "POST",
-    credentials: "include",
-  });
-  if (!res.ok) throw new Error(`Failed to detect drift: ${res.status}`);
-}
-
-export async function getDriftFindings(scanId: string): Promise<Finding[]> {
-  const res = await apiFetch(`${API_BASE}/api/security/scans/${scanId}/drift`, {
-    cache: "no-store",
-    credentials: "include"
-  });
-  if (!res.ok) throw new Error(`Failed to get drift findings: ${res.status}`);
-  return res.json();
-}
+//
+// `/api/security/scans/:id/drift` is not callable from here on purpose.
+//
+// `drift_handlers` resolves the `:id` against the legacy `scans` table, which
+// nothing has written to since the legacy pipeline was unrouted, so the POST
+// 404s for every scan this UI can produce an id for. The GET answers with
+// `models::Finding` — `{ id, scan_id, finding_type, data, created_at }` — which
+// is a different record from `SecurityFinding` and is never returned by any
+// other endpoint.
+//
+// The bindings that used to sit here typed the GET as `SecurityFinding[]` and
+// the POST as `void`; neither was true, and nothing called them. Retargeting
+// `drift_service` at `security_scans` is the fix; until then, adding a caller
+// here would only bind the UI to a shape the server does not send.

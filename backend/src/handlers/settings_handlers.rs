@@ -7,12 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{
-    auth::{context::UserContext, rbac::Role},
-    config::ManagedSettings,
-    error::ApiError,
-    AppState,
-};
+use crate::{auth::context::UserContext, config::ManagedSettings, error::ApiError, AppState};
 
 #[derive(Debug, Deserialize, Default)]
 pub struct SettingsQuery {
@@ -197,7 +192,7 @@ pub async fn get_settings(
     Query(query): Query<SettingsQuery>,
     headers: HeaderMap,
 ) -> Result<Json<SettingsResponse>, ApiError> {
-    require_admin(&user)?;
+    require_global_admin(&user)?;
 
     let record = state.settings_service.get_managed().await?;
     let reveal = resolve_break_glass(&user, &state, &headers, query.reveal_secrets)?;
@@ -223,7 +218,7 @@ pub async fn update_settings(
     headers: HeaderMap,
     Json(update): Json<SettingsUpdateRequest>,
 ) -> Result<Json<SettingsResponse>, ApiError> {
-    require_admin(&user)?;
+    require_global_admin(&user)?;
 
     let reveal = resolve_break_glass(&user, &state, &headers, query.reveal_secrets)?;
 
@@ -257,11 +252,18 @@ pub async fn update_settings(
     }))
 }
 
-fn require_admin(user: &UserContext) -> Result<(), ApiError> {
-    if user.has_role(Role::Admin) {
+/// These settings are deployment-wide — identity providers, external API keys,
+/// CORS, rate limits, scan budgets — not company-scoped, so the gate is the
+/// global role and not `has_role(Role::Admin)`, which the active company's
+/// membership role now also satisfies. This matches the Settings UI, which
+/// shows Integrations only to a global admin.
+fn require_global_admin(user: &UserContext) -> Result<(), ApiError> {
+    if user.is_global_admin() {
         Ok(())
     } else {
-        Err(ApiError::Authorization("Admin role required".to_string()))
+        Err(ApiError::Authorization(
+            "Global admin role required".to_string(),
+        ))
     }
 }
 

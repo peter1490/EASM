@@ -2,7 +2,7 @@ use crate::{
     auth::{context::UserContext, rbac::Role},
     error::ApiError,
     models::{
-        Asset, AssetEvolutionResponse, AssetRiskHistoryEntry, AssetScanHistoryEntry, AssetType,
+        Asset, AssetEvolutionResponse, AssetRiskHistoryEntry, AssetScanHistoryEntry,
         SecurityFinding, SecurityScan, Seed, SeedCreate,
     },
     AppState,
@@ -372,6 +372,25 @@ pub struct AssetSearchResponse {
     pub offset: i64,
 }
 
+/// Split a comma-separated filter, lower-cased and blank-free. `all` and an
+/// empty string both mean "no filter".
+fn csv_values(raw: Option<&str>) -> Option<Vec<String>> {
+    let raw = raw?.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("all") {
+        return None;
+    }
+    let values: Vec<String> = raw
+        .split(',')
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
 /// Advanced asset search endpoint with full-text search and filtering
 pub async fn search_assets(
     State(app_state): State<AppState>,
@@ -384,15 +403,28 @@ pub async fn search_assets(
         .company_id
         .ok_or_else(|| ApiError::Authorization("Company scope required for assets".to_string()))?;
 
-    // Parse asset type if provided
-    let asset_type = params
-        .asset_type
-        .as_ref()
-        .and_then(|t| match t.to_lowercase().as_str() {
-            "domain" => Some(AssetType::Domain),
-            "ip" => Some(AssetType::Ip),
-            _ => None,
-        });
+    // Comma-separated and covering every asset type. Previously only "domain"
+    // and "ip" were recognised, one value at a time — so filtering for a port
+    // or a certificate silently returned everything, and a facet rail could not
+    // offer multi-select without promising a filter the server would not run.
+    const ASSET_TYPES: [&str; 6] = ["domain", "ip", "port", "certificate", "organization", "asn"];
+    let asset_types = match csv_values(params.asset_type.as_deref()) {
+        None => None,
+        Some(values) => {
+            for value in &values {
+                if !ASSET_TYPES.contains(&value.as_str()) {
+                    return Err(ApiError::Validation(format!(
+                        "Unknown asset_type '{}'. Expected one of: {}.",
+                        value,
+                        ASSET_TYPES.join(", ")
+                    )));
+                }
+            }
+            Some(values)
+        }
+    };
+    let risk_levels = csv_values(params.risk_level.as_deref());
+    let sources = csv_values(params.source.as_deref());
 
     // Parse sort options
     let sort_by = params.sort_by.as_deref().unwrap_or("created_at");
@@ -404,11 +436,11 @@ pub async fn search_assets(
         .search(
             company_id,
             params.q.as_deref(),
-            asset_type,
+            asset_types.as_deref(),
             params.min_confidence,
             params.scan_status.as_deref(),
-            params.source.as_deref(),
-            params.risk_level.as_deref(),
+            sources.as_deref(),
+            risk_levels.as_deref(),
             sort_by,
             sort_dir,
             limit,

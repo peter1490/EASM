@@ -15,6 +15,13 @@ pub fn create_cors_layer(settings: &Settings) -> CorsLayer {
         HeaderName::from_static("x-break-glass-token"),
     ];
 
+    // The browser cannot read a response header that is not exposed, and the
+    // UI is served from a different origin than the API. Without this,
+    // `GET /api/assets/:id/report` sets a Content-Disposition naming the PDF
+    // after the asset and the client reads `null`, falling back to naming the
+    // download after a UUID.
+    let exposed_headers = vec![HeaderName::from_static("content-disposition")];
+
     let allowed_origins = &settings.cors_allow_origins;
     let is_production = settings.environment.eq_ignore_ascii_case("production");
 
@@ -32,6 +39,7 @@ pub fn create_cors_layer(settings: &Settings) -> CorsLayer {
                 Method::OPTIONS,
             ])
             .allow_headers(allowed_headers)
+            .expose_headers(exposed_headers)
             .allow_credentials(!is_production)
     } else {
         // Production mode - restrict origins
@@ -62,6 +70,7 @@ pub fn create_cors_layer(settings: &Settings) -> CorsLayer {
                     Method::OPTIONS,
                 ])
                 .allow_headers(allowed_headers)
+                .expose_headers(exposed_headers)
                 .allow_credentials(false)
         } else {
             CorsLayer::new()
@@ -75,6 +84,7 @@ pub fn create_cors_layer(settings: &Settings) -> CorsLayer {
                     Method::OPTIONS,
                 ])
                 .allow_headers(allowed_headers)
+                .expose_headers(exposed_headers)
                 .allow_credentials(true)
         }
     }

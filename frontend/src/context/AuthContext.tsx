@@ -139,14 +139,16 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     setCompanyIdState(nextCompanyId);
     setStoredCompanyId(nextCompanyId);
 
+    // A detail route holds an id belonging to the company we are leaving, so
+    // switching company there would 404. Fall back to that record's list.
     if (typeof window !== 'undefined') {
       const { pathname } = window.location;
-      if (pathname.startsWith('/security/scans/')) {
-        window.location.assign('/security');
+      if (pathname.startsWith('/surface/')) {
+        window.location.assign('/surface');
         return;
       }
-      if (pathname.startsWith('/asset/')) {
-        window.location.assign('/assets');
+      if (pathname.startsWith('/findings')) {
+        window.location.assign('/findings');
         return;
       }
     }

@@ -80,11 +80,11 @@ pub trait AssetRepository {
         &self,
         company_id: Uuid,
         query: Option<&str>,
-        asset_type: Option<AssetType>,
+        asset_types: Option<&[String]>,
         min_confidence: Option<f64>,
         scan_status: Option<&str>,
-        source: Option<&str>,
-        risk_level: Option<&str>,
+        sources: Option<&[String]>,
+        risk_levels: Option<&[String]>,
         sort_by: &str,
         sort_dir: &str,
         limit: i64,
@@ -191,6 +191,14 @@ impl AssetRepository for SqlxAssetRepository {
                     UPDATE assets
                     SET confidence = $1, sources = $2, metadata = $3, updated_at = $4, 
                         seed_id = COALESCE($5, assets.seed_id), 
+                        -- Lifecycle columns exist since migration 009 but nothing
+                        -- ever wrote them, so every asset reported status
+                        -- "active" with no first/last-seen at all.
+                        last_seen_at = $4,
+                        first_seen_at = COALESCE(assets.first_seen_at, assets.created_at),
+                        last_discovery_run_id = COALESCE($9, assets.last_discovery_run_id),
+                        discovery_method = COALESCE(assets.discovery_method, $10),
+                        status = COALESCE(assets.status, 'active'), 
                         -- Parent ID rules (in order of priority):
                         -- 1. Keep seed roots as roots (seed_id set, no parent)
                         -- 2. Prevent self-reference (parent_id = own id)
@@ -204,6 +212,7 @@ impl AssetRepository for SqlxAssetRepository {
                         END
                     WHERE id = $7 AND company_id = $8
                     RETURNING id, asset_type, identifier, confidence, sources, metadata, comment, created_at, updated_at, seed_id, parent_id, company_id,
+                              first_seen_at, last_seen_at, last_discovery_run_id, status, discovery_method,
                               importance, risk_score, risk_level, last_risk_run
                     "#
                 )
@@ -215,6 +224,8 @@ impl AssetRepository for SqlxAssetRepository {
                 .bind(asset.parent_id)
                 .bind(existing_asset.id)
                 .bind(company_id)
+                .bind(asset.discovery_run_id)
+                .bind(asset.discovery_method.as_deref())
                 .fetch_one(&self.pool)
                 .await?;
 
@@ -227,9 +238,11 @@ impl AssetRepository for SqlxAssetRepository {
 
                 let row = sqlx::query_as::<_, AssetRow>(
                     r#"
-                    INSERT INTO assets (id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id, company_id)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    INSERT INTO assets (id, asset_type, identifier, confidence, sources, metadata, created_at, updated_at, seed_id, parent_id, company_id,
+                                        first_seen_at, last_seen_at, last_discovery_run_id, discovery_method, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $7, $7, $12, $13, 'active')
                     RETURNING id, asset_type, identifier, confidence, sources, metadata, comment, created_at, updated_at, seed_id, parent_id, company_id,
+                              first_seen_at, last_seen_at, last_discovery_run_id, status, discovery_method,
                               importance, risk_score, risk_level, last_risk_run
                     "#
                 )
@@ -244,6 +257,8 @@ impl AssetRepository for SqlxAssetRepository {
                 .bind(asset.seed_id)
                 .bind(safe_parent_id)
                 .bind(company_id)
+                .bind(asset.discovery_run_id)
+                .bind(asset.discovery_method.as_deref())
                 .fetch_one(&self.pool)
                 .await?;
 
@@ -266,19 +281,14 @@ impl AssetRepository for SqlxAssetRepository {
             Some(threshold) => {
                 sqlx::query_as::<_, AssetRow>(
                     r#"
-                    WITH latest_scans AS (
-                        SELECT DISTINCT ON (asset_id) 
-                            id, status, created_at, asset_id
-                        FROM security_scans
-                        WHERE company_id = $3
-                        ORDER BY asset_id, created_at DESC
-                    )
                     SELECT 
-                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment,
+                        a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                        a.first_seen_at, a.last_seen_at, a.last_discovery_run_id, a.status, a.discovery_method,
                         a.importance, a.risk_score, a.risk_level, a.last_risk_run,
-                        ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
-                    FROM assets a
-                    LEFT JOIN latest_scans ls ON ls.asset_id = a.id
+                        a.last_scan_id, a.last_scan_status, a.last_scanned_at,
+                        a.open_critical, a.open_high, a.open_medium, a.open_low, a.open_info, a.open_total
+                    FROM assets_enriched a
                     WHERE a.company_id = $3 AND a.confidence >= $1
                     ORDER BY a.importance DESC, a.confidence DESC, a.created_at DESC
                     LIMIT $2 OFFSET $4
@@ -294,19 +304,14 @@ impl AssetRepository for SqlxAssetRepository {
             None => {
                 sqlx::query_as::<_, AssetRow>(
                     r#"
-                    WITH latest_scans AS (
-                        SELECT DISTINCT ON (asset_id) 
-                            id, status, created_at, asset_id
-                        FROM security_scans
-                        WHERE company_id = $3
-                        ORDER BY asset_id, created_at DESC
-                    )
                     SELECT 
-                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment,
+                        a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                        a.first_seen_at, a.last_seen_at, a.last_discovery_run_id, a.status, a.discovery_method,
                         a.importance, a.risk_score, a.risk_level, a.last_risk_run,
-                        ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
-                    FROM assets a
-                    LEFT JOIN latest_scans ls ON ls.asset_id = a.id
+                        a.last_scan_id, a.last_scan_status, a.last_scanned_at,
+                        a.open_critical, a.open_high, a.open_medium, a.open_low, a.open_info, a.open_total
+                    FROM assets_enriched a
                     WHERE a.company_id = $3
                     ORDER BY a.importance DESC, a.confidence DESC, a.created_at DESC
                     LIMIT $1 OFFSET $2
@@ -362,19 +367,14 @@ impl AssetRepository for SqlxAssetRepository {
     async fn get_by_id(&self, company_id: Uuid, id: &Uuid) -> Result<Option<Asset>, ApiError> {
         let result = sqlx::query_as::<_, AssetRow>(
             r#"
-            WITH latest_scans AS (
-                SELECT DISTINCT ON (asset_id) 
-                    id, status, created_at, asset_id
-                FROM security_scans
-                WHERE company_id = $2
-                ORDER BY asset_id, created_at DESC
-            )
             SELECT 
-                a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
-                a.importance, a.risk_score, a.risk_level, a.last_risk_run,
-                ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
-            FROM assets a
-            LEFT JOIN latest_scans ls ON ls.asset_id = a.id
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment,
+                        a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                        a.first_seen_at, a.last_seen_at, a.last_discovery_run_id, a.status, a.discovery_method,
+                        a.importance, a.risk_score, a.risk_level, a.last_risk_run,
+                        a.last_scan_id, a.last_scan_status, a.last_scanned_at,
+                        a.open_critical, a.open_high, a.open_medium, a.open_low, a.open_info, a.open_total
+            FROM assets_enriched a
             WHERE a.id = $1 AND a.company_id = $2
             "#
         )
@@ -397,19 +397,14 @@ impl AssetRepository for SqlxAssetRepository {
             Some(threshold) => {
                 sqlx::query_as::<_, AssetRow>(
                     r#"
-                    WITH latest_scans AS (
-                        SELECT DISTINCT ON (asset_id) 
-                            id, status, created_at, asset_id
-                        FROM security_scans
-                        WHERE company_id = $3
-                        ORDER BY asset_id, created_at DESC
-                    )
                     SELECT 
-                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment,
+                        a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                        a.first_seen_at, a.last_seen_at, a.last_discovery_run_id, a.status, a.discovery_method,
                         a.importance, a.risk_score, a.risk_level, a.last_risk_run,
-                        ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
-                    FROM assets a
-                    LEFT JOIN latest_scans ls ON ls.asset_id = a.id
+                        a.last_scan_id, a.last_scan_status, a.last_scanned_at,
+                        a.open_critical, a.open_high, a.open_medium, a.open_low, a.open_info, a.open_total
+                    FROM assets_enriched a
                     WHERE a.asset_type = $1 AND a.confidence >= $2 AND a.company_id = $3
                     ORDER BY a.importance DESC, a.confidence DESC, a.created_at DESC
                     "#
@@ -423,19 +418,14 @@ impl AssetRepository for SqlxAssetRepository {
             None => {
                 sqlx::query_as::<_, AssetRow>(
                     r#"
-                    WITH latest_scans AS (
-                        SELECT DISTINCT ON (asset_id) 
-                            id, status, created_at, asset_id
-                        FROM security_scans
-                        WHERE company_id = $2
-                        ORDER BY asset_id, created_at DESC
-                    )
                     SELECT 
-                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment,
+                        a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                        a.first_seen_at, a.last_seen_at, a.last_discovery_run_id, a.status, a.discovery_method,
                         a.importance, a.risk_score, a.risk_level, a.last_risk_run,
-                        ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
-                    FROM assets a
-                    LEFT JOIN latest_scans ls ON ls.asset_id = a.id
+                        a.last_scan_id, a.last_scan_status, a.last_scanned_at,
+                        a.open_critical, a.open_high, a.open_medium, a.open_low, a.open_info, a.open_total
+                    FROM assets_enriched a
                     WHERE a.asset_type = $1 AND a.company_id = $2
                     ORDER BY a.importance DESC, a.confidence DESC, a.created_at DESC
                     "#
@@ -458,19 +448,14 @@ impl AssetRepository for SqlxAssetRepository {
     ) -> Result<Option<Asset>, ApiError> {
         let result = sqlx::query_as::<_, AssetRow>(
             r#"
-            WITH latest_scans AS (
-                SELECT DISTINCT ON (asset_id) 
-                    id, status, created_at, asset_id
-                FROM security_scans
-                WHERE company_id = $3
-                ORDER BY asset_id, created_at DESC
-            )
             SELECT 
-                a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment, a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
-                a.importance, a.risk_score, a.risk_level, a.last_risk_run,
-                ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
-            FROM assets a
-            LEFT JOIN latest_scans ls ON ls.asset_id = a.id
+                        a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment,
+                        a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                        a.first_seen_at, a.last_seen_at, a.last_discovery_run_id, a.status, a.discovery_method,
+                        a.importance, a.risk_score, a.risk_level, a.last_risk_run,
+                        a.last_scan_id, a.last_scan_status, a.last_scanned_at,
+                        a.open_critical, a.open_high, a.open_medium, a.open_low, a.open_info, a.open_total
+            FROM assets_enriched a
             WHERE a.asset_type = $1 AND a.identifier = $2 AND a.company_id = $3
             "#
         )
@@ -514,14 +499,15 @@ impl AssetRepository for SqlxAssetRepository {
                   AND ap.depth < 100
             )
             SELECT 
-                id, asset_type, identifier, confidence, sources, metadata, comment,
-                created_at, updated_at, seed_id, parent_id, company_id,
-                importance, risk_score, risk_level, last_risk_run,
-                NULL::uuid as last_scan_id,
-                NULL::text as last_scan_status,
-                NULL::timestamptz as last_scanned_at
-            FROM asset_path
-            ORDER BY depth DESC
+                ae.id, ae.asset_type, ae.identifier, ae.confidence, ae.sources, ae.metadata, ae.comment,
+                ae.created_at, ae.updated_at, ae.seed_id, ae.parent_id, ae.company_id,
+                ae.first_seen_at, ae.last_seen_at, ae.last_discovery_run_id, ae.status, ae.discovery_method,
+                ae.importance, ae.risk_score, ae.risk_level, ae.last_risk_run,
+                ae.last_scan_id, ae.last_scan_status, ae.last_scanned_at,
+                ae.open_critical, ae.open_high, ae.open_medium, ae.open_low, ae.open_info, ae.open_total
+            FROM asset_path ap
+            JOIN assets_enriched ae ON ae.id = ap.id
+            ORDER BY ap.depth DESC
             "#,
         )
         .bind(id)
@@ -695,11 +681,11 @@ impl AssetRepository for SqlxAssetRepository {
         &self,
         company_id: Uuid,
         query: Option<&str>,
-        asset_type: Option<AssetType>,
+        asset_types: Option<&[String]>,
         min_confidence: Option<f64>,
         scan_status: Option<&str>,
-        source: Option<&str>,
-        risk_level: Option<&str>,
+        sources: Option<&[String]>,
+        risk_levels: Option<&[String]>,
         sort_by: &str,
         sort_dir: &str,
         limit: i64,
@@ -707,7 +693,6 @@ impl AssetRepository for SqlxAssetRepository {
     ) -> Result<(Vec<Asset>, i64, Vec<String>), ApiError> {
         // Prepare search pattern
         let search_pattern = query.map(|q| format!("%{}%", q.to_lowercase()));
-        let source_pattern = source.map(|s| format!("%{}%", s));
 
         // Validate sort options
         let sort_field = match sort_by {
@@ -731,29 +716,26 @@ impl AssetRepository for SqlxAssetRepository {
         // Single unified query with optional filters using COALESCE pattern
         let query_sql = format!(
             r#"
-            WITH latest_scans AS (
-                SELECT DISTINCT ON (asset_id) 
-                    id, status, created_at, asset_id
-                FROM security_scans
-                WHERE company_id = $10
-                ORDER BY asset_id, created_at DESC
-            )
             SELECT 
                 a.id, a.asset_type, a.identifier, a.confidence, a.sources, a.metadata, a.comment,
                 a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
+                a.first_seen_at, a.last_seen_at, a.last_discovery_run_id, a.status, a.discovery_method,
                 a.importance, a.risk_score, a.risk_level, a.last_risk_run,
-                ls.id as last_scan_id, ls.status::text as last_scan_status, ls.created_at as last_scanned_at
-            FROM assets a
-            LEFT JOIN latest_scans ls ON ls.asset_id = a.id
+                a.last_scan_id, a.last_scan_status, a.last_scanned_at,
+                a.open_critical, a.open_high, a.open_medium, a.open_low, a.open_info, a.open_total
+            FROM assets_enriched a
             WHERE 
                 a.company_id = $10 
                 AND ($1::text IS NULL OR LOWER(a.identifier) LIKE $1 OR a.sources::text ILIKE $1)
-                AND ($2::text IS NULL OR a.asset_type::text = $2)
+                AND ($2::text[] IS NULL OR a.asset_type::text = ANY($2))
                 AND ($3::float8 IS NULL OR a.confidence >= $3)
-                AND ($4::text IS NULL OR a.sources::text ILIKE $4)
-                AND ($5::text IS NULL OR a.risk_level = $5)
-                AND (NOT $6::bool OR ls.id IS NOT NULL)
-                AND (NOT $7::bool OR ls.id IS NULL)
+                AND ($4::text[] IS NULL OR EXISTS (
+                        SELECT 1 FROM unnest($4::text[]) AS wanted
+                        WHERE a.sources::text ILIKE '%' || wanted || '%'
+                    ))
+                AND ($5::text[] IS NULL OR a.risk_level = ANY($5))
+                AND (NOT $6::bool OR a.last_scan_id IS NOT NULL)
+                AND (NOT $7::bool OR a.last_scan_id IS NULL)
             ORDER BY {sort_field} {sort_direction} NULLS LAST, a.created_at DESC
             LIMIT $8 OFFSET $9
             "#,
@@ -762,34 +744,29 @@ impl AssetRepository for SqlxAssetRepository {
         );
 
         let count_sql = r#"
-            WITH latest_scans AS (
-                SELECT DISTINCT ON (asset_id) 
-                    id, asset_id
-                FROM security_scans
-                WHERE company_id = $8
-                ORDER BY asset_id, created_at DESC
-            )
             SELECT COUNT(*)
-            FROM assets a
-            LEFT JOIN latest_scans ls ON ls.asset_id = a.id
+            FROM assets_enriched a
             WHERE 
                 a.company_id = $8 
                 AND ($1::text IS NULL OR LOWER(a.identifier) LIKE $1 OR a.sources::text ILIKE $1)
-                AND ($2::text IS NULL OR a.asset_type::text = $2)
+                AND ($2::text[] IS NULL OR a.asset_type::text = ANY($2))
                 AND ($3::float8 IS NULL OR a.confidence >= $3)
-                AND ($4::text IS NULL OR a.sources::text ILIKE $4)
-                AND ($5::text IS NULL OR a.risk_level = $5)
-                AND (NOT $6::bool OR ls.id IS NOT NULL)
-                AND (NOT $7::bool OR ls.id IS NULL)
+                AND ($4::text[] IS NULL OR EXISTS (
+                        SELECT 1 FROM unnest($4::text[]) AS wanted
+                        WHERE a.sources::text ILIKE '%' || wanted || '%'
+                    ))
+                AND ($5::text[] IS NULL OR a.risk_level = ANY($5))
+                AND (NOT $6::bool OR a.last_scan_id IS NOT NULL)
+                AND (NOT $7::bool OR a.last_scan_id IS NULL)
             "#;
 
         // Execute queries
         let rows = sqlx::query_as::<_, AssetRow>(&query_sql)
             .bind(&search_pattern)
-            .bind(asset_type.as_ref().map(|t| t.to_string()))
+            .bind(asset_types)
             .bind(min_confidence)
-            .bind(&source_pattern)
-            .bind(risk_level)
+            .bind(sources)
+            .bind(risk_levels)
             .bind(filter_scanned)
             .bind(filter_never_scanned)
             .bind(limit)
@@ -800,10 +777,10 @@ impl AssetRepository for SqlxAssetRepository {
 
         let total_count = sqlx::query_scalar::<_, i64>(count_sql)
             .bind(&search_pattern)
-            .bind(asset_type.as_ref().map(|t| t.to_string()))
+            .bind(asset_types)
             .bind(min_confidence)
-            .bind(&source_pattern)
-            .bind(risk_level)
+            .bind(sources)
+            .bind(risk_levels)
             .bind(filter_scanned)
             .bind(filter_never_scanned)
             .bind(company_id)

@@ -8,10 +8,11 @@ use uuid::Uuid;
 
 use crate::{
     auth::context::UserContext,
+    auth::rbac::Role,
     error::ApiError,
     models::{
         SecurityFinding, SecurityFindingFilter, SecurityFindingListResponse, SecurityFindingUpdate,
-        SecurityScan, SecurityScanCreate, SecurityScanDetailResponse,
+        SecurityScan, SecurityScanCreate, SecurityScanDetailResponse, SecurityScanListResponse,
     },
     AppState,
 };
@@ -34,6 +35,9 @@ pub struct ListScansQuery {
     #[serde(default)]
     pub offset: i64,
     pub asset_id: Option<Uuid>,
+    /// Comma-separated: pending | running | completed | failed | cancelled.
+    pub status: Option<String>,
+    pub scan_type: Option<String>,
 }
 
 fn default_limit() -> i64 {
@@ -70,22 +74,31 @@ pub async fn list_security_scans(
     State(app_state): State<AppState>,
     Extension(user): Extension<UserContext>,
     Query(query): Query<ListScansQuery>,
-) -> Result<Json<Vec<SecurityScan>>, ApiError> {
+) -> Result<Json<SecurityScanListResponse>, ApiError> {
     let company_id = user.company_id.ok_or_else(|| {
         ApiError::Authorization("Company scope required for security scans".to_string())
     })?;
-    let scans = if let Some(asset_id) = query.asset_id {
-        app_state
-            .security_scan_service
-            .list_scans_for_asset(&asset_id, company_id)
-            .await?
-    } else {
-        app_state
-            .security_scan_service
-            .list_scans(query.limit, query.offset, company_id)
-            .await?
-    };
-    Ok(Json(scans))
+
+    // `asset_id` used to discard limit/offset and hard-cap at 100 rows; it is
+    // now just another filter, so the caller keeps control of the page.
+    let (scans, total) = app_state
+        .security_scan_repository
+        .list_filtered(
+            query.limit,
+            query.offset,
+            query.asset_id,
+            csv_filter(query.status.clone()),
+            csv_filter(query.scan_type.clone()),
+            company_id,
+        )
+        .await?;
+
+    Ok(Json(SecurityScanListResponse {
+        scans,
+        total_count: total,
+        limit: query.limit,
+        offset: query.offset,
+    }))
 }
 
 /// GET /api/security/scans/:id - Get a specific security scan
@@ -152,8 +165,41 @@ pub struct ListFindingsQuery {
     pub offset: i64,
     pub asset_id: Option<Uuid>,
     pub scan_id: Option<Uuid>,
+    /// Comma-separated, so a triage screen can select several at once.
     pub severity: Option<String>,
     pub status: Option<String>,
+    pub finding_type: Option<String>,
+    /// Comma-separated asset types: domain, ip, port, certificate, …
+    pub asset_type: Option<String>,
+    /// Free text over title, description and finding type.
+    pub q: Option<String>,
+    pub sort_by: Option<String>,
+    pub sort_dir: Option<String>,
+}
+
+/// Split a comma-separated filter into values, dropping blanks.
+fn csv_filter(raw: Option<String>) -> Option<Vec<String>> {
+    let values: Vec<String> = raw?
+        .split(',')
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
+/// Triage is a write. These endpoints had no role guard at all, so a Viewer
+/// could resolve or dismiss any finding in the company.
+fn require_triage_role(user: &UserContext) -> Result<(), ApiError> {
+    if user.has_role(Role::Analyst) || user.has_role(Role::Operator) || user.has_role(Role::Admin) {
+        return Ok(());
+    }
+    Err(ApiError::Authorization(
+        "Analyst role or higher required to change a finding".to_string(),
+    ))
 }
 
 /// GET /api/security/findings - List security findings
@@ -168,8 +214,16 @@ pub async fn list_security_findings(
     let filter = SecurityFindingFilter {
         asset_ids: query.asset_id.map(|id| vec![id]),
         scan_ids: query.scan_id.map(|id| vec![id]),
-        severities: query.severity.map(|s| vec![s]),
-        statuses: query.status.map(|s| vec![s]),
+        severities: csv_filter(query.severity.clone()),
+        statuses: csv_filter(query.status.clone()),
+        finding_types: csv_filter(query.finding_type.clone()),
+        asset_types: csv_filter(query.asset_type.clone()),
+        search_text: query.q.clone().filter(|text| !text.trim().is_empty()),
+        sort_by: query
+            .sort_by
+            .clone()
+            .unwrap_or_else(|| "first_seen_at".to_string()),
+        sort_direction: query.sort_dir.clone().unwrap_or_else(|| "desc".to_string()),
         limit: query.limit,
         offset: query.offset,
         ..Default::default()
@@ -212,6 +266,7 @@ pub async fn update_security_finding(
     Path(id): Path<Uuid>,
     Json(payload): Json<SecurityFindingUpdate>,
 ) -> Result<Json<SecurityFinding>, ApiError> {
+    require_triage_role(&user)?;
     let company_id = user.company_id.ok_or_else(|| {
         ApiError::Authorization("Company scope required for security scans".to_string())
     })?;
@@ -236,6 +291,7 @@ pub async fn bulk_update_security_findings(
     Extension(user): Extension<UserContext>,
     Json(payload): Json<BulkUpdateFindingsRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    require_triage_role(&user)?;
     let company_id = user.company_id.ok_or_else(|| {
         ApiError::Authorization("Company scope required for security scans".to_string())
     })?;
@@ -282,6 +338,7 @@ pub async fn resolve_security_finding(
     Extension(user): Extension<UserContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SecurityFinding>, ApiError> {
+    require_triage_role(&user)?;
     // In a real app, we'd get the user ID from the auth context
     let user_id = user.user_id.unwrap_or(Uuid::nil());
     let company_id = user.company_id.ok_or_else(|| {
@@ -308,8 +365,17 @@ pub async fn get_findings_summary(
         .security_scan_service
         .get_findings_summary(company_id)
         .await?;
+
+    // `count_by_status` already existed in the repository with no caller, so a
+    // status filter had no counts to show next to it.
+    let by_status = app_state
+        .security_finding_repository
+        .count_by_status(company_id)
+        .await?;
+
     Ok(Json(json!({
-        "by_severity": summary
+        "by_severity": summary,
+        "by_status": by_status
     })))
 }
 

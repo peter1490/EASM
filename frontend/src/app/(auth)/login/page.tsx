@@ -1,154 +1,149 @@
 "use client";
 
-import React, { useState } from 'react';
-import { useSearchParams, useRouter } from 'next/navigation';
-import { useAuth } from '@/context/AuthContext';
-import { getApiBase } from '@/app/api';
-import Button from '@/components/ui/Button';
-import Input from '@/components/ui/Input';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card';
+import { Suspense, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useAuth } from "@/context/AuthContext";
+import { getApiBase } from "@/app/api";
+import { Button } from "@/components/kit/Button";
+import { Input, Label } from "@/components/kit/Field";
+import { Icon } from "@/components/kit/Icon";
+import { ErrorState } from "@/components/kit/States";
+import { SurfaceConstellation } from "@/components/shell/SurfaceConstellation";
 
-export default function LoginPage() {
-  const apiBase = getApiBase();
-  const searchParams = useSearchParams();
-  const errorParam = searchParams.get('error');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [localError, setLocalError] = useState('');
-  const [loading, setLoading] = useState(false);
+function LoginForm() {
   const { loginLocal } = useAuth();
   const router = useRouter();
+  const params = useSearchParams();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [reveal, setReveal] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(params.get("error"));
 
-  const handleGoogleLogin = () => {
-    window.location.href = `${apiBase}/api/auth/google/login`;
-  };
+  const apiBase = getApiBase();
 
-  const handleKeycloakLogin = () => {
-    window.location.href = `${apiBase}/api/auth/keycloak/login`;
-  };
-
-  const handleLocalLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLocalError('');
-    setLoading(true);
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
     try {
-      const success = await loginLocal(email, password);
-      if (success) {
-        router.push('/');
-      } else {
-        setLocalError('Invalid email or password');
-      }
-    } catch {
-      setLocalError('An error occurred during login');
+      const ok = await loginLocal(email, password);
+      if (ok) router.push("/");
+      else setError("That email and password did not match an account.");
+    } catch (err) {
+      setError((err as Error).message);
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background py-12 px-4 sm:px-6 lg:px-8">
-      {/* Background decoration */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -right-40 w-80 h-80 bg-primary/5 rounded-full blur-3xl" />
-        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-info/5 rounded-full blur-3xl" />
-      </div>
-      
-      <Card className="relative w-full max-w-md animate-scale-in">
-        <CardHeader className="text-center space-y-4">
-          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-primary text-primary-foreground text-3xl font-bold shadow-lg">
-            🛡️
-          </div>
-          <div>
-            <CardTitle className="text-2xl">Welcome to EASM</CardTitle>
-            <CardDescription className="mt-2">
-              External Attack Surface Management
-            </CardDescription>
-          </div>
-        </CardHeader>
-        
-        <CardContent className="space-y-6">
-          {(errorParam || localError) && (
-            <div className="p-4 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
-              {localError || "Authentication failed. Please try again."}
-            </div>
-          )}
+    <div className="flex h-screen overflow-hidden bg-paper">
+      <div className="w-[600px] shrink-0 flex flex-col px-16 py-11 max-lg:w-full">
+        <div className="flex items-center gap-2.5 text-accent">
+          <Icon name="shieldCheck" size={21} />
+          <span className="text-[15px] font-semibold tracking-[-0.02em] text-ink">EASM</span>
+        </div>
 
-          <form onSubmit={handleLocalLogin} className="space-y-4">
-            <Input
-              label="Email"
-              type="email"
-              placeholder="admin@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-            />
-            <Input
-              label="Password"
-              type="password"
-              placeholder="••••••••"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-            />
-            <Button 
-              type="submit" 
-              className="w-full" 
-              loading={loading}
-              size="lg"
-            >
-              Sign In
+        <div className="flex-1 flex flex-col justify-center max-w-[376px] w-full">
+          <h1 className="text-[28px] font-semibold tracking-[-0.03em] leading-tight">Sign in</h1>
+          <p className="text-[13px] text-ink-2 mt-2">Use the account your administrator created for you.</p>
+
+          {error && <ErrorState error={error} className="mt-5" />}
+
+          <form onSubmit={submit} className="flex flex-col gap-3.5 mt-6">
+            <div>
+              <Label>Email</Label>
+              <Input
+                type="email"
+                autoComplete="username"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@acme.com"
+                className="h-[38px]"
+              />
+            </div>
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="lbl">Password</span>
+                <button
+                  type="button"
+                  onClick={() => setReveal((v) => !v)}
+                  className="text-[11px] font-medium text-accent hover:text-accent-ink"
+                >
+                  {reveal ? "Hide" : "Show"}
+                </button>
+              </div>
+              <Input
+                type={reveal ? "text" : "password"}
+                autoComplete="current-password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="h-[38px]"
+              />
+            </div>
+            <Button type="submit" variant="primary" size="lg" loading={busy} className="justify-center mt-1">
+              Sign in
             </Button>
           </form>
 
-          <div className="relative">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-border" />
-            </div>
-            <div className="relative flex justify-center text-xs">
-              <span className="px-2 bg-card text-muted-foreground">Or continue with</span>
-            </div>
+          <div className="flex items-center gap-2.5 mt-6">
+            <span className="flex-1 h-px bg-rule" />
+            <span className="text-[11px] text-ink-3">or</span>
+            <span className="flex-1 h-px bg-rule" />
           </div>
 
-          <div className="space-y-3">
-            <button
-              onClick={handleGoogleLogin}
-              className="w-full flex items-center justify-center gap-3 py-2.5 px-4 border border-border rounded-lg text-sm font-medium bg-card hover:bg-muted transition-colors"
+          <div className="flex flex-col gap-2 mt-4">
+            <Button
+              size="lg"
+              className="justify-center"
+              onClick={() => {
+                window.location.href = `${apiBase}/api/auth/google/login`;
+              }}
             >
-              <svg className="w-5 h-5" viewBox="0 0 24 24">
-                <path
-                  fill="currentColor"
-                  d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-                />
-                <path
-                  fill="currentColor"
-                  d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-                />
-                <path
-                  fill="currentColor"
-                  d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
-                />
-                <path
-                  fill="currentColor"
-                  d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
-                />
-              </svg>
-              Sign in with Google
-            </button>
-
-            <button
-              onClick={handleKeycloakLogin}
-              className="w-full flex items-center justify-center gap-3 py-2.5 px-4 border border-border rounded-lg text-sm font-medium bg-card hover:bg-muted transition-colors"
+              <Icon name="key" size={15} />
+              Continue with Google
+            </Button>
+            <Button
+              size="lg"
+              className="justify-center"
+              onClick={() => {
+                window.location.href = `${apiBase}/api/auth/keycloak/login`;
+              }}
             >
-              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-                <path d="m7 11V7a5 5 0 0 1 10 0v4"/>
-              </svg>
-              Sign in with SSO (Keycloak)
-            </button>
+              <Icon name="key" size={15} />
+              Continue with Keycloak
+            </Button>
           </div>
+        </div>
 
-        </CardContent>
-      </Card>
+        <p className="text-[11.5px] text-ink-3">
+          Trouble signing in? Your global administrator can reset the account from Settings → Members.
+        </p>
+      </div>
+
+      <div className="flex-1 relative overflow-hidden bg-ink flex flex-col justify-end p-13 max-lg:hidden">
+        <SurfaceConstellation />
+        <div className="relative max-w-[520px]">
+          <div className="text-[26px] font-semibold tracking-[-0.03em] leading-tight text-paper">
+            Everything of yours that faces the internet — found, scored and watched.
+          </div>
+          <p className="text-[13px] leading-relaxed text-ink-3 mt-3.5">
+            Discovery walks out from your seeds. Each asset it reaches gets fingerprinted, scanned and scored, so the
+            surface you are defending is the one that actually exists.
+          </p>
+        </div>
+      </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginForm />
+    </Suspense>
   );
 }

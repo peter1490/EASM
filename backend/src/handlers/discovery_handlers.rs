@@ -107,6 +107,9 @@ pub async fn discovery_status(
         "assets_discovered": status.assets_discovered,
         "assets_updated": status.assets_updated,
         "queue_pending": status.queue_pending,
+        // Dropped by the hand-rolled serialisation, so the UI could never show
+        // how many scans a run had queued.
+        "scans_queued": status.scans_queued,
         "errors": status.errors,
         "error_count": status.errors.len()
     })))

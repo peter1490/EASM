@@ -204,6 +204,7 @@ impl AppState {
         let risk_service = Arc::new(RiskService::new(
             asset_repository.clone(),
             security_finding_repository.clone(),
+            finding_type_config_repo.clone(),
             db_pool.clone(),
         ));
 

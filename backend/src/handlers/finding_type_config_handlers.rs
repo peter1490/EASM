@@ -1,14 +1,31 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     response::Json,
 };
 
+use crate::auth::context::UserContext;
 use crate::error::ApiError;
 use crate::models::finding_type_config::{
     FindingTypeConfig, FindingTypeConfigBulkUpdate, FindingTypeConfigListResponse,
     FindingTypeConfigUpdate,
 };
 use crate::AppState;
+
+/// These endpoints sit behind `/api/admin/` but took no `UserContext` at all,
+/// so any authenticated user — a Viewer included — could rewrite the global
+/// risk-scoring weights that drive every score in the product. The table is
+/// global rather than company-scoped, which makes it worse, not better: one
+/// company's admin editing it would change every other company's scores. So
+/// the gate is the global role, not `has_role(Role::Admin)`, which the active
+/// company's membership role also satisfies.
+fn require_global_admin(user: &UserContext) -> Result<(), ApiError> {
+    if user.is_global_admin() {
+        return Ok(());
+    }
+    Err(ApiError::Authorization(
+        "Global admin role required to change risk scoring configuration".to_string(),
+    ))
+}
 
 /// List all finding type configurations
 pub async fn list_finding_type_configs(
@@ -44,9 +61,12 @@ pub async fn get_finding_type_config(
 /// Update a finding type configuration
 pub async fn update_finding_type_config(
     State(state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Path(finding_type): Path<String>,
     Json(update): Json<FindingTypeConfigUpdate>,
 ) -> Result<Json<FindingTypeConfig>, ApiError> {
+    require_global_admin(&user)?;
+
     // Validate severity_score and type_multiplier if provided
     if let Some(score) = update.severity_score {
         if score < 0.0 || score > 100.0 {
@@ -99,8 +119,11 @@ pub struct BulkUpdateResponse {
 /// Bulk update multiple finding type configurations
 pub async fn bulk_update_finding_type_configs(
     State(state): State<AppState>,
+    Extension(user): Extension<UserContext>,
     Json(bulk_update): Json<FindingTypeConfigBulkUpdate>,
 ) -> Result<Json<BulkUpdateResponse>, ApiError> {
+    require_global_admin(&user)?;
+
     let mut updated: Vec<FindingTypeConfig> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 

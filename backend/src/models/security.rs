@@ -95,6 +95,17 @@ impl Default for ScanTriggerType {
 pub struct SecurityScan {
     pub id: Uuid,
     pub asset_id: Uuid,
+    /// Joined from `assets` on list endpoints so a scan queue needs no request
+    /// per row. `None` where the query does not join.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
+    pub asset_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
+    pub asset_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
+    pub findings_count: Option<i64>,
     pub scan_type: String,
     pub status: String,
     pub trigger_type: String,
@@ -119,21 +130,15 @@ pub struct SecurityScanCreate {
     pub config: Option<Value>,
 }
 
-/// Response DTO for scan list with asset info
+/// Envelope for the scan list: the rows plus the count needed to paginate.
+/// The bare `Vec<SecurityScan>` this replaces had no total, so no correct
+/// paginator could be built against it.
 #[derive(Debug, Clone, Serialize)]
 pub struct SecurityScanListResponse {
-    pub id: Uuid,
-    pub asset_id: Uuid,
-    pub asset_identifier: String,
-    pub asset_type: String,
-    pub scan_type: String,
-    pub status: String,
-    pub trigger_type: String,
-    pub priority: i32,
-    pub started_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub findings_count: i64,
-    pub created_at: DateTime<Utc>,
+    pub scans: Vec<SecurityScan>,
+    pub total_count: i64,
+    pub limit: i64,
+    pub offset: i64,
 }
 
 /// Response DTO for scan detail with findings
@@ -175,6 +180,58 @@ impl std::fmt::Display for FindingSeverity {
             FindingSeverity::Info => write!(f, "info"),
         }
     }
+}
+
+/// The one definition of "this finding still needs work".
+///
+/// Before consolidation there were four: `status != 'resolved'` (severity
+/// breakdowns), `status NOT IN ('resolved','false_positive')` (the metrics
+/// total), and two Rust re-implementations in `risk_service` and the PDF
+/// builder. A finding triaged as a false positive was therefore counted by the
+/// severity breakdown but not by the total, so no two numbers on a dashboard
+/// agreed. Every caller now goes through these.
+pub const ACTIVE_FINDING_STATUSES: &[&str] = &["open", "acknowledged", "in_progress"];
+
+/// SQL fragment matching the constant above. Kept next to it so the two cannot
+/// drift apart.
+pub const ACTIVE_FINDING_STATUSES_SQL: &str = "('open', 'acknowledged', 'in_progress')";
+
+pub fn is_active_status(status: &str) -> bool {
+    ACTIVE_FINDING_STATUSES.contains(&status)
+}
+
+/// Severity ordered worst-first. `severity` is a VARCHAR, so `ORDER BY severity`
+/// sorts alphabetically and puts `info` above `medium` and `low` — this rank is
+/// what any severity ordering must use instead.
+pub const SEVERITY_RANK_SQL: &str = "CASE severity \
+     WHEN 'critical' THEN 5 WHEN 'high' THEN 4 WHEN 'medium' THEN 3 \
+     WHEN 'low' THEN 2 ELSE 1 END";
+
+pub fn severity_rank(severity: &str) -> i32 {
+    match severity {
+        "critical" => 5,
+        "high" => 4,
+        "medium" => 3,
+        "low" => 2,
+        _ => 1,
+    }
+}
+
+/// Count active findings by severity. The single Rust implementation, replacing
+/// the three that had drifted apart (`security_scan_service`, `risk_service`
+/// and the PDF report each had their own).
+pub fn severity_histogram<'a, I>(findings: I) -> std::collections::BTreeMap<String, i64>
+where
+    I: IntoIterator<Item = &'a SecurityFinding>,
+{
+    let mut histogram = std::collections::BTreeMap::new();
+    for finding in findings {
+        if !is_active_status(&finding.status) {
+            continue;
+        }
+        *histogram.entry(finding.severity.clone()).or_insert(0) += 1;
+    }
+    histogram
 }
 
 impl From<&str> for FindingSeverity {
@@ -347,6 +404,14 @@ pub struct SecurityFinding {
     pub id: Uuid,
     pub security_scan_id: Option<Uuid>,
     pub asset_id: Uuid,
+    /// Joined from `assets`. Present on list endpoints; `None` where the query
+    /// does not join, so a client can tell "not loaded" from "no value".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
+    pub asset_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
+    pub asset_type: Option<String>,
     pub finding_type: String,
     pub severity: String,
     pub title: String,
@@ -398,6 +463,10 @@ pub struct SecurityFindingFilter {
     pub scan_ids: Option<Vec<Uuid>>,
     #[serde(default)]
     pub finding_types: Option<Vec<String>>,
+    /// Filters on the joined asset's type, so a triage screen can narrow to
+    /// "findings on IPs" without post-filtering a page client-side.
+    #[serde(default)]
+    pub asset_types: Option<Vec<String>>,
     #[serde(default)]
     pub severities: Option<Vec<String>>,
     #[serde(default)]

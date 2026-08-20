@@ -96,6 +96,41 @@ impl From<&str> for AssetStatus {
     }
 }
 
+/// Open findings rolled up per asset.
+///
+/// Without this a list has to issue one findings request per row: at the
+/// default page size that is 26 requests to draw one table, each dragging the
+/// full `data` JSONB back with it. It is computed in the same CTE that already
+/// resolves each asset's latest scan.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct OpenFindingCounts {
+    pub critical: i64,
+    pub high: i64,
+    pub medium: i64,
+    pub low: i64,
+    pub info: i64,
+    pub total: i64,
+}
+
+impl OpenFindingCounts {
+    /// Worst severity present, or `None` when the asset is clean.
+    pub fn worst_severity(&self) -> Option<&'static str> {
+        if self.critical > 0 {
+            Some("critical")
+        } else if self.high > 0 {
+            Some("high")
+        } else if self.medium > 0 {
+            Some("medium")
+        } else if self.low > 0 {
+            Some("low")
+        } else if self.info > 0 {
+            Some("info")
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {
     pub id: Uuid,
@@ -140,6 +175,11 @@ pub struct Asset {
     pub last_scan_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_scanned_at: Option<DateTime<Utc>>,
+
+    /// Absent where the query does not compute it (`get_path`), so a client can
+    /// distinguish "not loaded" from "no open findings".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_findings: Option<OpenFindingCounts>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -186,6 +226,19 @@ pub struct AssetRow {
     pub last_scan_status: Option<String>,
     #[sqlx(default)]
     pub last_scanned_at: Option<DateTime<Utc>>,
+    // Finding rollup (computed in the same CTE as the latest scan)
+    #[sqlx(default)]
+    pub open_critical: Option<i64>,
+    #[sqlx(default)]
+    pub open_high: Option<i64>,
+    #[sqlx(default)]
+    pub open_medium: Option<i64>,
+    #[sqlx(default)]
+    pub open_low: Option<i64>,
+    #[sqlx(default)]
+    pub open_info: Option<i64>,
+    #[sqlx(default)]
+    pub open_total: Option<i64>,
 }
 
 impl From<AssetRow> for Asset {
@@ -215,6 +268,16 @@ impl From<AssetRow> for Asset {
             last_scan_id: row.last_scan_id.map(|id| id.to_string()),
             last_scan_status: row.last_scan_status,
             last_scanned_at: row.last_scanned_at,
+            // Only queries that select the rollup produce `open_total`; the
+            // rest leave the whole object off the wire.
+            open_findings: row.open_total.map(|total| OpenFindingCounts {
+                critical: row.open_critical.unwrap_or(0),
+                high: row.open_high.unwrap_or(0),
+                medium: row.open_medium.unwrap_or(0),
+                low: row.open_low.unwrap_or(0),
+                info: row.open_info.unwrap_or(0),
+                total,
+            }),
         }
     }
 }

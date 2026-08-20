@@ -13,6 +13,8 @@ use uuid::Uuid;
 pub struct RiskService {
     asset_repo: Arc<dyn AssetRepository + Send + Sync>,
     security_finding_repo: Arc<dyn SecurityFindingRepository + Send + Sync>,
+    finding_type_config_repo:
+        Arc<dyn crate::repositories::FindingTypeConfigRepository + Send + Sync>,
     db_pool: DatabasePool,
 }
 
@@ -20,45 +22,36 @@ impl RiskService {
     pub fn new(
         asset_repo: Arc<dyn AssetRepository + Send + Sync>,
         security_finding_repo: Arc<dyn SecurityFindingRepository + Send + Sync>,
+        finding_type_config_repo: Arc<
+            dyn crate::repositories::FindingTypeConfigRepository + Send + Sync,
+        >,
         db_pool: DatabasePool,
     ) -> Self {
         Self {
             asset_repo,
             security_finding_repo,
+            finding_type_config_repo,
             db_pool,
         }
     }
 
-    /// Load configurable scoring parameters from the database
+    /// Configurable scoring parameters.
+    ///
+    /// This was a byte-identical copy of
+    /// `FindingTypeConfigRepository::get_scoring_map` issued against a raw pool,
+    /// which is the only reason this service held a `db_pool` for scoring.
     async fn load_scoring_config(&self) -> Result<HashMap<String, (f64, f64)>, ApiError> {
-        let rows = sqlx::query_as::<_, (String, f64, f64)>(
-            r#"
-            SELECT finding_type, severity_score, type_multiplier
-            FROM finding_type_config
-            WHERE is_enabled = true
-            "#,
-        )
-        .fetch_all(&self.db_pool)
-        .await?;
-
-        let map: HashMap<String, (f64, f64)> = rows
-            .into_iter()
-            .map(|(ft, score, mult)| (ft, (score, mult)))
-            .collect();
-
-        Ok(map)
+        self.finding_type_config_repo.get_scoring_map().await
     }
 
-    /// Get fallback severity score if type not in config
+    /// Fallback severity score for finding types absent from `finding_type_config`.
+    ///
+    /// This used to be a private copy of the same 40/20/10/3/0.5 table that
+    /// `models::finding_type_config::SEVERITY_SCORES` already declared — which
+    /// meant the canonical constant had no callers at all and the two could
+    /// drift apart silently.
     fn get_fallback_severity_score(severity: &str) -> f64 {
-        match severity {
-            "critical" => 40.0,
-            "high" => 20.0,
-            "medium" => 10.0,
-            "low" => 3.0,
-            "info" => 0.5,
-            _ => 1.0,
-        }
+        crate::models::finding_type_config::get_severity_score(severity)
     }
 
     /// Get fallback type multiplier for special port handling
@@ -76,6 +69,21 @@ impl RiskService {
         company_id: Uuid,
         asset_id: Uuid,
     ) -> Result<Asset, ApiError> {
+        self.calculate_asset_risk_with_config(company_id, asset_id, None)
+            .await
+    }
+
+    /// Recalculate one asset, optionally reusing an already-loaded scoring map.
+    ///
+    /// `recalculate_all_risks` used to call the public entry point in a loop of
+    /// up to 10,000 assets, which re-read the whole `finding_type_config` table
+    /// once per asset.
+    async fn calculate_asset_risk_with_config(
+        &self,
+        company_id: Uuid,
+        asset_id: Uuid,
+        preloaded_config: Option<&HashMap<String, (f64, f64)>>,
+    ) -> Result<Asset, ApiError> {
         // 1. Get Asset (company-scoped)
         let asset = self
             .asset_repo
@@ -83,8 +91,12 @@ impl RiskService {
             .await?
             .ok_or_else(|| ApiError::NotFound(format!("Asset {} not found", asset_id)))?;
 
-        // 2. Load scoring configuration from database
-        let scoring_config = self.load_scoring_config().await?;
+        // 2. Scoring configuration. Batch callers pass it in; a single
+        //    recalculation loads it here.
+        let scoring_config = match preloaded_config {
+            Some(config) => config.clone(),
+            None => self.load_scoring_config().await?,
+        };
 
         // 3. Get Security Findings for Asset (proper security findings with severity)
         let findings = self
@@ -98,8 +110,8 @@ impl RiskService {
         let mut config_used: HashMap<String, bool> = HashMap::new();
 
         for finding in &findings {
-            // Skip resolved or false positive findings
-            if finding.status == "resolved" || finding.status == "false_positive" {
+            // One definition of "still needs work", shared with the SQL paths.
+            if !crate::models::security::is_active_status(&finding.status) {
                 continue;
             }
 
@@ -203,12 +215,18 @@ impl RiskService {
             .list(company_id, None, Some(10000), None)
             .await?;
 
+        // Read the scoring configuration once for the whole batch.
+        let scoring_config = self.load_scoring_config().await?;
+
         let mut success_count = 0;
         let mut error_count = 0;
         let mut errors: Vec<String> = Vec::new();
 
         for asset in assets {
-            match self.calculate_asset_risk(company_id, asset.id).await {
+            match self
+                .calculate_asset_risk_with_config(company_id, asset.id, Some(&scoring_config))
+                .await
+            {
                 Ok(_) => success_count += 1,
                 Err(e) => {
                     error_count += 1;
@@ -271,6 +289,41 @@ impl RiskService {
 
         let (total_with_scores, avg_score, total_score) = stats;
 
+        // Composition by asset type. Nothing exposed this before, so an
+        // overview wanting "812 domains, 341 IPs" had to issue one filtered
+        // search per type just to read back each total_count.
+        let type_rows = sqlx::query_as::<_, (String, i64)>(
+            r#"
+            SELECT asset_type::text, COUNT(*) as count
+            FROM assets
+            WHERE company_id = $1
+            GROUP BY asset_type
+            "#,
+        )
+        .bind(company_id)
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        let mut assets_by_type: HashMap<String, i64> = HashMap::new();
+        for key in ["domain", "ip", "port", "certificate", "organization", "asn"] {
+            assets_by_type.insert(key.to_string(), 0);
+        }
+        for (asset_type, count) in type_rows {
+            assets_by_type.insert(asset_type, count);
+        }
+
+        // How much of the surface has never been looked at.
+        let never_scanned = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)
+            FROM assets_enriched
+            WHERE company_id = $1 AND last_scan_id IS NULL
+            "#,
+        )
+        .bind(company_id)
+        .fetch_one(&self.db_pool)
+        .await?;
+
         // Get total assets (system-wide)
         let total_assets = self.asset_repo.count(company_id, None).await?;
 
@@ -287,6 +340,8 @@ impl RiskService {
             "assets_with_scores": total_with_scores,
             "assets_pending_calculation": total_assets - total_with_scores,
             "assets_by_level": assets_by_level,
+            "assets_by_type": assets_by_type,
+            "assets_never_scanned": never_scanned,
             "findings_by_severity": findings_summary,
         }))
     }
@@ -301,9 +356,11 @@ impl RiskService {
             r#"
             SELECT 
                 id, asset_type, identifier, confidence, sources, metadata, comment, created_at, updated_at, seed_id, parent_id, company_id,
+                first_seen_at, last_seen_at, last_discovery_run_id, status, discovery_method,
                 importance, risk_score, risk_level, last_risk_run,
-                NULL::uuid as last_scan_id, NULL::text as last_scan_status, NULL::timestamptz as last_scanned_at
-            FROM assets
+                last_scan_id, last_scan_status, last_scanned_at,
+                open_critical, open_high, open_medium, open_low, open_info, open_total
+            FROM assets_enriched
             WHERE risk_score IS NOT NULL AND company_id = $1
             ORDER BY risk_score DESC
             LIMIT $2

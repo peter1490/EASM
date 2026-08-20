@@ -658,6 +658,7 @@ mod tests {
             last_scan_status: None,
             company_id: Uuid::new_v4(),
             last_scanned_at: None,
+            open_findings: None,
         }
     }
 

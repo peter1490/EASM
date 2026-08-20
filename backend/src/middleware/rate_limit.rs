@@ -128,8 +128,19 @@ pub async fn ip_rate_limit_middleware(
     }
 }
 
-/// Performance monitoring middleware
-pub async fn performance_middleware(request: Request, next: Next) -> Response {
+/// Performance monitoring middleware.
+///
+/// This used to only emit tracing logs, so `MetricsService::record_request` had
+/// no production caller at all: `/api/metrics` reported `requests_per_second: 0`,
+/// `/api/metrics/report` was all zeros, `/api/metrics/health` was always
+/// "healthy" because zero requests means a zero failure rate, and
+/// `/api/metrics/endpoint/*` returned 404 for every path. It now takes the
+/// application state so the numbers it reports are real.
+pub async fn performance_middleware(
+    State(app_state): State<crate::AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
     let start = std::time::Instant::now();
     let method = request.method().clone();
     let uri = request.uri().clone();
@@ -138,6 +149,15 @@ pub async fn performance_middleware(request: Request, next: Next) -> Response {
 
     let duration = start.elapsed();
     let status = response.status();
+
+    // Record against the route path, not the full URI, so query strings and
+    // path parameters do not each become their own endpoint bucket.
+    app_state.metrics_service.record_request(
+        uri.path(),
+        method.as_str(),
+        duration,
+        status.is_success() || status.is_redirection(),
+    );
 
     // Log slow requests
     if duration > Duration::from_millis(1000) {

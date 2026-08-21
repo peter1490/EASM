@@ -29,6 +29,15 @@ export function Drawer({
   const panelRef = useRef<HTMLDivElement>(null);
   const restoreFocus = useRef<HTMLElement | null>(null);
 
+  // Callers pass an inline `onClose`, so its identity changes on every parent
+  // render. Keeping it in a ref keeps the effect below tied to `open` alone --
+  // otherwise every keystroke in a drawer field would tear the effect down and
+  // hand focus back to the panel.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
+
   useEffect(() => {
     if (!open) return;
     restoreFocus.current = document.activeElement as HTMLElement | null;
@@ -36,7 +45,7 @@ export function Drawer({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.stopPropagation();
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (event.key !== "Tab" || !panelRef.current) return;
@@ -58,14 +67,18 @@ export function Drawer({
     document.addEventListener("keydown", onKeyDown, true);
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    panelRef.current?.focus();
+    const panel = panelRef.current;
+    if (panel && !panel.contains(document.activeElement)) panel.focus();
 
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
       document.body.style.overflow = previousOverflow;
-      restoreFocus.current?.focus?.();
+      // Only pull focus back if it still sits inside the closing drawer.
+      if (!panel || panel.contains(document.activeElement) || document.activeElement === document.body) {
+        restoreFocus.current?.focus?.();
+      }
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 

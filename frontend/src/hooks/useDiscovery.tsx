@@ -16,13 +16,15 @@ import { useAuth } from "@/context/AuthContext";
 interface DiscoveryContextValue {
   status: DiscoveryStatus | null;
   error: string | null;
-  refresh: () => Promise<void>;
+  /** Reads the status now and returns it, or null if the read failed or landed
+   *  after a company switch. The poller schedules from the returned value. */
+  refresh: () => Promise<DiscoveryStatus | null>;
 }
 
 const DiscoveryContext = createContext<DiscoveryContextValue>({
   status: null,
   error: null,
-  refresh: async () => {},
+  refresh: async () => null,
 });
 
 const IDLE_MS = 30_000;
@@ -33,60 +35,85 @@ export function DiscoveryProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<DiscoveryStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Read inside the polling loop so the cadence follows the live value rather
-  // than the one captured when the effect first ran.
-  const running = useRef(false);
+  const isRunning = Boolean(status?.running);
 
   // A poll started before a company switch must not land after it.
   const activeCompany = useRef(companyId);
 
-  // Both are written after commit rather than during render. This effect is
-  // declared before the poll below, so the poll starts on a company change
-  // with the ref already pointing at the company it is starting for.
+  // Declared before the poll below, so the poll starts on a company change with
+  // the ref already naming the company it is starting for, and with the
+  // previous company's run cleared out of the top-bar hairline.
   useEffect(() => {
-    running.current = Boolean(status?.running);
     activeCompany.current = companyId;
-  });
-
-  const refresh = useCallback(async () => {
-    const requestedFor = activeCompany.current;
-    try {
-      const next = await getDiscoveryStatus();
-      if (activeCompany.current !== requestedFor) return;
-      setStatus(next);
-      setError(null);
-    } catch (err) {
-      if (activeCompany.current !== requestedFor) return;
-      setError((err as Error).message);
-    }
-  }, []);
-
-  // Discovery status is company-scoped, so the poll restarts whenever the
-  // active company changes. Clearing first means the top-bar hairline never
-  // keeps showing the run of the company we just left.
-  useEffect(() => {
-    // Dropping the previous company's status is the point of this effect.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatus(null);
     setError(null);
-    if (!companyId) return;
+  }, [companyId]);
+
+  const refresh = useCallback(async (): Promise<DiscoveryStatus | null> => {
+    const requestedFor = activeCompany.current;
+    try {
+      const next = await getDiscoveryStatus();
+      if (activeCompany.current !== requestedFor) return null;
+      setStatus(next);
+      setError(null);
+      return next;
+    } catch (err) {
+      if (activeCompany.current !== requestedFor) return null;
+      setError((err as Error).message);
+      return null;
+    }
+  }, []);
+
+  /** The company the loop below has already read for. */
+  const polledFor = useRef<string | null>(null);
+
+  /**
+   * The poll. It re-runs on `isRunning` as well as on the company, because both
+   * decide how long the next read waits, and both used to be read too late:
+   *
+   *   - Inside `tick`, `refresh` has only *queued* its state update, so the
+   *     status it just read was not observable through state yet. Scheduling
+   *     from the returned value means the read that first sees a run start is
+   *     followed 4s later, not 30s later.
+   *   - Outside `tick`, a run can start from this app -- the ops page starts
+   *     one and calls `refresh` -- while the loop is parked on the idle 30s.
+   *     Re-running on `isRunning` pulls that next read forward instead of
+   *     leaving the top-bar hairline frozen for half a minute.
+   *
+   * A re-run for the cadence alone only re-arms the timer: the status is
+   * already current, so there is nothing to read yet.
+   */
+  useEffect(() => {
+    if (!companyId) {
+      polledFor.current = null;
+      return;
+    }
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const tick = async () => {
-      await refresh();
+      const next = await refresh();
       if (cancelled) return;
-      timer = setTimeout(tick, running.current ? ACTIVE_MS : IDLE_MS);
+      // `isRunning` is this effect's own -- the last committed status -- and is
+      // the best guess when a read fails; dropping to idle mid-run would be
+      // wrong.
+      timer = setTimeout(tick, (next ? next.running : isRunning) ? ACTIVE_MS : IDLE_MS);
     };
 
-    void tick();
+    if (polledFor.current === companyId) {
+      timer = setTimeout(tick, isRunning ? ACTIVE_MS : IDLE_MS);
+    } else {
+      polledFor.current = companyId;
+      void tick();
+    }
 
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [refresh, companyId]);
+  }, [refresh, companyId, isRunning]);
 
   return <DiscoveryContext.Provider value={{ status, error, refresh }}>{children}</DiscoveryContext.Provider>;
 }

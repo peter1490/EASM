@@ -7,7 +7,7 @@ use crate::auth::context::UserContext;
 use crate::error::ApiError;
 use crate::models::finding_type_config::{
     FindingTypeConfig, FindingTypeConfigBulkUpdate, FindingTypeConfigListResponse,
-    FindingTypeConfigUpdate,
+    FindingTypeConfigUpdate, MULTIPLIER_MAX, MULTIPLIER_MIN,
 };
 use crate::AppState;
 
@@ -67,29 +67,11 @@ pub async fn update_finding_type_config(
 ) -> Result<Json<FindingTypeConfig>, ApiError> {
     require_global_admin(&user)?;
 
-    // Validate severity_score and type_multiplier if provided
-    if let Some(score) = update.severity_score {
-        if score < 0.0 || score > 100.0 {
-            return Err(ApiError::validation(
-                "severity_score must be between 0 and 100",
-            ));
-        }
-    }
-
     if let Some(mult) = update.type_multiplier {
-        if mult < 0.1 || mult > 10.0 {
-            return Err(ApiError::validation(
-                "type_multiplier must be between 0.1 and 10.0",
-            ));
-        }
-    }
-
-    if let Some(ref severity) = update.default_severity {
-        let valid_severities = ["critical", "high", "medium", "low", "info"];
-        if !valid_severities.contains(&severity.to_lowercase().as_str()) {
+        if !(MULTIPLIER_MIN..=MULTIPLIER_MAX).contains(&mult) {
             return Err(ApiError::validation(format!(
-                "Invalid severity '{}'. Must be one of: {:?}",
-                severity, valid_severities
+                "type_multiplier must be between {} and {}",
+                MULTIPLIER_MIN, MULTIPLIER_MAX
             )));
         }
     }
@@ -128,22 +110,11 @@ pub async fn bulk_update_finding_type_configs(
     let mut errors: Vec<String> = Vec::new();
 
     for item in bulk_update.configs {
-        // Validate
-        if let Some(score) = item.severity_score {
-            if score < 0.0 || score > 100.0 {
-                errors.push(format!(
-                    "{}: severity_score must be between 0 and 100",
-                    item.finding_type
-                ));
-                continue;
-            }
-        }
-
         if let Some(mult) = item.type_multiplier {
-            if mult < 0.1 || mult > 10.0 {
+            if !(MULTIPLIER_MIN..=MULTIPLIER_MAX).contains(&mult) {
                 errors.push(format!(
-                    "{}: type_multiplier must be between 0.1 and 10.0",
-                    item.finding_type
+                    "{}: type_multiplier must be between {} and {}",
+                    item.finding_type, MULTIPLIER_MIN, MULTIPLIER_MAX
                 ));
                 continue;
             }
@@ -151,8 +122,6 @@ pub async fn bulk_update_finding_type_configs(
 
         let update = FindingTypeConfigUpdate {
             display_name: None,
-            default_severity: item.default_severity,
-            severity_score: item.severity_score,
             type_multiplier: item.type_multiplier,
             description: None,
             is_enabled: item.is_enabled,
@@ -182,23 +151,26 @@ pub async fn bulk_update_finding_type_configs(
     }))
 }
 
-/// Get the scoring map for risk calculation (internal use)
+/// Get the per-type weights used by risk calculation (internal use)
 pub async fn get_scoring_map(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
-    let map = state.finding_type_config_repo.get_scoring_map().await?;
+    let weights = state.finding_type_config_repo.get_type_weights().await?;
 
-    // Convert to a more readable format
-    let formatted: Vec<serde_json::Value> = map
+    let mut formatted: Vec<serde_json::Value> = weights
         .into_iter()
-        .map(|(ft, (score, mult))| {
+        .map(|(finding_type, weight)| {
             serde_json::json!({
-                "finding_type": ft,
-                "severity_score": score,
-                "type_multiplier": mult
+                "finding_type": finding_type,
+                "type_multiplier": weight.multiplier,
+                "is_enabled": weight.is_enabled,
             })
         })
         .collect();
+
+    // A HashMap iterates in an arbitrary order, so the same configuration used to
+    // come back shuffled on every call.
+    formatted.sort_by(|a, b| a["finding_type"].as_str().cmp(&b["finding_type"].as_str()));
 
     Ok(Json(formatted))
 }

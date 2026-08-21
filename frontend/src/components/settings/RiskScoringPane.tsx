@@ -11,7 +11,6 @@ import {
   Input,
   LoadingBlock,
   Select,
-  SeverityChip,
   Table,
   TBody,
   TD,
@@ -31,17 +30,17 @@ import {
   type RiskRecalculationResult,
 } from "@/app/api";
 import { num, score } from "@/lib/format";
-import { SEVERITY_ORDER, severityTone } from "@/lib/severity";
+import { severityTone } from "@/lib/severity";
 import { cn } from "@/lib/cn";
 import { Field, Note, ResultBanner, errorMessage } from "./shared";
 
 // Limits the backend enforces. Checked here so a bad row never reaches the API.
-const SCORE_MIN = 0;
-const SCORE_MAX = 100;
 const MULTIPLIER_MIN = 0.1;
 const MULTIPLIER_MAX = 10;
 
-const DEFAULT_SEVERITY_SCORES: Array<[string, number]> = [
+/** Base score per severity. Mirrors `SEVERITY_SCORES` in the backend, which is the
+ *  only place a finding's base score comes from — configuration cannot override it. */
+const SEVERITY_SCORES: Array<[string, number]> = [
   ["critical", 40],
   ["high", 20],
   ["medium", 10],
@@ -49,14 +48,8 @@ const DEFAULT_SEVERITY_SCORES: Array<[string, number]> = [
   ["info", 0.5],
 ];
 
-function scoreValid(v: number) {
-  return Number.isFinite(v) && v >= SCORE_MIN && v <= SCORE_MAX;
-}
 function multiplierValid(v: number) {
   return Number.isFinite(v) && v >= MULTIPLIER_MIN && v <= MULTIPLIER_MAX;
-}
-function severityValid(v: string) {
-  return (SEVERITY_ORDER as string[]).includes(v);
 }
 
 function humaniseCategory(category: string) {
@@ -119,9 +112,7 @@ export function RiskScoringPane() {
   const invalidRows = useMemo(() => {
     const bad: string[] = [];
     for (const [findingType, update] of pending.entries()) {
-      if (update.severity_score !== undefined && !scoreValid(update.severity_score)) bad.push(findingType);
-      else if (update.type_multiplier !== undefined && !multiplierValid(update.type_multiplier)) bad.push(findingType);
-      else if (update.default_severity !== undefined && !severityValid(update.default_severity)) bad.push(findingType);
+      if (update.type_multiplier !== undefined && !multiplierValid(update.type_multiplier)) bad.push(findingType);
     }
     return bad;
   }, [pending]);
@@ -130,7 +121,7 @@ export function RiskScoringPane() {
     if (pending.size === 0) return;
     if (invalidRows.length > 0) {
       setSaveError(
-        `Out of range: ${invalidRows.slice(0, 3).join(", ")}. Score must be ${SCORE_MIN}–${SCORE_MAX} and multiplier ${MULTIPLIER_MIN}–${MULTIPLIER_MAX}.`,
+        `Out of range: ${invalidRows.slice(0, 3).join(", ")}. Multiplier must be ${MULTIPLIER_MIN}–${MULTIPLIER_MAX}.`,
       );
       return;
     }
@@ -156,8 +147,6 @@ export function RiskScoringPane() {
     const staged = pending.get(config.finding_type);
     setDraft({
       display_name: config.display_name,
-      default_severity: staged?.default_severity ?? config.default_severity,
-      severity_score: staged?.severity_score ?? config.severity_score,
       type_multiplier: staged?.type_multiplier ?? config.type_multiplier,
       description: config.description || undefined,
       is_enabled: staged?.is_enabled ?? config.is_enabled,
@@ -168,16 +157,8 @@ export function RiskScoringPane() {
 
   async function saveDraft() {
     if (!editing) return;
-    if (draft.severity_score !== undefined && !scoreValid(draft.severity_score)) {
-      setDraftError(`Severity score must be between ${SCORE_MIN} and ${SCORE_MAX}.`);
-      return;
-    }
     if (draft.type_multiplier !== undefined && !multiplierValid(draft.type_multiplier)) {
       setDraftError(`Type multiplier must be between ${MULTIPLIER_MIN} and ${MULTIPLIER_MAX}.`);
-      return;
-    }
-    if (draft.default_severity !== undefined && !severityValid(draft.default_severity)) {
-      setDraftError("Pick one of critical, high, medium, low or info.");
       return;
     }
     setDraftSaving(true);
@@ -299,8 +280,6 @@ export function RiskScoringPane() {
               <TR>
                 <TH>Finding type</TH>
                 <TH className="w-[130px]">Category</TH>
-                <TH className="w-[90px]">Severity</TH>
-                <TH className="w-[100px]">Score</TH>
                 <TH className="w-[110px]">Multiplier</TH>
                 <TH className="w-[80px]">Enabled</TH>
                 <TH className="w-[70px] text-right">Edit</TH>
@@ -309,10 +288,8 @@ export function RiskScoringPane() {
             <TBody>
               {visible.map((config) => {
                 const staged = pending.get(config.finding_type);
-                const currentScore = staged?.severity_score ?? config.severity_score;
                 const currentMultiplier = staged?.type_multiplier ?? config.type_multiplier;
                 const currentEnabled = staged?.is_enabled ?? config.is_enabled;
-                const currentSeverity = staged?.default_severity ?? config.default_severity;
                 return (
                   <TR key={config.id} className={cn(staged && "bg-accent-wash")}>
                     <TD>
@@ -322,22 +299,6 @@ export function RiskScoringPane() {
                       </div>
                     </TD>
                     <TD className="text-ink-2 text-[12px]">{humaniseCategory(config.category)}</TD>
-                    <TD>
-                      <SeverityChip severity={currentSeverity} short />
-                    </TD>
-                    <TD>
-                      <Input
-                        type="number"
-                        min={SCORE_MIN}
-                        max={SCORE_MAX}
-                        step={0.5}
-                        value={currentScore}
-                        invalid={!scoreValid(currentScore)}
-                        className="w-[76px] h-[26px] mono text-center"
-                        aria-label={`Severity score for ${config.display_name}`}
-                        onChange={(e) => stage(config.finding_type, "severity_score", parseFloat(e.target.value) || 0)}
-                      />
-                    </TD>
                     <TD>
                       <Input
                         type="number"
@@ -376,10 +337,10 @@ export function RiskScoringPane() {
       </Card>
 
       <Card>
-        <CardHeader title="How a risk score is built" hint="Defaults applied when a finding carries no score" />
+        <CardHeader title="How a risk score is built" hint="Base score per severity, fixed" />
         <div className="p-4 space-y-3">
           <div className="grid gap-2 sm:grid-cols-5">
-            {DEFAULT_SEVERITY_SCORES.map(([severity, value]) => {
+            {SEVERITY_SCORES.map(([severity, value]) => {
               const tone = severityTone(severity);
               return (
                 <div key={severity} className="rounded-md bg-surface-2 px-2.5 py-2">
@@ -390,8 +351,20 @@ export function RiskScoringPane() {
             })}
           </div>
           <code className="block mono text-[11px] text-ink-2 bg-surface-2 rounded-md px-3 py-2.5 leading-relaxed break-words">
-            risk_score = (exposure_score + Σ((severity_score + cvss_bonus) × type_multiplier)) × importance_multiplier
+            finding_score = (severity_score + cvss_bonus) × type_multiplier × 0.75^(rank within its type)
+            <br />
+            risk_score = (exposure_score + Σ finding_score) × importance_multiplier
           </code>
+          <Note icon="chart">
+            Every finding is scored from its own severity, using the table above. A finding type only contributes a
+            multiplier, so two findings of the same type score differently when their severities differ. Disabled types
+            score nothing at all.
+          </Note>
+          <Note icon="chart">
+            Repeated findings of one type count for less each time, ranked worst first — the second missing header on an
+            asset says much the same as the first. That caps any single type at four times its own worst finding.
+            Different types still add up in full.
+          </Note>
           <Note icon="chart">
             The result is capped at 100 and mapped to a level: critical at 80 and above, high at 60, medium at 40, low
             at 20, informational below that.
@@ -425,46 +398,17 @@ export function RiskScoringPane() {
       >
         {editing && (
           <div className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Display name">
-                <Input
-                  value={draft.display_name ?? ""}
-                  onChange={(e) => setDraft({ ...draft, display_name: e.target.value })}
-                />
-              </Field>
-              <Field label="Default severity">
-                <Select
-                  value={draft.default_severity ?? editing.default_severity}
-                  onChange={(e) => setDraft({ ...draft, default_severity: e.target.value })}
-                >
-                  {SEVERITY_ORDER.map((s) => (
-                    <option key={s} value={s}>
-                      {severityTone(s).label}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-            </div>
-
-            <Field label="Severity score" hint={`${SCORE_MIN} to ${SCORE_MAX}`}>
-              <div className="flex items-center gap-3">
-                <input
-                  type="range"
-                  min={SCORE_MIN}
-                  max={SCORE_MAX}
-                  step={0.5}
-                  value={draft.severity_score ?? editing.severity_score}
-                  onChange={(e) => setDraft({ ...draft, severity_score: parseFloat(e.target.value) })}
-                  className="flex-1 accent-[var(--accent)]"
-                  aria-label="Severity score"
-                />
-                <span className="fig text-[13px] w-[46px] text-right">
-                  {score(draft.severity_score ?? editing.severity_score)}
-                </span>
-              </div>
+            <Field label="Display name">
+              <Input
+                value={draft.display_name ?? ""}
+                onChange={(e) => setDraft({ ...draft, display_name: e.target.value })}
+              />
             </Field>
 
-            <Field label="Type multiplier" hint={`${MULTIPLIER_MIN} to ${MULTIPLIER_MAX}`}>
+            <Field
+              label="Type multiplier"
+              hint={`${MULTIPLIER_MIN} to ${MULTIPLIER_MAX} — scales every finding of this type`}
+            >
               <div className="flex items-center gap-3">
                 <input
                   type="range"

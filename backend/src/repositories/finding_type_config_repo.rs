@@ -1,6 +1,6 @@
 use crate::database::DatabasePool;
 use crate::error::ApiError;
-use crate::models::finding_type_config::{FindingTypeConfig, FindingTypeConfigUpdate};
+use crate::models::finding_type_config::{FindingTypeConfig, FindingTypeConfigUpdate, TypeWeight};
 use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -17,7 +17,7 @@ pub trait FindingTypeConfigRepository: Send + Sync {
         finding_type: &str,
         update: &FindingTypeConfigUpdate,
     ) -> Result<FindingTypeConfig, ApiError>;
-    async fn get_scoring_map(&self) -> Result<HashMap<String, (f64, f64)>, ApiError>;
+    async fn get_type_weights(&self) -> Result<HashMap<String, TypeWeight>, ApiError>;
     async fn get_categories(&self) -> Result<Vec<String>, ApiError>;
     async fn reset_to_defaults(&self) -> Result<i64, ApiError>;
 }
@@ -37,8 +37,8 @@ impl FindingTypeConfigRepository for SqlxFindingTypeConfigRepository {
     async fn list(&self) -> Result<Vec<FindingTypeConfig>, ApiError> {
         let configs = sqlx::query_as::<_, FindingTypeConfig>(
             r#"
-            SELECT id, finding_type, display_name, category, default_severity, 
-                   severity_score, type_multiplier, description, is_enabled,
+            SELECT id, finding_type, display_name, category,
+                   type_multiplier, description, is_enabled,
                    created_at, updated_at
             FROM finding_type_config
             ORDER BY category, display_name
@@ -56,8 +56,8 @@ impl FindingTypeConfigRepository for SqlxFindingTypeConfigRepository {
     ) -> Result<Option<FindingTypeConfig>, ApiError> {
         let config = sqlx::query_as::<_, FindingTypeConfig>(
             r#"
-            SELECT id, finding_type, display_name, category, default_severity,
-                   severity_score, type_multiplier, description, is_enabled,
+            SELECT id, finding_type, display_name, category,
+                   type_multiplier, description, is_enabled,
                    created_at, updated_at
             FROM finding_type_config
             WHERE finding_type = $1
@@ -82,21 +82,17 @@ impl FindingTypeConfigRepository for SqlxFindingTypeConfigRepository {
             r#"
             UPDATE finding_type_config SET
                 display_name = COALESCE($1, display_name),
-                default_severity = COALESCE($2, default_severity),
-                severity_score = COALESCE($3, severity_score),
-                type_multiplier = COALESCE($4, type_multiplier),
-                description = COALESCE($5, description),
-                is_enabled = COALESCE($6, is_enabled),
-                updated_at = $7
-            WHERE finding_type = $8
-            RETURNING id, finding_type, display_name, category, default_severity,
-                      severity_score, type_multiplier, description, is_enabled,
+                type_multiplier = COALESCE($2, type_multiplier),
+                description = COALESCE($3, description),
+                is_enabled = COALESCE($4, is_enabled),
+                updated_at = $5
+            WHERE finding_type = $6
+            RETURNING id, finding_type, display_name, category,
+                      type_multiplier, description, is_enabled,
                       created_at, updated_at
             "#,
         )
         .bind(&update.display_name)
-        .bind(&update.default_severity)
-        .bind(update.severity_score)
         .bind(update.type_multiplier)
         .bind(&update.description)
         .bind(update.is_enabled)
@@ -108,24 +104,33 @@ impl FindingTypeConfigRepository for SqlxFindingTypeConfigRepository {
         Ok(config)
     }
 
-    /// Get a map of finding_type -> (severity_score, type_multiplier) for risk calculation
-    async fn get_scoring_map(&self) -> Result<HashMap<String, (f64, f64)>, ApiError> {
-        let rows = sqlx::query_as::<_, (String, f64, f64)>(
+    /// Every configured type's weight, for risk calculation.
+    ///
+    /// Disabled rows are returned rather than filtered out in SQL: the scorer treats
+    /// an absent type as "no configuration, score it at face value", so dropping
+    /// disabled rows here would score them at full weight instead of silencing them.
+    async fn get_type_weights(&self) -> Result<HashMap<String, TypeWeight>, ApiError> {
+        let rows = sqlx::query_as::<_, (String, f64, bool)>(
             r#"
-            SELECT finding_type, severity_score, type_multiplier
+            SELECT finding_type, type_multiplier, is_enabled
             FROM finding_type_config
-            WHERE is_enabled = true
             "#,
         )
         .fetch_all(&self.pool)
         .await?;
 
-        let map: HashMap<String, (f64, f64)> = rows
+        Ok(rows
             .into_iter()
-            .map(|(ft, score, mult)| (ft, (score, mult)))
-            .collect();
-
-        Ok(map)
+            .map(|(finding_type, multiplier, is_enabled)| {
+                (
+                    finding_type,
+                    TypeWeight {
+                        multiplier,
+                        is_enabled,
+                    },
+                )
+            })
+            .collect())
     }
 
     async fn get_categories(&self) -> Result<Vec<String>, ApiError> {

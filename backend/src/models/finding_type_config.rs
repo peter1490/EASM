@@ -10,8 +10,6 @@ pub struct FindingTypeConfig {
     pub finding_type: String,
     pub display_name: String,
     pub category: String,
-    pub default_severity: String,
-    pub severity_score: f64,
     pub type_multiplier: f64,
     pub description: Option<String>,
     pub is_enabled: bool,
@@ -23,8 +21,6 @@ pub struct FindingTypeConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct FindingTypeConfigUpdate {
     pub display_name: Option<String>,
-    pub default_severity: Option<String>,
-    pub severity_score: Option<f64>,
     pub type_multiplier: Option<f64>,
     pub description: Option<String>,
     pub is_enabled: Option<bool>,
@@ -39,9 +35,7 @@ pub struct FindingTypeConfigBulkUpdate {
 #[derive(Debug, Clone, Deserialize)]
 pub struct FindingTypeConfigUpdateItem {
     pub finding_type: String,
-    pub severity_score: Option<f64>,
     pub type_multiplier: Option<f64>,
-    pub default_severity: Option<String>,
     pub is_enabled: Option<bool>,
 }
 
@@ -53,7 +47,18 @@ pub struct FindingTypeConfigListResponse {
     pub total_count: i64,
 }
 
-/// Severity levels with their default scores
+/// Bounds the API enforces on a type multiplier. A type may be weighted down to a
+/// tenth of its severity or up to ten times it, but never to zero — silencing a type
+/// is what `is_enabled` is for, and a 0.0 multiplier would hide that intent inside a
+/// number nobody reads.
+pub const MULTIPLIER_MIN: f64 = 0.1;
+pub const MULTIPLIER_MAX: f64 = 10.0;
+
+/// Base score for each severity level.
+///
+/// This is the *only* place a finding's base score comes from. `finding_type_config`
+/// contributes a multiplier and nothing else, so two findings of the same type with
+/// different severities now score differently — which is the point.
 pub const SEVERITY_SCORES: &[(&str, f64)] = &[
     ("critical", 40.0),
     ("high", 20.0),
@@ -69,4 +74,28 @@ pub fn get_severity_score(severity: &str) -> f64 {
         .find(|(s, _)| *s == severity.to_lowercase())
         .map(|(_, score)| *score)
         .unwrap_or(1.0)
+}
+
+/// What `finding_type_config` contributes to a score: a multiplier, and whether the
+/// type counts at all.
+///
+/// `is_enabled` has to travel with the multiplier rather than being filtered out in
+/// SQL. The scorer falls back to a neutral 1.0 for types it has no row for, so a
+/// disabled type that simply went missing from the map would keep scoring at full
+/// weight — the opposite of what disabling it means.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TypeWeight {
+    pub multiplier: f64,
+    pub is_enabled: bool,
+}
+
+impl Default for TypeWeight {
+    /// The weight applied to a finding type with no configuration row: counted, at
+    /// face value, with no thumb on the scale.
+    fn default() -> Self {
+        Self {
+            multiplier: 1.0,
+            is_enabled: true,
+        }
+    }
 }

@@ -1333,9 +1333,16 @@ impl SecurityScanService {
                 format!("Telnet Service Exposed (Port {})", port),
                 "Telnet transmits data in plaintext including credentials. This is extremely dangerous.".to_string(),
             ),
-            // High - Database ports
+            // Critical - Database ports.
+            //
+            // A production database reachable from the internet is at least as severe
+            // as the Telnet case above: it is the data itself, one authentication step
+            // away, and several of these ship with no authentication by default. It sat
+            // at High while scoring keyed off the finding type, so the severity was
+            // inert; now that severity drives the score, High under-rated it badly
+            // enough that a handful of missing response headers outweighed it.
             3306 | 5432 | 1433 | 1521 | 27017 | 27018 => (
-                FindingSeverity::High,
+                FindingSeverity::Critical,
                 "database_exposed".to_string(),
                 format!("Database Port {} Open ({})", port, service),
                 format!("Database service {} is exposed to the internet. This could allow unauthorized access to sensitive data.", service),
@@ -1354,13 +1361,13 @@ impl SecurityScanService {
                 "VNC remote access is exposed to the internet.".to_string(),
             ),
             6379 => (
-                FindingSeverity::High,
+                FindingSeverity::Critical,
                 "database_exposed".to_string(),
                 "Redis Exposed".to_string(),
                 "Redis in-memory database is exposed. Redis often has no authentication by default.".to_string(),
             ),
             9200 | 9300 => (
-                FindingSeverity::High,
+                FindingSeverity::Critical,
                 "database_exposed".to_string(),
                 "Elasticsearch Exposed".to_string(),
                 "Elasticsearch service is exposed to the internet.".to_string(),
@@ -1768,13 +1775,13 @@ impl SecurityScanService {
                     recommendation: rec.to_string(),
                 });
 
-                // Create finding for missing security header
-                let finding_severity = match *severity {
-                    "critical" => FindingSeverity::High,
-                    "high" => FindingSeverity::High,
-                    "medium" => FindingSeverity::Medium,
-                    _ => FindingSeverity::Low,
-                };
+                // Create finding for missing security header.
+                //
+                // Straight through from the table. This used to cap at High and floor
+                // at Low — a fudge for grades that ran too hot, which also meant an
+                // "info" grade could never produce an info finding. `SECURITY_HEADERS`
+                // is now graded so that its own values are the ones we want.
+                let finding_severity = FindingSeverity::from(*severity);
 
                 self.create_finding(
                     scan_id,

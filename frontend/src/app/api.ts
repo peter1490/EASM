@@ -1773,8 +1773,8 @@ export type FindingTypeConfig = {
   finding_type: string;
   display_name: string;
   category: string;
-  default_severity: string;
-  severity_score: number;
+  /** The only scoring input configuration contributes. A finding's base score comes
+   *  from its own severity. */
   type_multiplier: number;
   description: string | null;
   is_enabled: boolean;
@@ -1790,8 +1790,6 @@ export type FindingTypeConfigListResponse = {
 
 export type FindingTypeConfigUpdate = {
   display_name?: string;
-  default_severity?: string;
-  severity_score?: number;
   type_multiplier?: number;
   description?: string;
   is_enabled?: boolean;
@@ -1799,9 +1797,7 @@ export type FindingTypeConfigUpdate = {
 
 export type FindingTypeConfigBulkUpdateItem = {
   finding_type: string;
-  severity_score?: number;
   type_multiplier?: number;
-  default_severity?: string;
   is_enabled?: boolean;
 };
 

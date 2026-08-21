@@ -279,6 +279,12 @@ impl std::fmt::Display for FindingStatus {
 /// Predefined finding types for consistency
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// The finding-type taxonomy.
+///
+/// Nothing outside this file constructs a `FindingType` today: the scanners pass the
+/// wire string to `create_finding` directly, which is how seven types they emit ended
+/// up missing from here and from `finding_type_config` at the same time. Kept in step
+/// with what the scanners actually emit so it is accurate when something does use it.
 pub enum FindingType {
     // Port scan findings
     OpenPort,
@@ -288,6 +294,7 @@ pub enum FindingType {
     AdminPortExposed,
     // Service detection findings
     ServiceDetected,
+    TechnologyDetected,
     OutdatedService,
     VulnerableService,
     UnencryptedService,
@@ -298,9 +305,13 @@ pub enum FindingType {
     ExpiredCertificate,
     SelfSignedCertificate,
     CertificateExpiringSoon,
-    MismatchedCertificate,
+    CertificateHostnameMismatch,
     CertificateChainIncomplete,
     CertificateRevoked,
+    CertificateNotYetValid,
+    CertificateMissingSan,
+    WeakSignatureAlgorithm,
+    WeakKeyStrength,
     // HTTP security findings
     MissingSecurityHeader,
     InsecureCookies,
@@ -329,6 +340,7 @@ pub enum FindingType {
     WeakDmarcPolicy,
     MissingDnssec,
     MissingCaa,
+    DnsResolutionFailed,
     // Vulnerability findings
     KnownCve,
     ExploitableVulnerability,
@@ -350,6 +362,7 @@ impl std::fmt::Display for FindingType {
             FindingType::DatabaseExposed => "database_exposed",
             FindingType::AdminPortExposed => "admin_port_exposed",
             FindingType::ServiceDetected => "service_detected",
+            FindingType::TechnologyDetected => "technology_detected",
             FindingType::OutdatedService => "outdated_service",
             FindingType::VulnerableService => "vulnerable_service",
             FindingType::UnencryptedService => "unencrypted_service",
@@ -359,8 +372,12 @@ impl std::fmt::Display for FindingType {
             FindingType::ExpiredCertificate => "expired_certificate",
             FindingType::SelfSignedCertificate => "self_signed_certificate",
             FindingType::CertificateExpiringSoon => "certificate_expiring_soon",
-            FindingType::MismatchedCertificate => "mismatched_certificate",
+            FindingType::CertificateHostnameMismatch => "certificate_hostname_mismatch",
             FindingType::CertificateChainIncomplete => "certificate_chain_incomplete",
+            FindingType::CertificateNotYetValid => "certificate_not_yet_valid",
+            FindingType::CertificateMissingSan => "certificate_missing_san",
+            FindingType::WeakSignatureAlgorithm => "weak_signature_algorithm",
+            FindingType::WeakKeyStrength => "weak_key_strength",
             FindingType::CertificateRevoked => "certificate_revoked",
             FindingType::MissingSecurityHeader => "missing_security_header",
             FindingType::InsecureCookies => "insecure_cookies",
@@ -386,6 +403,7 @@ impl std::fmt::Display for FindingType {
             FindingType::WeakDmarcPolicy => "weak_dmarc_policy",
             FindingType::MissingDnssec => "missing_dnssec",
             FindingType::MissingCaa => "missing_caa",
+            FindingType::DnsResolutionFailed => "dns_resolution_failed",
             FindingType::KnownCve => "known_cve",
             FindingType::ExploitableVulnerability => "exploitable_vulnerability",
             FindingType::CriticalVulnerability => "critical_vulnerability",

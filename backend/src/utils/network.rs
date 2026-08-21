@@ -836,16 +836,34 @@ pub struct CorsPolicy {
 }
 
 /// Security headers that should be present
+/// Response headers checked on every HTTP asset, with the severity a *missing* one
+/// is reported at.
+///
+/// These grades are load-bearing: a finding's severity is now what drives its risk
+/// score, so this table sets how much header hygiene moves an asset's score. It used
+/// to be nearly decorative — scoring keyed off the finding *type*, so every missing
+/// header contributed the same 3.0 whatever it said here — and the grades drifted
+/// upward accordingly: HSTS was "critical" and CSP "high". Left alone, four missing
+/// headers were enough to rate an otherwise clean site critical.
+///
+/// Nothing here is above medium. A missing response header is a hardening gap, not a
+/// breach: it weakens defence-in-depth against an attack that still needs some other
+/// flaw to land. Reserve high and critical for findings that are exploitable on their
+/// own — an exposed database, default credentials, a live CVE.
 pub const SECURITY_HEADERS: &[(&str, &str, &str, &str)] = &[
     (
         "Strict-Transport-Security",
-        "critical",
+        // Downgrade-attack protection, and only for a first visit over HTTP — a site
+        // already redirecting to HTTPS is not critically exposed without it.
+        "medium",
         "HSTS header enforces HTTPS connections",
         "Add 'Strict-Transport-Security: max-age=31536000; includeSubDomains' header",
     ),
     (
         "Content-Security-Policy",
-        "high",
+        // Real defence-in-depth against XSS, but it mitigates a flaw rather than
+        // being one; a site with no XSS has nothing here to exploit.
+        "medium",
         "CSP prevents XSS and data injection attacks",
         "Implement a Content Security Policy header",
     ),
@@ -857,13 +875,17 @@ pub const SECURITY_HEADERS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "X-Content-Type-Options",
-        "medium",
+        // MIME sniffing needs an attacker-controlled upload served back to matter.
+        "low",
         "Prevents MIME type sniffing",
         "Add 'X-Content-Type-Options: nosniff' header",
     ),
     (
         "X-XSS-Protection",
-        "low",
+        // Deprecated. Every current browser ignores it, and it was removed because
+        // its filter introduced vulnerabilities of its own. Reported for visibility,
+        // scored at nothing.
+        "info",
         "Enables browser XSS filter (legacy)",
         "Add 'X-XSS-Protection: 1; mode=block' header (or use CSP instead)",
     ),
@@ -1211,5 +1233,33 @@ mod tests {
     fn test_generate_cpe() {
         let cpe = generate_cpe("openssh", Some("8.4"));
         assert_eq!(cpe, Some("cpe:/a:openbsd:openssh:8.4".to_string()));
+    }
+
+    /// A missing response header is a hardening gap, never an exploitable finding on
+    /// its own. Since severity now drives risk score directly, one header regraded to
+    /// high or critical would let ordinary hygiene push assets into those bands —
+    /// which is exactly how HSTS ended up "critical" while nothing read the value.
+    #[test]
+    fn no_security_header_is_graded_above_medium() {
+        for (header, severity, _, _) in SECURITY_HEADERS {
+            assert!(
+                matches!(*severity, "info" | "low" | "medium"),
+                "{header} is graded {severity}; headers cap at medium"
+            );
+        }
+    }
+
+    /// Grades are matched as strings and fall through to `info` on a typo, so a
+    /// misspelling would silently zero a header rather than fail.
+    #[test]
+    fn every_security_header_grade_is_a_real_severity() {
+        for (header, severity, _, _) in SECURITY_HEADERS {
+            assert!(
+                crate::models::finding_type_config::SEVERITY_SCORES
+                    .iter()
+                    .any(|(name, _)| name == severity),
+                "{header} has unknown severity {severity}"
+            );
+        }
     }
 }

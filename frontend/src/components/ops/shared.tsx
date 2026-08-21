@@ -53,8 +53,14 @@ export function useOpsRoles() {
  * shell owns that one timer; this is for the tables each segment draws.
  */
 export function usePoll(run: () => void, ms: number, enabled = true) {
+  // Callers pass an inline `run`, so its identity changes every render while
+  // the timer below must not restart. The ref is written after each commit
+  // rather than during render -- the timer only ever reads it from a callback,
+  // so it sees the same value either way.
   const saved = useRef(run);
-  saved.current = run;
+  useEffect(() => {
+    saved.current = run;
+  });
 
   useEffect(() => {
     if (!enabled || ms <= 0) return;

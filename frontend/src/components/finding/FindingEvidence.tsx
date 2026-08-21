@@ -220,12 +220,53 @@ function ChipList({
   return (
     <div className="flex flex-wrap gap-1">
       {shown.map((item, i) => (
-        <Chip key={i} tone={tone}>
-          <span className="mono text-[11px]">{item}</span>
+        // `wrap`, because every list here is built from scan data: a wildcard
+        // SAN, a 90-character technology banner or a whole sentence would
+        // otherwise widen the panel instead of wrapping inside its chip.
+        <Chip key={i} tone={tone} wrap>
+          <span className="mono text-[11px] min-w-0">{item}</span>
         </Chip>
       ))}
       {items.length > max && <Chip>+{items.length - max} more</Chip>}
     </div>
+  );
+}
+
+/** Longest value that still reads as a token rather than prose.
+ *
+ *  Scan payloads put both shapes in the same array position — `missing:
+ *  ["x-frame-options"]` is a chip list, `issues: ["The server reflects any
+ *  Origin it is sent and sets Access-Control-Allow-Credentials: true."]` is
+ *  prose — and only the length tells them apart without a per-key allowlist. */
+const CHIP_MAX_CHARS = 48;
+
+const isChipValue = (v: unknown) => String(v ?? "").length <= CHIP_MAX_CHARS;
+
+/** Free-text list — `issues`, `warnings`, `errors`: full sentences a scanner
+ *  wrote about the target. Rendered as wrapped lines, the way the scan detail
+ *  already renders the same arrays; chips clipped them and scrolled the panel. */
+function NoteList({ items, max = 20 }: { items: string[]; max?: number }) {
+  if (items.length === 0) return <Muted>None</Muted>;
+  const shown = items.slice(0, max);
+  if (shown.length === 1) {
+    return <p className="text-[12.5px] leading-relaxed break-words">{shown[0]}</p>;
+  }
+  return (
+    <>
+      <ul className="space-y-1">
+        {shown.map((item, i) => (
+          <li key={i} className="flex items-start gap-1.5 text-[12.5px] leading-relaxed">
+            <span className="mt-[7px] w-1 h-1 rounded-full bg-ink-3 shrink-0" aria-hidden="true" />
+            <span className="min-w-0 break-words">{item}</span>
+          </li>
+        ))}
+      </ul>
+      {items.length > max && (
+        <p className="mt-1">
+          <Muted>+{items.length - max} more</Muted>
+        </p>
+      )}
+    </>
   );
 }
 
@@ -556,7 +597,7 @@ function SubdomainEnumeration({ data }: { data: Data }) {
         <Row label="Sources">
           <div className="flex flex-wrap gap-1">
             {Object.entries(sources).map(([source, found]) => (
-              <Chip key={source}>
+              <Chip key={source} wrap>
                 {source}
                 <span className="mono text-[11px] text-ink-3">
                   {Array.isArray(found) ? found.length : 0}
@@ -765,7 +806,7 @@ function TechnologyDetected({ data }: { data: Data }) {
             const cpe = asString(tech.cpe);
             return (
               <div key={i} className="flex flex-wrap items-center gap-2">
-                <Chip tone={{ text: "text-accent-ink", wash: "bg-accent-wash" }}>
+                <Chip tone={{ text: "text-accent-ink", wash: "bg-accent-wash" }} wrap>
                   {name}
                   {version ? <span className="mono text-[11px]">{version}</span> : null}
                 </Chip>
@@ -828,7 +869,12 @@ function renderValue(value: unknown, depth = 0): ReactNode {
     if (value.length === 0) return <Muted>None</Muted>;
     const scalars = value.every((v) => v === null || typeof v !== "object");
     if (scalars) {
-      return <ChipList items={value.map((v) => String(v))} max={30} />;
+      const strings = value.map((v) => String(v));
+      return strings.every(isChipValue) ? (
+        <ChipList items={strings} max={30} />
+      ) : (
+        <NoteList items={strings} />
+      );
     }
     if (depth >= 1) {
       return <Muted>{value.length} entries</Muted>;

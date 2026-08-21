@@ -11,14 +11,27 @@ export function Chip({
   tone,
   onClick,
   selected,
+  wrap,
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & {
   tone?: { text: string; wash: string };
   selected?: boolean;
+  /**
+   * Let the chip wrap and stay inside its container. A chip is a token — one
+   * line, sized to its content — which is right for a status or a filter, but
+   * chips whose text comes from scan data can be handed a value of any length,
+   * and `whitespace-nowrap` made those run straight past the panel edge and
+   * drag a horizontal scrollbar across the whole drawer. Set this on every
+   * chip built from payload data.
+   */
+  wrap?: boolean;
 }) {
   const base = cn(
-    "inline-flex items-center gap-1.5 h-[22px] px-[7px] rounded-[5px] border",
-    "text-[11.5px] font-medium whitespace-nowrap",
+    "inline-flex items-center gap-1.5 px-[7px] rounded-[5px] border",
+    "text-[11.5px] font-medium",
+    wrap
+      ? "max-w-full min-h-[22px] py-[3px] text-left whitespace-normal break-words"
+      : "h-[22px] whitespace-nowrap",
     selected
       ? "border-accent bg-accent-wash text-accent-ink"
       : tone
@@ -95,10 +108,12 @@ export function Dot({ color, className }: { color: string; className?: string })
 export function QueryToken({ label, onRemove }: { label: ReactNode; onRemove: () => void }) {
   return (
     <span
-      className="inline-flex items-center gap-1.5 h-[22px] pl-2 pr-1 rounded-[5px] text-[11.5px] font-medium text-accent-ink bg-accent-wash"
+      className="inline-flex items-center gap-1.5 max-w-full min-h-[22px] py-[2px] pl-2 pr-1 rounded-[5px] text-[11.5px] font-medium text-accent-ink bg-accent-wash"
       style={{ border: "1px solid color-mix(in oklch, var(--accent) 28%, transparent)" }}
     >
-      <span className="mono text-[11px]">{label}</span>
+      {/* The label is whatever the analyst typed, so it wraps rather than
+          pushing the query bar wider than the page. */}
+      <span className="mono text-[11px] min-w-0 break-all">{label}</span>
       <button
         type="button"
         onClick={onRemove}

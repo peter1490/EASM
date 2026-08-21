@@ -214,9 +214,10 @@ export function TechPortsPanel({
               {ports.map((entry) => (
                 <span
                   key={entry.port}
+                  className="min-w-0"
                   title={[entry.service, entry.product, entry.version].filter(Boolean).join(" ") || undefined}
                 >
-                  <Chip>
+                  <Chip wrap>
                     {entry.encrypted && <Icon name="key" size={10} className="text-ink-3" />}
                     <span className="mono">{entry.port}</span>
                     {entry.service && <span className="text-ink-3">{entry.service}</span>}
@@ -232,8 +233,8 @@ export function TechPortsPanel({
             <div className="lbl mb-1.5">Technologies</div>
             <div className="flex flex-wrap gap-1.5">
               {technologies.map((tech) => (
-                <span key={tech.key} title={tech.categories?.join(", ")}>
-                  <Chip>
+                <span key={tech.key} className="min-w-0" title={tech.categories?.join(", ")}>
+                  <Chip wrap>
                     {tech.name}
                     {tech.version && <span className="mono text-ink-3">{tech.version}</span>}
                   </Chip>

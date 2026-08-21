@@ -20,6 +20,9 @@ export function RunDetailDrawer({ run, onClose }: { run: DiscoveryRun | null; on
 
   useEffect(() => {
     if (!runId) {
+      // Resetting a closed drawer. The component renders nothing while `run`
+      // is null, so the re-render this queues paints no new frame.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setDetail(null);
       setError(null);
       return;

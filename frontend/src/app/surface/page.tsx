@@ -243,7 +243,6 @@ function Surface() {
   // Adopt an externally-changed q (back button, reset) when nothing is being typed.
   useEffect(() => {
     setText((current) => (current === filters.q ? current : filters.q));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters.q]);
 
   const searchParamsForApi = useCallback(

@@ -292,7 +292,9 @@ export function FindingDetail({
 
       {finding.description && (
         <Section title="Description">
-          <p className="text-[12.5px] text-ink-2 leading-relaxed whitespace-pre-wrap">
+          {/* Scanners build descriptions as `<url> <issue sentences>`, so this
+              carries URLs long enough to need an explicit break opportunity. */}
+          <p className="text-[12.5px] text-ink-2 leading-relaxed whitespace-pre-wrap break-words">
             {finding.description}
           </p>
         </Section>
@@ -300,7 +302,7 @@ export function FindingDetail({
 
       {finding.remediation && (
         <Section title="Remediation">
-          <div className="text-[12.5px] leading-relaxed whitespace-pre-wrap rounded-lg border border-rule bg-ok-wash/60 p-3">
+          <div className="text-[12.5px] leading-relaxed whitespace-pre-wrap break-words rounded-lg border border-rule bg-ok-wash/60 p-3">
             {finding.remediation}
           </div>
         </Section>

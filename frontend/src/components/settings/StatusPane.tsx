@@ -82,6 +82,9 @@ export function StatusPane() {
   }, []);
 
   useEffect(() => {
+    // The first load. It sets state synchronously only on the silent path,
+    // which the interval below takes, not this call.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load(false);
     const iv = setInterval(() => load(true), POLL_MS);
     return () => clearInterval(iv);

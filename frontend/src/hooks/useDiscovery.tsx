@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { getDiscoveryStatus, type DiscoveryStatus } from "@/app/api";
+import { useAuth } from "@/context/AuthContext";
 
 /**
  * One poller for discovery status, shared by everything that needs it.
@@ -28,6 +29,7 @@ const IDLE_MS = 30_000;
 const ACTIVE_MS = 4_000;
 
 export function DiscoveryProvider({ children }: { children: ReactNode }) {
+  const { companyId } = useAuth();
   const [status, setStatus] = useState<DiscoveryStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -36,17 +38,31 @@ export function DiscoveryProvider({ children }: { children: ReactNode }) {
   const running = useRef(false);
   running.current = Boolean(status?.running);
 
+  // A poll started before a company switch must not land after it.
+  const activeCompany = useRef(companyId);
+  activeCompany.current = companyId;
+
   const refresh = useCallback(async () => {
+    const requestedFor = activeCompany.current;
     try {
       const next = await getDiscoveryStatus();
+      if (activeCompany.current !== requestedFor) return;
       setStatus(next);
       setError(null);
     } catch (err) {
+      if (activeCompany.current !== requestedFor) return;
       setError((err as Error).message);
     }
   }, []);
 
+  // Discovery status is company-scoped, so the poll restarts whenever the
+  // active company changes. Clearing first means the top-bar hairline never
+  // keeps showing the run of the company we just left.
   useEffect(() => {
+    setStatus(null);
+    setError(null);
+    if (!companyId) return;
+
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -62,7 +78,7 @@ export function DiscoveryProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [refresh]);
+  }, [refresh, companyId]);
 
   return <DiscoveryContext.Provider value={{ status, error, refresh }}>{children}</DiscoveryContext.Provider>;
 }

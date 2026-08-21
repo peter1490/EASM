@@ -7,6 +7,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
+use trust_dns_resolver::proto::rr::{Record, RecordType};
 use trust_dns_resolver::TokioAsyncResolver;
 
 /// DNS resolution configuration
@@ -543,6 +544,108 @@ impl DnsResolver {
         merged.exists.sort();
         merged.exists.dedup();
         Ok(merged)
+    }
+
+    /// Look up records of an arbitrary type, returning them unparsed.
+    ///
+    /// The typed helpers above cover the handful of record types discovery needs.
+    /// A security scan needs the rest — SOA, SRV, DNSKEY, DS, TLSA, HTTPS — and
+    /// enumerating a helper per type would be a hundred lines of the same code,
+    /// so this hands the caller the records and lets it match on what it asked for.
+    pub async fn lookup_records(
+        &self,
+        name: &str,
+        record_type: RecordType,
+    ) -> Result<Vec<Record>, ApiError> {
+        self.rate_limiter.until_ready().await;
+
+        let name_owned = format!("{}.", name.trim_end_matches('.'));
+        let name_for_error = name_owned.clone();
+        let resolver = self.resolver.clone();
+        let query_timeout = self.config.query_timeout;
+
+        let result = timeout(query_timeout, async move {
+            resolver
+                .lookup(&name_owned, record_type)
+                .await
+                .map_err(|e| {
+                    ApiError::ExternalService(format!(
+                        "{} lookup failed for {}: {}",
+                        record_type, name_owned, e
+                    ))
+                })
+        })
+        .await
+        .map_err(|_| {
+            ApiError::ExternalService(format!(
+                "{} query timeout for {}",
+                record_type, name_for_error
+            ))
+        })?;
+
+        result.map(|lookup| lookup.record_iter().cloned().collect())
+    }
+
+    /// Whether any record of this type exists. Distinguishes "no such record"
+    /// from "the query failed", which matters for DNSSEC: treating a SERVFAIL as
+    /// "unsigned" would report a broken chain of trust as an absent one.
+    pub async fn record_exists(&self, name: &str, record_type: RecordType) -> Option<bool> {
+        match self.lookup_records(name, record_type).await {
+            Ok(records) => Some(!records.is_empty()),
+            Err(e) => {
+                let message = e.to_string();
+                // trust-dns reports an empty authoritative answer as "no records
+                // found", which is a definite negative rather than a failure.
+                if message.contains("no record") || message.contains("No records") {
+                    Some(false)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Query one specific nameserver rather than the system resolver. Needed to
+    /// tell a lame delegation from a working one, and to compare what each
+    /// nameserver in a set actually serves.
+    pub async fn lookup_at_nameserver(
+        &self,
+        nameserver: IpAddr,
+        name: &str,
+        record_type: RecordType,
+    ) -> Result<Vec<Record>, ApiError> {
+        use trust_dns_resolver::config::{
+            NameServerConfigGroup, ResolverConfig, ResolverOpts,
+        };
+
+        let group = NameServerConfigGroup::from_ips_clear(&[nameserver], 53, true);
+        let config = ResolverConfig::from_parts(None, Vec::new(), group);
+        let mut opts = ResolverOpts::default();
+        opts.timeout = self.config.query_timeout;
+        opts.attempts = 1;
+        // The point is to see this server's own answer, not a cached one, and to
+        // learn whether it answers for the zone at all.
+        opts.use_hosts_file = false;
+        opts.cache_size = 0;
+
+        let resolver = TokioAsyncResolver::tokio(config, opts);
+        let name_owned = format!("{}.", name.trim_end_matches('.'));
+        let query_timeout = self.config.query_timeout;
+
+        timeout(query_timeout, async move {
+            resolver
+                .lookup(&name_owned, record_type)
+                .await
+                .map(|lookup| lookup.record_iter().cloned().collect::<Vec<_>>())
+                .map_err(|e| {
+                    ApiError::ExternalService(format!(
+                        "{} lookup at {} failed: {}",
+                        record_type, nameserver, e
+                    ))
+                })
+        })
+        .await
+        .map_err(|_| ApiError::ExternalService(format!("query to {} timed out", nameserver)))?
     }
 
     /// Lookup MX records for a domain

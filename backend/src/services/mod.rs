@@ -9,6 +9,7 @@ pub mod limits;
 pub mod metrics_service;
 pub mod risk_service;
 pub mod scan_service;
+pub mod scanners;
 pub mod search_service;
 pub mod security_scan_service;
 pub mod tag_service;

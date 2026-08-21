@@ -336,7 +336,14 @@ export type DiscoveryScheduleUpdate = {
 // SECURITY SCAN TYPES
 // ============================================================================
 
-export type SecurityScanType = "port_scan" | "tls_analysis" | "http_probe" | "threat_intel" | "full";
+export type SecurityScanType =
+  | "port_scan"
+  | "tls_analysis"
+  | "http_probe"
+  /** DNS, email authentication and zone hygiene, with no active probing of the host. */
+  | "dns_audit"
+  | "threat_intel"
+  | "full";
 export type SecurityScanStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 export type FindingSeverity = "critical" | "high" | "medium" | "low" | "info";
 export type FindingStatus = "open" | "acknowledged" | "in_progress" | "resolved" | "false_positive" | "accepted";

@@ -24,6 +24,7 @@ import {
   type BlacklistCheckResult,
   type ScanListItem,
   type SecurityFinding,
+  type SecurityScanType,
   type TagWithCount,
 } from "@/app/api";
 import {
@@ -46,6 +47,7 @@ import {
   Tabs,
   assetIcon,
   type SegmentOption,
+  type IconName,
 } from "@/components/kit";
 import { cn } from "@/lib/cn";
 import { uniq } from "@/lib/list";
@@ -87,6 +89,132 @@ import {
 type TabKey = "overview" | "findings" | "activity";
 
 const REFRESH_MS = 10_000;
+
+/**
+ * The scan types a user can start from an asset.
+ *
+ * A full scan is the default and does everything. The three focused options
+ * exist because each is useful on its own cadence: a DNS audit touches only the
+ * resolver and can run against every domain daily, while a full scan opens
+ * hundreds of connections to the host.
+ */
+const SCAN_TYPES: { value: SecurityScanType; label: string; hint: string; icon: IconName }[] = [
+  {
+    value: "full",
+    label: "Full scan",
+    hint: "Ports, services, TLS, DNS, HTTP and threat intel",
+    icon: "play",
+  },
+  {
+    value: "tls_analysis",
+    label: "SSL/TLS scan",
+    hint: "Protocols, cipher suites, certificate chain and a graded result",
+    icon: "certificate",
+  },
+  {
+    value: "dns_audit",
+    label: "DNS audit",
+    hint: "Records, DNSSEC, SPF/DKIM/DMARC, zone transfer and takeover",
+    icon: "globe",
+  },
+  {
+    value: "http_probe",
+    label: "HTTP scan",
+    hint: "Security headers, cookies, CORS, methods and exposed files",
+    icon: "link",
+  },
+  {
+    value: "port_scan",
+    label: "Port scan",
+    hint: "Open ports and service detection only",
+    icon: "port",
+  },
+];
+
+/**
+ * Run-scan control: the default action on click, with the focused scan types
+ * behind a disclosure. A single "Run scan" button hid the fact that a targeted
+ * scan is possible at all.
+ */
+function ScanMenu({
+  onRun,
+  running,
+  disabled,
+  size,
+}: {
+  onRun: (scanType: SecurityScanType) => void;
+  running: SecurityScanType | null;
+  disabled: boolean;
+  size: "sm" | "md";
+}) {
+  const [open, setOpen] = useState(false);
+  const container = useRef<HTMLDivElement>(null);
+
+  // Close on an outside click or Escape, so the menu never strands the page.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!container.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div className="relative flex items-center" ref={container}>
+      <Button
+        variant="primary"
+        icon="play"
+        onClick={() => onRun("full")}
+        loading={running === "full"}
+        disabled={disabled}
+        size={size}
+        className="rounded-r-none"
+      >
+        Run scan
+      </Button>
+      <Button
+        variant="primary"
+        icon="chevronDown"
+        onClick={() => setOpen((current) => !current)}
+        disabled={disabled}
+        size={size}
+        aria-label="Choose a scan type"
+        aria-expanded={open}
+        className="rounded-l-none border-l border-black/15 px-2"
+      />
+      {open && (
+        <div className="absolute right-0 top-full z-30 mt-1 w-[286px] rounded-lg border border-rule bg-surface shadow-lg overflow-hidden">
+          {SCAN_TYPES.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                onRun(option.value);
+              }}
+              disabled={running !== null}
+              className="flex w-full items-start gap-2.5 px-3 py-2.5 text-left hover:bg-surface-2 disabled:opacity-50"
+            >
+              <Icon name={option.icon} size={13} className="text-ink-3 mt-0.5 shrink-0" />
+              <span className="min-w-0">
+                <span className="block text-[12.5px] font-medium">{option.label}</span>
+                <span className="block text-[11.5px] text-ink-3">{option.hint}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** Provenance keys the discovery pipeline writes, in the order they read best. */
 const PROVENANCE_KEYS: Array<{ key: string; label: string }> = [
@@ -143,7 +271,7 @@ export function AssetDetail({
   const [notice, setNotice] = useState<string | null>(null);
   const [tab, setTab] = useState<TabKey>("overview");
 
-  const [scanning, setScanning] = useState(false);
+  const [scanning, setScanning] = useState<SecurityScanType | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [recalculating, setRecalculating] = useState(false);
   const [savingImportance, setSavingImportance] = useState(false);
@@ -216,16 +344,20 @@ export function AssetDetail({
     }
   };
 
-  const runScan = () =>
+  const runScan = (scanType: SecurityScanType = "full") =>
     guard(async () => {
       if (!asset) return;
-      setScanning(true);
+      setScanning(scanType);
       try {
-        const scan = await triggerAssetScan(asset.id, "full", `Scan from asset ${asset.value}`);
+        const scan = await triggerAssetScan(
+          asset.id,
+          scanType,
+          `${SCAN_TYPES.find((option) => option.value === scanType)?.label ?? "Scan"} from asset ${asset.value}`,
+        );
         setNotice(`${humanise(scan.scan_type)} scan queued. It runs in the background.`);
         void load();
       } finally {
-        setScanning(false);
+        setScanning(null);
       }
     });
 
@@ -586,7 +718,13 @@ export function AssetDetail({
           title="No findings"
           description="Nothing has been detected on this asset. Run a scan to check again."
           action={
-            <Button variant="primary" icon="play" onClick={runScan} loading={scanning} disabled={!canWrite}>
+            <Button
+              variant="primary"
+              icon="play"
+              onClick={() => void runScan("full")}
+              loading={scanning !== null}
+              disabled={!canWrite}
+            >
               Run scan
             </Button>
           }
@@ -669,16 +807,12 @@ export function AssetDetail({
       <Button icon="download" onClick={downloadReport} loading={downloading} size={page ? "md" : "sm"}>
         PDF report
       </Button>
-      <Button
-        variant="primary"
-        icon="play"
-        onClick={runScan}
-        loading={scanning}
+      <ScanMenu
+        onRun={runScan}
+        running={scanning}
         disabled={!canWrite}
         size={page ? "md" : "sm"}
-      >
-        Run scan
-      </Button>
+      />
     </div>
   );
 

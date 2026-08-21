@@ -9,8 +9,91 @@ All‑in‑one EASM security tool with a high-performance Rust backend and a Nex
 - **PostgreSQL Database**: Robust data persistence with SQLx
 - **External Integrations**: Support for Shodan, VirusTotal, CertSpotter, and more
 - **Asset Discovery**: Automated discovery with confidence scoring
+- **Deep Protocol Scanning**: SSL/TLS, DNS and HTTP assessments at the depth of the
+  dedicated tools — see below
 - **Evidence Management**: File upload and storage capabilities
 - **Modern UI**: Next.js frontend with real-time updates
+
+## Scanning
+
+Three deep scanners live in `backend/src/services/scanners/`. Each aims to
+produce what the well-known tool for that protocol produces, and each grades its
+result on that tool's published scale rather than an invented one.
+
+### SSL/TLS — `sslscan`, `sslyze`, `testssl.sh`, SSL Labs
+
+`rustls` will not negotiate SSLv3, TLS 1.0/1.1, RC4, 3DES, export or anonymous
+suites — correct for a client, useless for a scanner whose job is to find them.
+So `tls_probe` writes the ClientHello bytes itself and speaks the record layer
+directly over TCP.
+
+- Protocol enumeration from SSLv2 to TLS 1.3, each confirmed by an exact-version
+  handshake
+- Cipher-suite enumeration per protocol, plus whose preference order wins
+- Key-exchange strength: DH group size from ServerKeyExchange, named curve from
+  the negotiated `key_share`
+- Certificate chain validated against the Mozilla root program (`webpki-roots`),
+  so `untrusted` means what a browser means; CT SCTs, OCSP Must-Staple, key usage,
+  AIA/CRL endpoints, serial entropy, the 398-day CA/Browser Forum lifetime cap
+- Vulnerabilities: DROWN, POODLE, BEAST, SWEET32, FREAK, LOGJAM, RC4, CRIME,
+  Heartbleed (actively probed with a 64-byte overread that is measured and
+  discarded), insecure renegotiation, missing TLS_FALLBACK_SCSV, ROBOT and
+  LUCKY13. Each is reported as **confirmed** (observed) or **potential** (the
+  configuration is a precondition; proving it needs an oracle test this scanner
+  deliberately does not run) — the two are never conflated
+- A letter grade computed from the published
+  [SSL Labs Server Rating Guide](https://github.com/ssllabs/research/wiki/SSL-Server-Rating-Guide):
+  30/30/40 across protocol, key exchange and cipher strength, with the documented
+  caps and the `T`/`M` grades for trust and name-mismatch failures
+
+### DNS — `dig`, `dnsrecon`, MXToolbox, Hardenize, internet.nl
+
+- Full record sweep: A, AAAA, CNAME, MX, NS, TXT, SOA, SRV, CAA, DNSKEY, DS
+- DNSSEC: is the zone signed, and is the delegation signed with it — an
+  "island of security" (DNSKEY without a parent DS) is reported as its own defect
+- **AXFR zone transfer** attempted against every authoritative nameserver, over a
+  raw DNS TCP transport (`dns_wire`), because a stub resolver cannot send AXFR
+- SPF to RFC 7208 including the **ten-lookup processing limit**, counted
+  recursively through every `include:` and `redirect=` — the rule that silently
+  breaks mail delivery and that a top-level-only check misses
+- DMARC to RFC 7489: policy, subdomain policy, `pct`, alignment, report addresses
+- DKIM selector probing (46 provider defaults), reported as inconclusive because
+  selectors cannot be enumerated from DNS
+- MTA-STS (with the HTTPS policy fetched and parsed), TLS-RPT, BIMI, DANE/TLSA
+- CAA parsed properly, nameserver count/diversity/lame delegation (RFC 2182), SOA
+  timer sanity (RFC 1912, RFC 2308), wildcard DNS, apex CNAME, RFC 1918 addresses
+  in public DNS
+- Dangling-CNAME **subdomain takeover** against 50+ provider signatures, confirmed
+  by the provider's own unclaimed-tenant page rather than by the CNAME target alone
+
+### HTTP — Mozilla Observatory, securityheaders.com, `nuclei`, `nikto`
+
+- Security headers graded on their **value**, not their presence: a CSP that
+  permits `'unsafe-inline'` in `script-src` provides no XSS protection, and is
+  reported as a weak header rather than a present one
+- Scored with the published
+  [Mozilla HTTP Observatory](https://github.com/mozilla/http-observatory/blob/main/httpobs/docs/scoring.md)
+  modifiers and letter chart
+- Cookies: `Secure`, `HttpOnly`, `SameSite`, and the browser-enforced `__Host-` /
+  `__Secure-` prefixes
+- CORS misconfiguration including origin reflection with credentials — visible
+  only when an `Origin` is actually sent, which a header table cannot do
+- HTTP methods confirmed by response rather than by what `Allow:` claims (TRACE is
+  verified by its echo)
+- Redirect chain walked hop by hop, so "redirects to HTTPS eventually" is
+  distinguished from "first hop is HTTPS on the same host"
+- Sensitive file and endpoint exposure (`.git`, `.env`, actuator, phpinfo,
+  `trace.axd`, …), each **validated against expected content** — a server that
+  answers 200 with an SPA shell for every URL produces no findings
+- Directory listing, framework stack traces, mixed content, SRI, `security.txt`,
+  HTTP/2 and HTTP/3
+
+### Scan types
+
+`full` runs everything. `tls_analysis`, `dns_audit` and `http_probe` run one
+scanner each, so a cheap DNS audit can run on a schedule against every domain
+while a full scan runs less often. Pass `{"deep": false}` in a scan's config for
+a fast sweep that skips cipher enumeration, AXFR and path probing.
 
 ## Quickstart (local)
 
@@ -134,6 +217,9 @@ Key variables:
 
 ### Scans
 - `POST /api/scans` - Create new scan `{ target, note?, options? }`
+- `POST /api/assets/:id/scan` - Scan one asset `{ scan_type?, note? }`, where
+  `scan_type` is `full` (default), `tls_analysis`, `dns_audit`, `http_probe`,
+  `port_scan` or `threat_intel`
 - `GET /api/scans` - List all scans
 - `GET /api/scans/:id` - Get scan details
 

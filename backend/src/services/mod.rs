@@ -7,6 +7,7 @@ pub mod external;
 pub mod fingerprint;
 pub mod limits;
 pub mod metrics_service;
+pub mod risk_model;
 pub mod risk_service;
 pub mod scan_service;
 pub mod scanners;

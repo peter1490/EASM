@@ -1255,7 +1255,7 @@ mod tests {
     fn every_security_header_grade_is_a_real_severity() {
         for (header, severity, _, _) in SECURITY_HEADERS {
             assert!(
-                crate::models::finding_type_config::SEVERITY_SCORES
+                crate::services::risk_model::SEVERITY_IMPACT
                     .iter()
                     .any(|(name, _)| name == severity),
                 "{header} has unknown severity {severity}"

@@ -515,7 +515,7 @@ fn build_report_lines(
     let discovery_sources = parse_sources(&asset.sources);
     let risk_score = asset
         .risk_score
-        .map(|score| format!("{:.1}/100", score))
+        .map(|score| format!("{:.0}/{}", score, crate::services::risk_model::RISK_SCORE_MAX as i64))
         .unwrap_or_else(|| "Not calculated".to_string());
     let risk_level = asset
         .risk_level
@@ -1073,7 +1073,10 @@ fn render_dashboard_page(
     total_pages: usize,
 ) -> String {
     let mut content = String::new();
-    let risk_score = asset.risk_score.unwrap_or(0.0).clamp(0.0, 100.0);
+    let risk_score = asset
+        .risk_score
+        .unwrap_or(0.0)
+        .clamp(0.0, crate::services::risk_model::RISK_SCORE_MAX);
     let high_impact = summary.by_severity("critical") + summary.by_severity("high");
 
     content.push_str("0.95 0.97 0.99 rg 0 0 595 842 re f\n");
@@ -1128,7 +1131,7 @@ fn render_dashboard_page(
         125.0,
         80.0,
         "Risk Score",
-        &format!("{:.1}/100", risk_score),
+        &format!("{:.0}/{}", risk_score, crate::services::risk_model::RISK_SCORE_MAX as i64),
         risk_level_color(asset.risk_level.as_deref()),
     );
     render_kpi_card(
@@ -1351,7 +1354,7 @@ fn draw_risk_gauge(content: &mut String, x: f32, y: f32, w: f32, h: f32, score: 
     ));
     content.push_str("0.82 0.85 0.90 RG 1 w\n");
     content.push_str(&format!("{:.2} {:.2} {:.2} {:.2} re S\n", x, y, w, h));
-    let marker_x = x + ((score as f32 / 100.0) * w);
+    let marker_x = x + ((score as f32 / crate::services::risk_model::RISK_SCORE_MAX as f32) * w);
     content.push_str(&format!(
         "0.08 0.10 0.12 rg {:.2} {:.2} m {:.2} {:.2} l {:.2} {:.2} l f\n",
         marker_x,
@@ -1522,7 +1525,9 @@ fn draw_risk_trend_chart(
     for (idx, point) in points.iter().enumerate() {
         let t = (point.calculated_at.timestamp() - start_ts) as f32 / span;
         let px = x + t * w;
-        let py = y + ((point.risk_score as f32).clamp(0.0, 100.0) / 100.0) * h;
+        let py = y + ((point.risk_score as f32).clamp(0.0, crate::services::risk_model::RISK_SCORE_MAX as f32)
+            / crate::services::risk_model::RISK_SCORE_MAX as f32)
+            * h;
         plot_points.push((px, py));
         if idx == 0 {
             content.push_str(&format!("{:.2} {:.2} m\n", px, py));

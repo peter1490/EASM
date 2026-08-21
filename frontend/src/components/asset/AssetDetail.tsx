@@ -56,6 +56,7 @@ import {
   SEVERITY_ORDER,
   findingStatus,
   isOpen,
+  riskFraction,
   riskLevelFromScore,
   riskTone,
   severityFromCvss,
@@ -520,7 +521,7 @@ export function AssetDetail({
           </span>
           {level && <RiskChip level={level} />}
         </div>
-        <Bar value={(asset.risk_score ?? 0) / 100} color={tone.dot} className="mt-2.5" />
+        <Bar value={riskFraction(asset.risk_score)} color={tone.dot} className="mt-2.5" />
         <div className="text-[11.5px] text-ink-3 mt-1.5">
           {asset.last_risk_run ? `Calculated ${ago(asset.last_risk_run)}` : "Never calculated"}
         </div>

@@ -2,31 +2,17 @@ use crate::{
     database::DatabasePool,
     error::ApiError,
     models::{
-        asset::Asset,
-        finding_type_config::{get_severity_score, TypeWeight},
-        risk::CompanyEvolutionPoint,
+        asset::Asset, finding_type_config::TypeWeight, risk::CompanyEvolutionPoint,
         security::SecurityFinding,
     },
     repositories::{AssetRepository, SecurityFindingRepository},
+    services::risk_model::{self, ScoredFinding, ThreatEvidence},
 };
 use chrono::{DateTime, Duration, Utc};
-use std::cmp::Ordering;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
-
-/// The finding half of a risk score.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
-struct FindingScore {
-    /// Contribution after repeats of a type are damped. This is what scores the asset.
-    total: f64,
-    /// The same sum without damping. Recorded alongside `total` so the gap between
-    /// them is visible in an asset's stored factors rather than inferred.
-    raw_total: f64,
-    scored: usize,
-    suppressed: usize,
-}
 
 pub struct RiskService {
     asset_repo: Arc<dyn AssetRepository + Send + Sync>,
@@ -62,88 +48,18 @@ impl RiskService {
         self.finding_type_config_repo.get_type_weights().await
     }
 
-    /// The band a score falls into. The thresholds the frontend documents in the
-    /// risk-scoring settings pane.
-    fn risk_level_for(risk_score: f64) -> &'static str {
-        if risk_score >= 80.0 {
-            "critical"
-        } else if risk_score >= 60.0 {
-            "high"
-        } else if risk_score >= 40.0 {
-            "medium"
-        } else if risk_score >= 20.0 {
-            "low"
-        } else {
-            "info"
-        }
-    }
-
-    /// Weight of each successive finding of the same type, after the first.
+    /// Everything one active finding contributes, or `None` if its type is disabled.
     ///
-    /// Scoring is a linear sum, so before this a pile of small findings outranked one
-    /// serious one: seven missing response headers totalled 39.5 against 36.0 for an
-    /// exposed database. That is backwards, and it is not something the per-type
-    /// multiplier can fix — the multiplier acts on one finding at a time.
-    ///
-    /// The second missing header on an asset tells you much less than the first: both
-    /// have the same cause, that nobody configured headers here. So repeats of one type
-    /// decay geometrically. The series converges, which bounds each type's contribution
-    /// at `1 / (1 - 0.75)` = 4x its own worst finding, no matter how many there are.
-    /// Distinct types still add up undamped — five different kinds of problem really is
-    /// worse than one.
-    const REPEAT_DECAY: f64 = 0.75;
-
-    /// Total contribution of an asset's findings, and how that total was reached.
-    fn score_findings<'a>(
-        findings: impl Iterator<Item = &'a SecurityFinding>,
-        weights: &HashMap<String, TypeWeight>,
-    ) -> FindingScore {
-        let mut by_type: HashMap<&str, Vec<f64>> = HashMap::new();
-        let mut score = FindingScore::default();
-
-        for finding in findings {
-            match Self::score_finding(finding, weights) {
-                Some(points) => {
-                    by_type
-                        .entry(finding.finding_type.as_str())
-                        .or_default()
-                        .push(points);
-                    score.scored += 1;
-                }
-                None => score.suppressed += 1,
-            }
-        }
-
-        for points in by_type.values_mut() {
-            // Rank by contribution, so the decay always spares a type's worst finding.
-            // Findings arrive in whatever order the query returned them; without this
-            // the same asset could score differently between two runs.
-            points.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
-
-            for (rank, contribution) in points.iter().enumerate() {
-                score.raw_total += contribution;
-                score.total += contribution * Self::REPEAT_DECAY.powi(rank as i32);
-            }
-        }
-
-        score
-    }
-
-    /// Points one active finding contributes, or `None` if its type is disabled.
-    ///
-    /// The base score comes from the finding's *own* severity, always. Configuration
-    /// used to supply a `severity_score` keyed by `finding_type`, which meant every
-    /// finding of a type scored identically no matter what the scanner graded it: a
-    /// HIGH missing Content-Security-Policy and a LOW missing Referrer-Policy are both
-    /// `missing_security_header`, so both scored the type's 3.0 while the UI displayed
-    /// HIGH and LOW. The score and the severity column disagreed by construction.
-    ///
-    /// A type's configuration now contributes exactly one thing — a multiplier — which
-    /// scales the whole type without flattening the findings inside it.
-    fn score_finding(
+    /// This is where the signals the scanners already collect finally reach the
+    /// score. `security_scan_service` writes CISA KEV membership, ransomware-campaign
+    /// linkage and the FIRST EPSS probability into every `known_cve` finding's `data`
+    /// column, and until now scoring read none of them: a CVE under active
+    /// exploitation and a dormant one with the same CVSS were the same number.
+    fn scored_finding(
         finding: &SecurityFinding,
         weights: &HashMap<String, TypeWeight>,
-    ) -> Option<f64> {
+        now: DateTime<Utc>,
+    ) -> Option<ScoredFinding> {
         let weight = weights
             .get(&finding.finding_type)
             .copied()
@@ -153,10 +69,41 @@ impl RiskService {
             return None;
         }
 
-        let severity_score = get_severity_score(&finding.severity);
-        let cvss_bonus = finding.cvss_score.map(|s| s * 2.0).unwrap_or(0.0);
+        let data = &finding.data;
+        let flag = |key: &str| data.get(key).and_then(serde_json::Value::as_bool) == Some(true);
 
-        Some((severity_score + cvss_bonus) * weight.multiplier)
+        // A CVE is its own root cause, so the same CVE seen on five ports damps to
+        // roughly one problem while five different CVEs stay five. Anything else is
+        // keyed by type, where the type *is* the cause — "nobody set headers here".
+        let cve_id = finding
+            .cve_ids
+            .as_ref()
+            .and_then(|ids| ids.first())
+            .cloned()
+            .or_else(|| {
+                data.get("cve_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            });
+
+        let threat = ThreatEvidence {
+            known_exploited: flag("known_exploited") || flag("exploitable"),
+            ransomware_linked: flag("known_ransomware_campaign_use"),
+            epss: data
+                .get("epss_probability")
+                .and_then(serde_json::Value::as_f64),
+            public_exploit: flag("has_public_exploit"),
+            is_cve: cve_id.is_some(),
+        };
+
+        Some(ScoredFinding {
+            root_cause: cve_id.unwrap_or_else(|| finding.finding_type.clone()),
+            severity: finding.severity.clone(),
+            cvss_score: finding.cvss_score,
+            threat,
+            age_days: (now - finding.first_seen_at).num_days().max(0) as f64,
+            type_multiplier: weight.multiplier,
+        })
     }
 
     /// Calculate risk score for a single asset based on its security findings
@@ -200,57 +147,82 @@ impl RiskService {
             .list_by_asset(&asset_id, 1000, company_id)
             .await?;
 
-        // 4. Score the active findings. Each one is scored from its own severity, the
-        //    configuration weights the type it belongs to, and repeats of a type decay.
-        //    One definition of "still needs work", shared with the SQL paths.
-        let active = || {
-            findings
-                .iter()
-                .filter(|f| crate::models::security::is_active_status(&f.status))
-        };
+        // 4. Reduce the active findings to what scoring needs. One definition of
+        //    "still needs work", shared with the SQL paths.
+        let now = Utc::now();
+        let active: Vec<&SecurityFinding> = findings
+            .iter()
+            .filter(|f| crate::models::security::is_active_status(&f.status))
+            .collect();
 
         let mut severity_counts: HashMap<String, i32> = HashMap::new();
-        for finding in active() {
+        for finding in &active {
             *severity_counts.entry(finding.severity.clone()).or_insert(0) += 1;
         }
 
-        let score = Self::score_findings(active(), &type_weights);
-        let finding_score = score.total;
+        let scored: Vec<ScoredFinding> = active
+            .iter()
+            .filter_map(|f| Self::scored_finding(f, &type_weights, now))
+            .collect();
+        let suppressed = active.len() - scored.len();
 
-        // 5. Base risk from asset type and exposure
-        let exposure_score = match asset.asset_type {
-            crate::models::asset::AssetType::Ip => 10.0, // Public IP most exposed
-            crate::models::asset::AssetType::Domain => 8.0, // Domains are exposed
-            crate::models::asset::AssetType::Certificate => 3.0,
-            _ => 1.0,
+        // 5. Fold them into one hazard. Repeats of a root cause damp, distinct causes
+        //    add with a shallow breadth decay, and a floor keeps the asset's band from
+        //    contradicting the severity shown beside it.
+        let aggregate = risk_model::aggregate(&scored);
+
+        // 6. Exposure and business importance scale the hazard rather than the score,
+        //    so they move the asset along the curve instead of into its ceiling.
+        let exposure_factor = risk_model::exposure_factor(&asset.asset_type);
+        let criticality_factor = risk_model::criticality_factor(asset.importance);
+        let weighted_hazard = aggregate.hazard * exposure_factor * criticality_factor;
+
+        // 7. Project onto 0–1000. Bounded by construction — no clamp, and no ties.
+        let risk_score = risk_model::project(weighted_hazard);
+        let risk_level = risk_model::risk_level_for(risk_score);
+
+        // 8. Store the whole derivation. "Why is this asset 870" has to be answerable
+        //    from the stored factors alone, without re-running the scan.
+        let top_findings: Vec<serde_json::Value> = {
+            let mut ranked: Vec<(f64, &ScoredFinding)> = scored
+                .iter()
+                .map(|f| (risk_model::finding_score(f), f))
+                .collect();
+            ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+            ranked
+                .iter()
+                .take(5)
+                .map(|(score, f)| {
+                    json!({
+                        "root_cause": f.root_cause,
+                        "severity": f.severity,
+                        "score": (score * 10.0).round() / 10.0,
+                        "known_exploited": f.threat.known_exploited,
+                        "ransomware_linked": f.threat.ransomware_linked,
+                        "epss": f.threat.epss,
+                        "age_days": f.age_days,
+                    })
+                })
+                .collect()
         };
 
-        // 6. Apply importance multiplier (0-5 mapped to 1.0 - 2.0)
-        let importance_multiplier = 1.0 + (asset.importance as f64 * 0.2);
-
-        let mut risk_score = (exposure_score + finding_score) * importance_multiplier;
-
-        // Cap at 100 for display purposes
-        risk_score = risk_score.min(100.0);
-
-        // 7. Determine Risk Level
-        let risk_level = Self::risk_level_for(risk_score);
-
-        // 8. Store factors for history and debugging
         let factors = json!({
-            "exposure_score": exposure_score,
-            "finding_score": finding_score,
-            "importance_multiplier": importance_multiplier,
+            "model": "hazard-v2",
+            "scale_max": risk_model::RISK_SCORE_MAX,
+            "hazard": aggregate.hazard,
+            "hazard_undamped": aggregate.hazard_undamped,
+            "weighted_hazard": weighted_hazard,
+            "exposure_factor": exposure_factor,
+            "criticality_factor": criticality_factor,
+            "root_causes": aggregate.root_causes,
+            "worst_finding_score": aggregate.worst_finding_score,
+            "floor_applied": aggregate.floor_applied,
             "finding_count": findings.len(),
-            // Not `status != resolved && status != false_positive`: that inline pair
-            // disagreed with `is_active_status` — the check the loop above uses — for
-            // every other status, so this number could exceed the findings actually
-            // scored. Active is scored plus suppressed, by construction.
-            "active_findings": score.scored + score.suppressed,
+            "active_findings": active.len(),
+            "scored_findings": scored.len(),
+            "suppressed_findings": suppressed,
             "severity_counts": severity_counts,
-            "scored_findings": score.scored,
-            "suppressed_findings": score.suppressed,
-            "finding_score_undamped": score.raw_total,
+            "top_findings": top_findings,
         });
 
         // 9. Update Asset with new risk data
@@ -260,12 +232,14 @@ impl RiskService {
             .await?;
 
         tracing::info!(
-            "Calculated risk for asset {}: score={:.1}, level={}, findings={}, suppressed={}",
+            "Calculated risk for asset {}: score={:.1}, level={}, hazard={:.3}, causes={}, findings={}, suppressed={}",
             asset.identifier,
             risk_score,
             risk_level,
+            aggregate.hazard,
+            aggregate.root_causes,
             findings.len(),
-            score.suppressed
+            suppressed
         );
 
         Ok(updated_asset)
@@ -459,7 +433,11 @@ impl RiskService {
 
         let risk_rows = sqlx::query_as::<_, (DateTime<Utc>, Option<f64>)>(
             r#"
-            SELECT date_trunc('day', h.calculated_at) as bucket, AVG(h.risk_score) as avg_score
+            -- Normalise onto the current scale. Rows predating the hazard model were
+            -- scored out of 100; averaging them raw against 0-1000 rows would draw a
+            -- cliff on the trend chart where only the scale changed.
+            SELECT date_trunc('day', h.calculated_at) as bucket,
+                   AVG(h.risk_score * 1000.0 / h.scale_max) as avg_score
             FROM asset_risk_history h
             JOIN assets a ON a.id = h.asset_id
             WHERE a.company_id = $1 AND h.calculated_at >= $2
@@ -532,17 +510,11 @@ mod tests {
     use super::*;
     use crate::models::security::SecurityFinding;
 
-    /// Scores are sums of products of decimals, so they land a few ULPs off the
-    /// value you would write down by hand. Compare against what a human expects.
-    fn assert_score(actual: Option<f64>, expected: f64) {
-        let actual = actual.expect("finding should have scored");
-        assert!(
-            (actual - expected).abs() < 1e-9,
-            "expected {expected}, got {actual}"
-        );
-    }
-
-    fn finding(finding_type: &str, severity: &str, cvss: Option<f64>) -> SecurityFinding {
+    /// The scoring arithmetic itself is covered in `risk_model`. What matters here is
+    /// the translation: a `SecurityFinding` row carries its threat evidence inside a
+    /// JSONB blob, and reading the wrong keys silently drops the signal rather than
+    /// failing.
+    fn finding(finding_type: &str, severity: &str, data: serde_json::Value) -> SecurityFinding {
         let now = Utc::now();
         SecurityFinding {
             id: Uuid::new_v4(),
@@ -555,13 +527,13 @@ mod tests {
             title: finding_type.to_string(),
             description: None,
             remediation: None,
-            data: json!({}),
+            data,
             status: "open".to_string(),
             first_seen_at: now,
             last_seen_at: now,
             resolved_at: None,
             resolved_by: None,
-            cvss_score: cvss,
+            cvss_score: None,
             cve_ids: None,
             tags: None,
             company_id: Uuid::new_v4(),
@@ -585,42 +557,59 @@ mod tests {
             .collect()
     }
 
-    /// The regression this change exists for. Both of these are
-    /// `missing_security_header`; while configuration carried a per-type severity
-    /// score, both flattened to an identical 3.3 regardless of what the scanner
-    /// graded them.
+    /// The whole point of the rework: the scanner has been writing KEV and EPSS into
+    /// `data` all along and scoring never read them back.
     #[test]
-    fn same_type_scores_by_its_own_severity() {
-        let config = weights(&[("missing_security_header", 1.1, true)]);
+    fn threat_evidence_is_read_out_of_the_finding_data() {
+        let f = finding(
+            "known_cve",
+            "critical",
+            json!({
+                "cve_id": "CVE-2021-44228",
+                "known_exploited": true,
+                "known_ransomware_campaign_use": true,
+                "epss_probability": 0.9746,
+                "has_public_exploit": true,
+            }),
+        );
 
-        let csp =
-            RiskService::score_finding(&finding("missing_security_header", "high", None), &config);
-        let referrer =
-            RiskService::score_finding(&finding("missing_security_header", "low", None), &config);
+        let scored = RiskService::scored_finding(&f, &weights(&[]), Utc::now()).unwrap();
 
-        assert_score(csp, 22.0); // 20.0 high × 1.1
-        assert_score(referrer, 3.3); // 3.0 low  × 1.1
+        assert_eq!(scored.root_cause, "CVE-2021-44228");
+        assert!(scored.threat.is_cve);
+        assert!(scored.threat.known_exploited);
+        assert!(scored.threat.ransomware_linked);
+        assert!(scored.threat.public_exploit);
+        assert_eq!(scored.threat.epss, Some(0.9746));
     }
 
+    /// `cve_ids` is the column; `data.cve_id` is what the technology scanner writes.
+    /// Either one has to key the root cause, or the same CVE on two ports stops
+    /// damping against itself.
     #[test]
-    fn multiplier_is_the_only_thing_configuration_contributes() {
-        let exposed = finding("database_exposed", "high", None);
+    fn the_cve_column_also_names_the_root_cause() {
+        let mut f = finding("known_cve", "high", json!({}));
+        f.cve_ids = Some(vec!["CVE-2023-1234".to_string()]);
 
-        let unconfigured = RiskService::score_finding(&exposed, &weights(&[]));
-        let weighted =
-            RiskService::score_finding(&exposed, &weights(&[("database_exposed", 1.8, true)]));
-
-        assert_score(unconfigured, 20.0); // no row: severity at face value
-        assert_score(weighted, 36.0); // 20.0 × 1.8
+        let scored = RiskService::scored_finding(&f, &weights(&[]), Utc::now()).unwrap();
+        assert_eq!(scored.root_cause, "CVE-2023-1234");
+        assert!(scored.threat.is_cve);
     }
 
+    /// A finding with no CVE is something the scanner observed, and it is keyed by
+    /// type — the type is the cause.
     #[test]
-    fn cvss_is_added_before_the_multiplier() {
-        let config = weights(&[("known_cve", 1.5, true)]);
-        let scored = RiskService::score_finding(&finding("known_cve", "high", Some(9.8)), &config);
+    fn an_observed_finding_is_keyed_by_type_and_is_not_a_cve() {
+        let scored = RiskService::scored_finding(
+            &finding("missing_security_header", "medium", json!({})),
+            &weights(&[]),
+            Utc::now(),
+        )
+        .unwrap();
 
-        // (20.0 + 19.6) × 1.5 — the bonus is weighted by the type, not bolted on after.
-        assert_score(scored, 59.4);
+        assert_eq!(scored.root_cause, "missing_security_header");
+        assert!(!scored.threat.is_cve);
+        assert_eq!(scored.threat.epss, None);
     }
 
     /// A disabled type has to score nothing. Disabled rows used to be filtered out in
@@ -628,238 +617,162 @@ mod tests {
     /// weight — the opposite of what the toggle promises.
     #[test]
     fn disabled_type_scores_nothing() {
-        let config = weights(&[("no_waf_detected", 1.0, false)]);
+        assert!(RiskService::scored_finding(
+            &finding("no_waf_detected", "low", json!({})),
+            &weights(&[("no_waf_detected", 1.0, false)]),
+            Utc::now(),
+        )
+        .is_none());
+    }
+
+    /// An unconfigured type is counted at face value, and a configured one carries
+    /// its multiplier through to the model.
+    #[test]
+    fn the_type_multiplier_reaches_the_model() {
+        let f = finding("database_exposed", "critical", json!({}));
+        let now = Utc::now();
+
+        let unconfigured = RiskService::scored_finding(&f, &weights(&[]), now).unwrap();
+        let weighted =
+            RiskService::scored_finding(&f, &weights(&[("database_exposed", 1.8, true)]), now)
+                .unwrap();
+
+        assert_eq!(unconfigured.type_multiplier, 1.0);
+        assert_eq!(weighted.type_multiplier, 1.8);
+        assert!(risk_model::finding_score(&weighted) > risk_model::finding_score(&unconfigured));
+    }
+
+    /// Age comes from `first_seen_at`, and a clock skew that puts it in the future
+    /// must not produce a negative age.
+    #[test]
+    fn age_is_measured_from_first_seen_and_never_negative() {
+        let now = Utc::now();
+        let mut old = finding("missing_security_header", "low", json!({}));
+        old.first_seen_at = now - Duration::days(90);
         assert_eq!(
-            RiskService::score_finding(&finding("no_waf_detected", "low", None), &config),
-            None
+            RiskService::scored_finding(&old, &weights(&[]), now)
+                .unwrap()
+                .age_days,
+            90.0
+        );
+
+        let mut future = finding("missing_security_header", "low", json!({}));
+        future.first_seen_at = now + Duration::days(5);
+        assert_eq!(
+            RiskService::scored_finding(&future, &weights(&[]), now)
+                .unwrap()
+                .age_days,
+            0.0
         );
     }
 
-    #[test]
-    fn unknown_severity_falls_back_without_panicking() {
-        let scored =
-            RiskService::score_finding(&finding("something_new", "moderate", None), &weights(&[]));
-        assert_score(scored, 1.0);
-    }
-
-    /// The two assets that surfaced the bug, scored end to end against the seeded
-    /// multipliers and the current header grades.
+    /// The two real assets that drove the previous rework, scored end to end.
     ///
-    /// Three rounds of numbers for these: 43.8 medium / 34.1 low when configuration
-    /// supplied a per-type severity score; 91.4 / 91.9 both critical once severity
-    /// drove the score but the header table still graded HSTS critical and CSP high;
-    /// and these, once the multipliers stopped restating severity and the headers were
-    /// graded as the hardening gaps they are.
-    ///
-    /// The IP leads now on the one substantive difference between the two assets — a
-    /// self-signed certificate — rather than on its exposure base.
+    /// Under the model this replaced both came out "critical" at the 100.0 ceiling
+    /// once importance was applied; under the one before that, 43.8 and 34.1. Header
+    /// hygiene plus a self-signed certificate is a low-risk asset that wants tidying,
+    /// not an emergency, and the score now says so while leaving the whole upper half
+    /// of the scale for assets that are actually being attacked.
     #[test]
-    fn real_assets_rank_by_severity_not_by_type() {
-        // Post-recalibration: every type here scores at its severity.
-        let config = weights(&[
-            ("missing_security_header", 1.0, true),
-            ("self_signed_certificate", 1.0, true),
-            ("no_waf_detected", 1.0, true),
-            ("open_port", 1.0, true),
-            ("missing_caa", 1.0, true),
-            ("technology_detected", 1.0, true),
-        ]);
-
-        let total = |exposure: f64, findings: &[SecurityFinding]| -> f64 {
-            exposure + RiskService::score_findings(findings.iter(), &config).total
+    fn real_assets_land_in_the_hygiene_band() {
+        let now = Utc::now();
+        let config = weights(&[]);
+        let score = |asset_type: crate::models::asset::AssetType, rows: &[SecurityFinding]| {
+            let scored: Vec<_> = rows
+                .iter()
+                .filter_map(|f| RiskService::scored_finding(f, &config, now))
+                .collect();
+            risk_model::project(
+                risk_model::aggregate(&scored).hazard
+                    * risk_model::exposure_factor(&asset_type)
+                    * risk_model::criticality_factor(3),
+            )
         };
 
-        // Header severities follow `SECURITY_HEADERS`: HSTS/CSP/X-Frame-Options
-        // medium, X-Content-Type-Options and the rest low, X-XSS-Protection info.
+        let hdr = |severity: &str| finding("missing_security_header", severity, json!({}));
+        let port = || finding("open_port", "info", json!({}));
+
         let ip = [
-            finding("missing_security_header", "medium", None), // CSP        10.0
-            finding("missing_security_header", "medium", None), // HSTS       10.0
-            finding("missing_security_header", "medium", None), // XFO        10.0
-            finding("missing_security_header", "low", None),    // Permissions 3.0
-            finding("missing_security_header", "low", None),    // Referrer    3.0
-            finding("missing_security_header", "info", None),   // XSS         0.5
-            finding("self_signed_certificate", "medium", None), //            10.0
-            finding("no_waf_detected", "low", None),            //             3.0
-            finding("open_port", "info", None),                 // 443         0.5
-            finding("open_port", "info", None),                 // 53          0.5
-            finding("open_port", "info", None),                 // 80          0.5
+            hdr("medium"),
+            hdr("medium"),
+            hdr("medium"),
+            hdr("low"),
+            hdr("low"),
+            hdr("info"),
+            finding("self_signed_certificate", "medium", json!({})),
+            finding("no_waf_detected", "low", json!({})),
+            port(),
+            port(),
+            port(),
         ];
-
         let domain = [
-            finding("missing_security_header", "medium", None), // CSP        10.0
-            finding("missing_security_header", "medium", None), // HSTS       10.0
-            finding("missing_security_header", "medium", None), // XFO        10.0
-            finding("missing_security_header", "low", None),    // XCTO        3.0
-            finding("missing_security_header", "low", None),    // Permissions 3.0
-            finding("missing_security_header", "low", None),    // Referrer    3.0
-            finding("missing_security_header", "info", None),   // XSS         0.5
-            finding("no_waf_detected", "low", None),            //             3.0
-            finding("missing_caa", "low", None),                //             3.0
-            finding("technology_detected", "info", None),       //             0.5
-            finding("open_port", "info", None),                 // 443         0.5
-            finding("open_port", "info", None),                 // 53          0.5
-            finding("open_port", "info", None),                 // 80          0.5
+            hdr("medium"),
+            hdr("medium"),
+            hdr("medium"),
+            hdr("low"),
+            hdr("low"),
+            hdr("low"),
+            hdr("info"),
+            finding("no_waf_detected", "low", json!({})),
+            finding("missing_caa", "low", json!({})),
+            finding("technology_detected", "info", json!({})),
+            port(),
+            port(),
+            port(),
         ];
 
-        // Six missing headers damp from 36.5 to 25.46, seven from 39.5 to 26.14.
-        let ip_score = total(10.0, &ip);
-        let domain_score = total(8.0, &domain);
+        let ip_score = score(crate::models::asset::AssetType::Ip, &ip);
+        let domain_score = score(crate::models::asset::AssetType::Domain, &domain);
 
-        assert!((ip_score - 49.61).abs() < 0.01, "ip scored {ip_score}");
-        assert!(
-            (domain_score - 41.80).abs() < 0.01,
-            "domain scored {domain_score}"
-        );
-
-        // Header hygiene plus a self-signed certificate is a medium asset, not a
-        // critical one. The IP still leads, now on the certificate rather than on the
-        // two points its asset type gets for free.
-        assert_eq!(RiskService::risk_level_for(ip_score), "medium");
-        assert_eq!(RiskService::risk_level_for(domain_score), "medium");
+        assert_eq!(risk_model::risk_level_for(ip_score), "low");
+        assert_eq!(risk_model::risk_level_for(domain_score), "low");
+        // The IP still leads, on the one substantive difference between them.
+        assert!(ip_score > domain_score, "{ip_score} vs {domain_score}");
     }
 
-    /// A missing header must never on its own outweigh a finding that is exploitable
+    /// A missing header must never on its own outweigh a weakness that is exploitable
     /// without help. Four missing headers used to be enough to rate a site critical.
     #[test]
-    fn header_hygiene_cannot_reach_critical_alone() {
-        let config = weights(&[("missing_security_header", 1.0, true)]);
+    fn header_hygiene_cannot_outrank_an_exploited_cve() {
+        let now = Utc::now();
+        let config = weights(&[]);
+        let hazard = |rows: &[SecurityFinding]| {
+            risk_model::aggregate(
+                &rows
+                    .iter()
+                    .filter_map(|f| RiskService::scored_finding(f, &config, now))
+                    .collect::<Vec<_>>(),
+            )
+            .hazard
+        };
 
-        // Every header in `SECURITY_HEADERS` missing at once, at its graded severity.
-        let all_missing = [
-            finding("missing_security_header", "medium", None), // HSTS
-            finding("missing_security_header", "medium", None), // CSP
-            finding("missing_security_header", "medium", None), // X-Frame-Options
-            finding("missing_security_header", "low", None),    // X-Content-Type
-            finding("missing_security_header", "low", None),    // Referrer-Policy
-            finding("missing_security_header", "low", None),    // Permissions-Policy
-            finding("missing_security_header", "info", None),   // X-XSS-Protection
-        ];
-
-        // 10.0 is the most exposed asset type.
-        let worst = 10.0 + RiskService::score_findings(all_missing.iter(), &config).total;
-
-        assert!(worst < 80.0, "header-only asset reached {worst}");
-        assert_eq!(RiskService::risk_level_for(worst), "low");
-    }
-
-    /// What the multiplier is for: at equal severity, a type that means the weakness
-    /// is reachable now outranks one that means a missing hardening layer.
-    ///
-    /// Note this holds per finding, not per asset — scoring sums linearly, so seven
-    /// missing headers (39.5) still total more than one exposed database (36.0). Only
-    /// raising the severity the port scanner assigns exposed databases, or damping
-    /// repeats of one type, would change that; the multiplier alone cannot.
-    #[test]
-    fn active_exposure_outranks_hygiene_at_equal_severity() {
-        let config = weights(&[
-            ("missing_security_header", 1.0, true),
-            ("database_exposed", 1.8, true),
-        ]);
-
-        let db = RiskService::score_finding(&finding("database_exposed", "high", None), &config);
-        let header =
-            RiskService::score_finding(&finding("missing_security_header", "high", None), &config);
-
-        assert_score(db, 36.0); // 20.0 × 1.8
-        assert_score(header, 20.0); // 20.0 × 1.0
-        assert!(db > header);
-    }
-
-    /// The ordering that motivated damping, and that a linear sum got backwards: one
-    /// internet-reachable database has to outrank a completely unhardened header set.
-    #[test]
-    fn one_exposed_database_outranks_every_missing_header() {
-        let config = weights(&[
-            ("missing_security_header", 1.0, true),
-            ("database_exposed", 1.8, true),
-        ]);
-
-        // `categorize_port` reports an exposed database as critical.
-        let database = [finding("database_exposed", "critical", None)];
-        let all_headers = [
-            finding("missing_security_header", "medium", None), // HSTS
-            finding("missing_security_header", "medium", None), // CSP
-            finding("missing_security_header", "medium", None), // X-Frame-Options
-            finding("missing_security_header", "low", None),    // X-Content-Type
-            finding("missing_security_header", "low", None),    // Referrer-Policy
-            finding("missing_security_header", "low", None),    // Permissions-Policy
-            finding("missing_security_header", "info", None),   // X-XSS-Protection
-        ];
-
-        let database_score = RiskService::score_findings(database.iter(), &config).total;
-        let header_score = RiskService::score_findings(all_headers.iter(), &config).total;
-
-        assert_score(Some(database_score), 72.0); // 40.0 critical × 1.8
-        assert!(
-            database_score > header_score,
-            "database {database_score} vs headers {header_score}"
-        );
-    }
-
-    /// A type's contribution is bounded at `1 / (1 - REPEAT_DECAY)` = 4x its own worst
-    /// finding, so no volume of one finding type can run away with an asset's score.
-    #[test]
-    fn repeats_of_a_type_converge_to_a_bound() {
-        let config = weights(&[("missing_security_header", 1.0, true)]);
-        let many: Vec<_> = (0..500)
-            .map(|_| finding("missing_security_header", "medium", None))
+        let all_headers: Vec<_> = ["medium", "medium", "medium", "low", "low", "low", "info"]
+            .iter()
+            .map(|s| finding("missing_security_header", s, json!({})))
             .collect();
 
-        let total = RiskService::score_findings(many.iter(), &config).total;
+        let mut exploited = finding(
+            "known_cve",
+            "critical",
+            json!({ "cve_id": "CVE-2021-44228", "known_exploited": true }),
+        );
+        exploited.cvss_score = Some(10.0);
 
-        assert!(total < 40.0, "500 medium findings reached {total}");
-        assert!(total > 39.9, "bound should be approached, got {total}");
-    }
+        let headers = hazard(&all_headers);
+        let cve = hazard(std::slice::from_ref(&exploited));
 
-    /// Findings arrive in whatever order the query returned them, so damping must rank
-    /// by contribution rather than by position — otherwise the same asset scores
-    /// differently between two runs, and a trailing critical gets damped to nothing.
-    #[test]
-    fn damping_is_independent_of_finding_order() {
-        let config = weights(&[("known_cve", 1.0, true)]);
+        // 0.33 against 3.35 — an order of magnitude, where the old linear sum put
+        // seven headers (39.5 points) *above* an exposed database (36.0).
+        assert!(cve > headers * 8.0, "headers {headers} vs cve {cve}");
 
-        let worst_first = [
-            finding("known_cve", "critical", None),
-            finding("known_cve", "low", None),
-            finding("known_cve", "medium", None),
-        ];
-        let worst_last = [
-            finding("known_cve", "low", None),
-            finding("known_cve", "medium", None),
-            finding("known_cve", "critical", None),
-        ];
-
-        let a = RiskService::score_findings(worst_first.iter(), &config).total;
-        let b = RiskService::score_findings(worst_last.iter(), &config).total;
-
-        assert!((a - b).abs() < 1e-9, "{a} vs {b}");
-        assert_score(Some(a), 40.0 + 10.0 * 0.75 + 3.0 * 0.5625);
-    }
-
-    /// Damping is per type. Five different kinds of problem genuinely is worse than
-    /// five instances of one, and the score has to say so.
-    #[test]
-    fn distinct_types_do_not_damp_each_other() {
-        let config = weights(&[]);
-        let distinct = [
-            finding("missing_security_header", "medium", None),
-            finding("self_signed_certificate", "medium", None),
-            finding("missing_caa", "medium", None),
-            finding("no_waf_detected", "medium", None),
-        ];
-        let repeated = [
-            finding("missing_security_header", "medium", None),
-            finding("missing_security_header", "medium", None),
-            finding("missing_security_header", "medium", None),
-            finding("missing_security_header", "medium", None),
-        ];
-
-        let spread = RiskService::score_findings(distinct.iter(), &config);
-        let piled = RiskService::score_findings(repeated.iter(), &config);
-
-        assert_score(Some(spread.total), 40.0); // four types, no damping
-        assert!(piled.total < spread.total);
-        // The undamped sum is recorded either way, so the gap stays visible.
-        assert_score(Some(piled.raw_total), 40.0);
+        // Headers alone are one root cause and land at 182: informational hygiene,
+        // not an incident. The same site also missing a WAF, CAA records and running
+        // exposed ports adds root causes and crosses into "low" — which is the
+        // gradient the band boundary is there to express.
+        assert_eq!(
+            risk_model::risk_level_for(risk_model::project(headers)),
+            "info"
+        );
+        assert_eq!(risk_model::risk_level_for(risk_model::project(cve)), "critical");
     }
 }

@@ -24,7 +24,7 @@ import {
 } from "@/components/kit";
 import { TrendChart, TrendLegend } from "@/components/charts/TrendChart";
 import { useDiscovery, runProgress } from "@/hooks/useDiscovery";
-import { OPEN_STATUSES, riskTone, severityTone, SEVERITY_ORDER, RISK_ORDER } from "@/lib/severity";
+import { OPEN_STATUSES, riskFraction, riskTone, severityTone, SEVERITY_ORDER, RISK_ORDER } from "@/lib/severity";
 import { ago, elapsed, num, pct, plural, score } from "@/lib/format";
 import { useAuth } from "@/context/AuthContext";
 
@@ -520,7 +520,7 @@ function AssetQueue({ assets }: { assets: Asset[] }) {
                   <span className="mono font-medium w-[34px]" style={{ color: tone.dot }}>
                     {score(asset.risk_score)}
                   </span>
-                  <Bar value={(asset.risk_score ?? 0) / 100} color={tone.dot} className="w-[56px]" />
+                  <Bar value={riskFraction(asset.risk_score)} color={tone.dot} className="w-[56px]" />
                   <RiskChip level={asset.risk_level} />
                 </div>
               </TD>

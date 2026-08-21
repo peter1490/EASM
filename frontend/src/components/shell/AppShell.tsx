@@ -9,7 +9,7 @@ import { CommandPalette } from "./CommandPalette";
 import { LoadingBlock } from "@/components/kit/States";
 
 function Shell({ children }: { children: React.ReactNode }) {
-  const { user, loading } = useAuth();
+  const { user, loading, companyEpoch } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -50,7 +50,14 @@ function Shell({ children }: { children: React.ReactNode }) {
           positioned descendant, so `overflow-hidden` actually clips it. Without
           it an abspos child resolves against the viewport and can scroll the
           whole document behind the shell. */}
-      <main className="relative flex-1 min-h-0 overflow-hidden">{children}</main>
+      {/* Keyed on the company epoch: switching company remounts the routed page
+          so every load effect re-runs against the new tenant. That replaces the
+          full `window.location.reload()` the switcher used to do, which tore
+          down the whole shell and briefly painted the previous company's data
+          under the new company's name. */}
+      <main key={companyEpoch} className="relative flex-1 min-h-0 overflow-hidden">
+        {children}
+      </main>
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>
   );

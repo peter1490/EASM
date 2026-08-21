@@ -18,7 +18,7 @@ import {
   type SystemMetrics,
 } from "@/app/api";
 import {
-  Button, Card, CardHeader, Bar, StackedBar, Dot, Icon, PageHeader,
+  Card, CardHeader, Bar, StackedBar, Dot, Icon, PageHeader,
   RiskChip, SeverityChip, Segmented, Table, TBody, TD, TH, THead, TR,
   EmptyState, ErrorState, LoadingBlock, assetIcon,
 } from "@/components/kit";

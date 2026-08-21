@@ -26,7 +26,10 @@ function Shell({ children }: { children: React.ReactNode }) {
   const mainRef = useRef<HTMLElement | null>(null);
   const isLogin = pathname === "/login";
 
+  // Not derived from `companySwitching`: the fade has to stay on after the
+  // switch clears it, until the effect below reveals the remounted page.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (companySwitching) setPhase("leaving");
   }, [companySwitching]);
 

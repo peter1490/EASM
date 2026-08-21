@@ -8,7 +8,7 @@ import { useMemo } from "react";
  * identical on the server and the client.
  */
 export function SurfaceConstellation() {
-  const paths = useMemo(build, []);
+  const paths = useMemo(() => build(), []);
 
   return (
     <svg

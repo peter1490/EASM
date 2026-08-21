@@ -36,11 +36,17 @@ export function DiscoveryProvider({ children }: { children: ReactNode }) {
   // Read inside the polling loop so the cadence follows the live value rather
   // than the one captured when the effect first ran.
   const running = useRef(false);
-  running.current = Boolean(status?.running);
 
   // A poll started before a company switch must not land after it.
   const activeCompany = useRef(companyId);
-  activeCompany.current = companyId;
+
+  // Both are written after commit rather than during render. This effect is
+  // declared before the poll below, so the poll starts on a company change
+  // with the ref already pointing at the company it is starting for.
+  useEffect(() => {
+    running.current = Boolean(status?.running);
+    activeCompany.current = companyId;
+  });
 
   const refresh = useCallback(async () => {
     const requestedFor = activeCompany.current;
@@ -59,6 +65,8 @@ export function DiscoveryProvider({ children }: { children: ReactNode }) {
   // active company changes. Clearing first means the top-bar hairline never
   // keeps showing the run of the company we just left.
   useEffect(() => {
+    // Dropping the previous company's status is the point of this effect.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatus(null);
     setError(null);
     if (!companyId) return;

@@ -30,11 +30,16 @@ use crate::{
     },
     repositories::{AssetRepository, SecurityFindingRepository, SecurityScanRepository},
     services::{
-        external::{DnsResolver, ExternalServicesManager, HttpProber, NvdClient, TlsAnalyzer},
+        external::{
+            http::{extract_icon_link, shodan_favicon_hash},
+            DnsResolver, ExternalServicesManager, HttpProber, NvdClient, ThreatIntelClient,
+            TlsAnalyzer,
+        },
         risk_service::RiskService,
         task_manager::{TaskContext, TaskManager, TaskType},
     },
     utils::{
+        cpe::Cpe,
         crypto::get_tls_certificate_info,
         network::{
             get_known_vulnerabilities, is_internal_ip, scan_ports, scan_ports_with_services,
@@ -50,6 +55,52 @@ const DEFAULT_IP_HTTP_FALLBACK_PORTS: [u16; 4] = [443, 8443, 80, 8080];
 const MAX_ASSET_FETCHES: usize = 8;
 /// Skip assets larger than this (bytes) when banner-parsing — bounds work/memory.
 const MAX_ASSET_BYTES: usize = 5_000_000;
+/// Hard cap on how much of a page body we read. The fingerprint engine only
+/// scans the first megabyte anyway; this stops a hostile or misconfigured
+/// endpoint from streaming unbounded data into memory before it gets there.
+const MAX_PAGE_BYTES: usize = 2_000_000;
+/// Favicons are icons; anything larger is not one.
+const MAX_FAVICON_BYTES: usize = 512 * 1024;
+/// Cap on `robots.txt`.
+const MAX_ROBOTS_BYTES: usize = 128 * 1024;
+
+// Product banners recognised inside `Server` / `X-Powered-By` / `X-Generator`.
+//
+// Compiled once. These used to be rebuilt from source on every header value of
+// every response, which is eight regex compilations per header per asset.
+lazy_static::lazy_static! {
+    static ref HEADER_BANNER_PATTERNS: Vec<(&'static str, regex::Regex, u8)> = [
+        ("next.js", r"(?i)\bnext(?:\.| )?js(?:[/\s]+v?([0-9][0-9A-Za-z._-]*))?", 95u8),
+        ("nginx", r"(?i)\bnginx(?:/([0-9][0-9A-Za-z._-]*))?", 90),
+        ("apache", r"(?i)\bapache(?:/([0-9][0-9A-Za-z._-]*))?", 90),
+        ("iis", r"(?i)\b(?:microsoft-)?iis(?:/([0-9][0-9A-Za-z._-]*))?", 90),
+        ("express", r"(?i)\bexpress(?:/([0-9][0-9A-Za-z._-]*))?", 85),
+        ("php", r"(?i)\bphp(?:/([0-9][0-9A-Za-z._-]*))?", 85),
+        ("wordpress", r"(?i)\bwordpress(?:[/\s]+v?([0-9][0-9A-Za-z._-]*))?", 85),
+        ("asp.net", r"(?i)\basp\.?net(?:[/\s]+v?([0-9][0-9A-Za-z._-]*))?", 85),
+    ]
+    .into_iter()
+    .filter_map(|(product, pattern, confidence)| match regex::Regex::new(pattern) {
+        Ok(re) => Some((product, re, confidence)),
+        Err(e) => {
+            tracing::error!("invalid header banner pattern for {}: {}", product, e);
+            None
+        }
+    })
+    .collect();
+}
+
+/// One fetched HTTP response, reduced to the signals fingerprinting reads.
+struct FetchedPage {
+    /// URL that actually answered, after redirects and any scheme fallback.
+    final_url: String,
+    /// Response headers, keys lowercased.
+    headers: HashMap<String, String>,
+    /// Raw `Set-Cookie` values.
+    set_cookies: Vec<String>,
+    /// Body, capped at `MAX_PAGE_BYTES`.
+    body: String,
+}
 /// Browser-like User-Agent for HTTP analysis fetches. Many WAFs/CDNs serve a
 /// challenge or reduced page to obvious bot agents (e.g. the default
 /// `reqwest/x`), which hides the very markup we fingerprint. Presenting a real
@@ -88,6 +139,7 @@ pub struct SecurityScanService {
     http_prober: Arc<HttpProber>,
     tls_analyzer: Arc<TlsAnalyzer>,
     nvd_client: Arc<NvdClient>,
+    threat_intel: Arc<ThreatIntelClient>,
 
     // Utilities
     task_manager: Arc<TaskManager>,
@@ -109,6 +161,8 @@ impl SecurityScanService {
     ) -> Self {
         // Create NVD client for vulnerability lookups
         let nvd_client = Arc::new(NvdClient::new().expect("Failed to create NVD client"));
+        // CISA KEV + FIRST EPSS, for ranking the CVEs NVD returns.
+        let threat_intel = Arc::new(ThreatIntelClient::new());
 
         Self {
             asset_repo,
@@ -119,6 +173,7 @@ impl SecurityScanService {
             dns_resolver,
             http_prober,
             nvd_client,
+            threat_intel,
             tls_analyzer,
             task_manager,
             settings,
@@ -1168,7 +1223,7 @@ impl SecurityScanService {
             if let Some(ver) = &version {
                 // First, try NVD API for real-time vulnerability data
                 let nvd_vulns = self
-                    .lookup_vulnerabilities_from_nvd(&product_for_cve, ver)
+                    .lookup_vulnerabilities_from_nvd(&product_for_cve, ver, None)
                     .await;
 
                 // Fall back to local database if NVD fails or returns nothing
@@ -1403,12 +1458,26 @@ impl SecurityScanService {
             .danger_accept_invalid_certs(true)
             .user_agent(BROWSER_USER_AGENT)
             .build()
-            .map_err(|e| ApiError::HttpClient(e))?;
+            .map_err(ApiError::HttpClient)?;
 
-        let response = match client.get(&url).send().await {
-            Ok(resp) => resp,
-            Err(e) => {
-                tracing::debug!("Failed to fetch headers for {}: {}", url, e);
+        // Try the derived scheme first, then the other one. A host that only
+        // answers on plain HTTP used to yield no fingerprint data at all,
+        // because the domain path always built an `https://` URL.
+        let page = match Self::fetch_page(&client, &url).await {
+            Some(page) => Some(page),
+            None => match Self::alternate_scheme_url(&url) {
+                Some(alt) => {
+                    tracing::debug!("Retrying {} over the alternate scheme: {}", url, alt);
+                    Self::fetch_page(&client, &alt).await
+                }
+                None => None,
+            },
+        };
+
+        let page = match page {
+            Some(page) => page,
+            None => {
+                tracing::debug!("Failed to fetch {} over either scheme", url);
                 return Ok(HttpSecurityAnalysisOutcome {
                     security_headers: security_result,
                     proxy_detection: proxy_result,
@@ -1418,40 +1487,48 @@ impl SecurityScanService {
             }
         };
 
-        // Convert headers to HashMap
-        let headers_map: HashMap<String, String> = response
-            .headers()
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.to_string().to_lowercase(),
-                    v.to_str().unwrap_or("").to_string(),
-                )
-            })
-            .collect();
+        // Report on what actually answered, which after a redirect or a scheme
+        // fallback need not be what we asked for.
+        security_result.url = page.final_url.clone();
+        security_result.is_https = page.final_url.starts_with("https");
 
-        // Capture Set-Cookie values and the response body before consuming the
-        // response, so the fingerprint engine can inspect cookies + HTML.
-        let set_cookies: Vec<String> = response
-            .headers()
-            .get_all(reqwest::header::SET_COOKIE)
-            .iter()
-            .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
-            .collect();
-        let body = response.text().await.unwrap_or_default();
+        let headers_map = page.headers.clone();
+        let set_cookies = page.set_cookies.clone();
+        let body = page.body.clone();
+
+        // Secondary passive signals. Each is best-effort and independently
+        // bounded: a host that does not serve one still gets scanned on the rest.
+        let (favicon_hash, robots_txt) = tokio::join!(
+            Self::fetch_favicon_hash_for_page(&client, &page),
+            Self::fetch_robots_txt(&client, &page.final_url),
+        );
+        let cert_issuer = Self::certificate_issuer(&page.final_url).await;
 
         let fingerprints = Self::extract_http_technology_fingerprints(&headers_map);
 
         // Wappalyzer-style detection across headers, cookies, HTML body, meta
         // tags and script sources — broader than the header-only fingerprints.
-        let mut detections =
-            crate::services::fingerprint::engine().detect(&headers_map, &set_cookies, &body, &url);
+        let header_pairs: Vec<(String, String)> = headers_map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let detection_input = crate::services::fingerprint::DetectionInput::new(
+            &page.final_url,
+            &body,
+        )
+        .with_headers(&header_pairs)
+        .with_cookies(&set_cookies)
+        .with_cert_issuer(cert_issuer.as_deref())
+        .with_favicon_hash(favicon_hash)
+        .with_robots_txt(robots_txt.as_deref());
+
+        let mut detections = crate::services::fingerprint::engine().detect_with(&detection_input);
 
         // Thoroughness pass: for JS libraries detected *without* a version (e.g. a
         // bare `jquery.min.js`), fetch the referenced asset and recover the
         // version from its embedded banner. This unlocks CVE matching for libs
         // whose version is only inside the file, not in the URL or HTML.
-        self.enrich_versions_from_assets(&url, &body, &mut detections)
+        self.enrich_versions_from_assets(&page.final_url, &body, &mut detections)
             .await;
 
         // Build the combined technology stack summary (header + body sources).
@@ -1483,11 +1560,14 @@ impl SecurityScanService {
                     continue;
                 }
 
+                let fingerprint_cpe =
+                    crate::services::fingerprint::engine().cpe_for(&fingerprint.product);
                 self.record_cves_for_technology(
                     scan_id,
                     asset,
                     &fingerprint.product,
                     version,
+                    fingerprint_cpe.as_ref(),
                     "http_header_fingerprint",
                     &fingerprint.header_name,
                     &fingerprint.raw_evidence,
@@ -1559,17 +1639,39 @@ impl SecurityScanService {
                 "cpe": det.cpe,
                 "confidence": det.confidence,
                 "source": det.source,
+                "sources": det.sources,
+                "evidence": det.evidence,
+                "reliable": det.is_reliable(),
             }));
+
+            // Only a corroborated detection may open a vulnerability finding.
+            // A weak or purely-implied hit still appears in the inventory —
+            // where being wrong costs nothing — but asserting "this asset is
+            // vulnerable to CVE-X" off a single ambiguous marker is how a
+            // scanner loses its reader's trust.
+            if !det.is_reliable() {
+                if det.version.is_some() {
+                    tracing::debug!(
+                        "Skipping CVE lookup for {} {:?}: confidence {} below threshold",
+                        det.product,
+                        det.version,
+                        det.confidence
+                    );
+                }
+                continue;
+            }
 
             if let Some(version) = &det.version {
                 let lookup_key =
                     (det.product.to_ascii_lowercase(), version.to_ascii_lowercase());
                 if looked_up_versions.insert(lookup_key) {
+                    let detection_cpe = det.cpe.as_deref().and_then(Cpe::parse);
                     self.record_cves_for_technology(
                         scan_id,
                         asset,
                         &det.product,
                         version,
+                        detection_cpe.as_ref(),
                         "technology_fingerprint",
                         &det.source,
                         &det.evidence,
@@ -1823,6 +1925,7 @@ impl SecurityScanService {
         asset: &Asset,
         product: &str,
         version: &str,
+        cpe: Option<&Cpe>,
         detection_method: &str,
         detection_source: &str,
         detection_evidence: &str,
@@ -1830,12 +1933,32 @@ impl SecurityScanService {
         risk_factors: &mut Vec<RiskFactor>,
         company_id: Uuid,
     ) -> Result<(), ApiError> {
-        let nvd_vulns = self.lookup_vulnerabilities_from_nvd(product, version).await;
+        let nvd_vulns = self
+            .lookup_vulnerabilities_from_nvd(product, version, cpe)
+            .await;
         let matched_vulns = if nvd_vulns.is_empty() {
             get_known_vulnerabilities(product, version)
         } else {
             nvd_vulns
         };
+
+        // Rank what NVD returned. A CVSS score alone does not distinguish the
+        // handful of CVEs on this asset that attackers are actually using from
+        // the rest, so every finding carries CISA KEV membership and the FIRST
+        // EPSS probability alongside it. One batched lookup covers the set.
+        let cve_ids: Vec<String> = matched_vulns.iter().map(|v| v.cve_id.clone()).collect();
+        let threat = if cve_ids.is_empty() {
+            HashMap::new()
+        } else {
+            self.threat_intel.context_for(&cve_ids).await
+        };
+
+        // Most CMSes publish only a major version — Drupal's generator tag says
+        // "Drupal 11" and nothing more. The CVEs found for such a version affect
+        // *some* build in that series, and the asset may already be on a patched
+        // one. Reporting them is right (reporting nothing is what the old
+        // point-version query did), but presenting them as confirmed is not.
+        let version_is_series = NvdClient::is_series_version(version);
 
         for vuln in matched_vulns {
             let vuln_severity = match vuln.severity.as_str() {
@@ -1846,6 +1969,19 @@ impl SecurityScanService {
             };
 
             let nvd_url = NvdClient::vulnerability_url(&vuln.cve_id);
+            let ctx = threat
+                .get(&vuln.cve_id.to_uppercase())
+                .cloned()
+                .unwrap_or_default();
+            let known_exploited = ctx.is_known_exploited() || vuln.exploitable;
+            // Rank an unconfirmed match below an otherwise identical confirmed
+            // one, without burying it: the uncertainty is about whether the CVE
+            // applies here, not about how bad it is.
+            let priority = if version_is_series {
+                ctx.priority_score(vuln.cvss_score) * 0.8
+            } else {
+                ctx.priority_score(vuln.cvss_score)
+            };
 
             self.create_finding_with_cvss(
                 scan_id,
@@ -1859,14 +1995,27 @@ impl SecurityScanService {
                     "cvss_score": vuln.cvss_score,
                     "cvss_vector": vuln.cvss_vector,
                     "affected_service": product,
+                    "affected_cpe": cpe.map(|c| c.to_formatted_string()),
                     "affected_version": vuln.affected_versions,
-                    "exploitable": vuln.exploitable,
+                    "exploitable": known_exploited,
                     "has_public_exploit": vuln.has_public_exploit,
+                    "known_exploited": ctx.is_known_exploited(),
+                    "kev_date_added": ctx.kev.as_ref().map(|k| k.date_added.clone()),
+                    "kev_due_date": ctx.kev.as_ref().and_then(|k| k.due_date.clone()),
+                    "known_ransomware_campaign_use": ctx
+                        .kev
+                        .as_ref()
+                        .is_some_and(|k| k.known_ransomware_campaign_use),
+                    "epss_probability": ctx.epss.map(|e| e.probability),
+                    "epss_percentile": ctx.epss.map(|e| e.percentile),
+                    "priority_score": priority,
                     "detection_method": detection_method,
                     "detection_source": detection_source,
                     "fingerprint_header": detection_source,
                     "fingerprint_value": detection_evidence,
                     "detected_version": version,
+                    "version_precision": if version_is_series { "series" } else { "exact" },
+                    "version_confirmed": !version_is_series,
                     "references": vuln.references,
                     "source_url": nvd_url,
                     "source_name": "NVD (NIST)",
@@ -1891,7 +2040,10 @@ impl SecurityScanService {
                 references: vuln.references.clone(),
             });
 
-            let impact = if vuln.exploitable { 0.9 } else { 0.5 };
+            // Impact tracks the priority score rather than a bare boolean, so a
+            // KEV-listed CVE and an unexploited one of the same CVSS no longer
+            // contribute identically to the asset's risk.
+            let impact = (priority / 10.0).clamp(0.1, 1.0);
             risk_factors.push(RiskFactor {
                 factor_type: "vulnerability".to_string(),
                 name: format!("Known vulnerability: {}", vuln.cve_id),
@@ -1901,6 +2053,9 @@ impl SecurityScanService {
                 data: json!({
                     "cve_id": vuln.cve_id,
                     "cvss_score": vuln.cvss_score,
+                    "priority_score": priority,
+                    "known_exploited": ctx.is_known_exploited(),
+                    "epss_probability": ctx.epss.map(|e| e.probability),
                     "detection_method": detection_method,
                     "product": product,
                     "version": version,
@@ -1910,6 +2065,166 @@ impl SecurityScanService {
         }
 
         Ok(())
+    }
+
+    /// One fetched page, with every signal the fingerprint engine reads.
+    async fn fetch_page(client: &reqwest::Client, url: &str) -> Option<FetchedPage> {
+        let response = match client.get(url).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::debug!("Failed to fetch {}: {}", url, e);
+                return None;
+            }
+        };
+
+        let final_url = response.url().to_string();
+        let headers: HashMap<String, String> = response
+            .headers()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_ascii_lowercase(),
+                    v.to_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        let set_cookies: Vec<String> = response
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
+            .collect();
+
+        let body = Self::read_body_capped(response, MAX_PAGE_BYTES).await;
+
+        Some(FetchedPage {
+            final_url,
+            headers,
+            set_cookies,
+            body,
+        })
+    }
+
+    /// Read a response body, stopping once `cap` bytes have arrived.
+    ///
+    /// `Response::text()` buffers whatever the server sends, so a multi-hundred
+    /// megabyte "page" — or an endpoint that streams forever — would be read
+    /// into memory in full before the engine's own 1 MB truncation ever applies.
+    async fn read_body_capped(response: reqwest::Response, cap: usize) -> String {
+        let mut response = response;
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    let remaining = cap.saturating_sub(buf.len());
+                    if remaining == 0 {
+                        break;
+                    }
+                    let take = remaining.min(chunk.len());
+                    buf.extend_from_slice(&chunk[..take]);
+                    if buf.len() >= cap {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::debug!("Truncated body read: {}", e);
+                    break;
+                }
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    /// The same URL with `http` and `https` swapped, for the scheme fallback.
+    fn alternate_scheme_url(url: &str) -> Option<String> {
+        if let Some(rest) = url.strip_prefix("https://") {
+            Some(format!("http://{}", rest))
+        } else {
+            url.strip_prefix("http://")
+                .map(|rest| format!("https://{}", rest))
+        }
+    }
+
+    /// Shodan-convention MurmurHash3 of the site's favicon.
+    ///
+    /// An exact favicon hash is one of the few passive signals that identifies
+    /// an appliance's *product* even when its login page has been rebranded and
+    /// every version banner stripped.
+    async fn fetch_favicon_hash_for_page(
+        client: &reqwest::Client,
+        page: &FetchedPage,
+    ) -> Option<i32> {
+        let declared = extract_icon_link(&page.body)
+            .and_then(|href| Self::resolve_asset_url(&page.final_url, &href));
+        let default = url::Url::parse(&page.final_url)
+            .ok()
+            .and_then(|u| u.join("/favicon.ico").ok())
+            .map(|u| u.to_string());
+
+        for candidate in [declared, default].into_iter().flatten() {
+            if Self::asset_host_is_internal(&candidate) {
+                continue;
+            }
+            let Ok(resp) = client.get(&candidate).send().await else {
+                continue;
+            };
+            if !resp.status().is_success() {
+                continue;
+            }
+            let Ok(bytes) = resp.bytes().await else {
+                continue;
+            };
+            if bytes.is_empty() || bytes.len() > MAX_FAVICON_BYTES {
+                continue;
+            }
+            return Some(shodan_favicon_hash(&bytes));
+        }
+        None
+    }
+
+    /// `robots.txt`, which frequently names the admin paths of the product
+    /// running the site even when the homepage gives nothing away.
+    async fn fetch_robots_txt(client: &reqwest::Client, page_url: &str) -> Option<String> {
+        let url = url::Url::parse(page_url).ok()?.join("/robots.txt").ok()?;
+        let resp = client.get(url.as_str()).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        // A "robots.txt" that comes back as HTML is a soft-404 catch-all page,
+        // not a robots file; matching signatures against it invents detections.
+        let is_text = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_none_or(|ct| ct.starts_with("text/plain"));
+        if !is_text {
+            return None;
+        }
+        let body = Self::read_body_capped(resp, MAX_ROBOTS_BYTES).await;
+        if body.trim().is_empty() {
+            None
+        } else {
+            Some(body)
+        }
+    }
+
+    /// Issuer of the leaf TLS certificate, for signatures keyed on it (managed
+    /// platforms and appliances issue recognisable certificates).
+    async fn certificate_issuer(page_url: &str) -> Option<String> {
+        let parsed = url::Url::parse(page_url).ok()?;
+        if parsed.scheme() != "https" {
+            return None;
+        }
+        let host = parsed.host_str()?.to_string();
+        let port = parsed.port_or_known_default().unwrap_or(443);
+        match get_tls_certificate_info(&host, port).await {
+            Ok(info) => Some(info.issuer),
+            Err(e) => {
+                tracing::debug!("No certificate issuer for {}: {}", page_url, e);
+                None
+            }
+        }
     }
 
     /// For technology detections that lack a version but whose product can be
@@ -2109,38 +2424,7 @@ impl SecurityScanService {
         fingerprints: &mut Vec<HttpTechnologyFingerprint>,
         seen: &mut HashSet<(String, Option<String>, String)>,
     ) {
-        let patterns = [
-            (
-                "next.js",
-                r"(?i)\bnext(?:\.| )?js(?:[/\s]+v?([0-9][0-9A-Za-z._-]*))?",
-                95,
-            ),
-            ("nginx", r"(?i)\bnginx(?:/([0-9][0-9A-Za-z._-]*))?", 90),
-            ("apache", r"(?i)\bapache(?:/([0-9][0-9A-Za-z._-]*))?", 90),
-            (
-                "iis",
-                r"(?i)\b(?:microsoft-)?iis(?:/([0-9][0-9A-Za-z._-]*))?",
-                90,
-            ),
-            ("express", r"(?i)\bexpress(?:/([0-9][0-9A-Za-z._-]*))?", 85),
-            ("php", r"(?i)\bphp(?:/([0-9][0-9A-Za-z._-]*))?", 85),
-            (
-                "wordpress",
-                r"(?i)\bwordpress(?:[/\s]+v?([0-9][0-9A-Za-z._-]*))?",
-                85,
-            ),
-            (
-                "asp.net",
-                r"(?i)\basp\.?net(?:[/\s]+v?([0-9][0-9A-Za-z._-]*))?",
-                85,
-            ),
-        ];
-
-        for (product, pattern, confidence) in patterns {
-            let Ok(regex) = regex::Regex::new(pattern) else {
-                continue;
-            };
-
+        for (product, regex, confidence) in HEADER_BANNER_PATTERNS.iter() {
             for captures in regex.captures_iter(header_value) {
                 let version = captures
                     .get(1)
@@ -2156,7 +2440,7 @@ impl SecurityScanService {
                         version,
                         header_name: header_name.to_string(),
                         raw_evidence: header_value.to_string(),
-                        confidence,
+                        confidence: *confidence,
                     });
                 }
             }
@@ -3046,15 +3330,25 @@ impl SecurityScanService {
     /// Delegates to a version-aware CPE query (`virtualMatchString`), so NVD
     /// returns only the CVEs whose affected version ranges cover the detected
     /// version of this product.
+    /// Look up CVEs for a detected product at a detected version.
+    ///
+    /// `cpe` is the product's CPE 2.3 base when the detection knows it (every
+    /// fingerprint signature with a `cpe` field does). When present it is used
+    /// verbatim, which is both more precise — right vendor, right CPE part —
+    /// and safe to run for names the protocol denylist would otherwise reject,
+    /// because a CPE identifies a product rather than a protocol.
     async fn lookup_vulnerabilities_from_nvd(
         &self,
         product: &str,
         version: &str,
+        cpe: Option<&Cpe>,
     ) -> Vec<crate::utils::network::VulnerabilityInfo> {
         use crate::utils::network::VulnerabilityInfo;
 
-        // Skip CVE search for generic protocol names
-        if Self::is_generic_protocol(product) {
+        // Skip CVE search for generic protocol names — unless we hold a CPE,
+        // which names a concrete product ("mysql" the service banner is
+        // ambiguous; cpe:2.3:a:oracle:mysql is not).
+        if cpe.is_none() && Self::is_generic_protocol(product) {
             tracing::debug!(
                 "Skipping NVD lookup for generic protocol '{}' (version '{}')",
                 product,
@@ -3083,12 +3377,17 @@ impl SecurityScanService {
         );
 
         // NVD performs the version-range matching server-side (via a
-        // virtualMatchString CPE query), so results already cover this version.
-        match self
-            .nvd_client
-            .search_affecting(&normalized_product, version)
-            .await
-        {
+        // virtualMatchString CPE query); the CPE path additionally re-verifies
+        // every hit against the CVE's own cpeMatch tree before we believe it.
+        let query = match cpe {
+            Some(c) => self.nvd_client.search_affecting_cpe(c, version).await,
+            None => {
+                self.nvd_client
+                    .search_affecting(&normalized_product, version)
+                    .await
+            }
+        };
+        match query {
             Ok(nvd_vulns) => {
                 let mut results = Vec::new();
 
@@ -3135,11 +3434,17 @@ impl SecurityScanService {
                         .unwrap_or_else(|| format!("{} Vulnerability", cve_id));
 
                     // Show the actual affected version range(s) reported by NVD
-                    let affected_versions_display = match NvdClient::affected_version_ranges(
-                        &nvd_vuln,
-                        &normalized_product,
-                        version,
-                    ) {
+                    let ranges = match cpe {
+                        Some(c) => {
+                            NvdClient::affected_version_ranges_for_cpe(&nvd_vuln, c, version)
+                        }
+                        None => NvdClient::affected_version_ranges(
+                            &nvd_vuln,
+                            &normalized_product,
+                            version,
+                        ),
+                    };
+                    let affected_versions_display = match ranges {
                         ranges if ranges.is_empty() => vec!["Unknown".to_string()],
                         ranges => {
                             tracing::info!("Affected versions: {}", ranges.join(", "));
@@ -3429,6 +3734,7 @@ impl Clone for SecurityScanService {
             http_prober: Arc::clone(&self.http_prober),
             tls_analyzer: Arc::clone(&self.tls_analyzer),
             nvd_client: Arc::clone(&self.nvd_client),
+            threat_intel: Arc::clone(&self.threat_intel),
             task_manager: Arc::clone(&self.task_manager),
             settings: Arc::clone(&self.settings),
         }

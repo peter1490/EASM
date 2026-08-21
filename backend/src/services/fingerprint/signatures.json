@@ -26,6 +26,9 @@
       {
         "name": "x-pingback"
       }
+    ],
+    "robots": [
+      "(?im)^Disallow:\\s*/wp-admin/"
     ]
   },
   {
@@ -62,6 +65,13 @@
     ],
     "cookies": [
       "(?i)\\bS?SESS[a-f0-9]{32}="
+    ],
+    "robots": [
+      "(?im)^Disallow:\\s*/(?:core/|user/register)"
+    ],
+    "scripts": [
+      "(?i)/core/(?:misc|assets|modules)/[^\\\"']*\\?v=([0-9]+\\.[0-9]+\\.[0-9]+)",
+      "(?i)/core/(?:misc|assets)/"
     ]
   },
   {
@@ -77,10 +87,15 @@
     ],
     "html": [
       "/media/jui/",
-      "(?i)Joomla!"
+      "(?i)/media/system/js/(?:core|mootools)",
+      "(?i)joomla-script-options",
+      "(?i)<title>[^<]*Joomla!?\\;confidence:55"
     ],
     "implies": [
       "php"
+    ],
+    "robots": [
+      "(?im)^Disallow:\\s*/administrator/\\s*$"
     ]
   },
   {
@@ -242,7 +257,13 @@
       }
     ],
     "html": [
-      "(?i)Apache Tomcat/?\\s*([0-9.]+)?"
+      "(?i)Apache Tomcat/([0-9]+\\.[0-9][0-9.]*)",
+      "(?i)<title>\\s*Apache Tomcat[^<]*</title>",
+      "(?i)/manager/(?:html|status)\\b",
+      "(?i)tomcat-power\\.gif|tomcat\\.(?:gif|png|svg)\\\""
+    ],
+    "url": [
+      "(?i)/(?:manager|host-manager)/html"
     ]
   },
   {
@@ -343,10 +364,15 @@
       "(?i)laravel_session="
     ],
     "html": [
-      "(?i)laravel"
+      "(?i)/vendor/laravel/",
+      "(?i)Illuminate\\\\\\\\(?:Foundation|Http)",
+      "(?i)laravel-vite-plugin"
     ],
     "implies": [
       "php"
+    ],
+    "scripts": [
+      "(?i)/build/assets/app-[0-9a-f]{8}\\.js"
     ]
   },
   {
@@ -391,7 +417,9 @@
       "(?i)phpMyAdmin="
     ],
     "html": [
-      "(?i)phpMyAdmin"
+      "(?i)<title>[^<]*phpMyAdmin",
+      "(?i)/(?:phpmyadmin|pma)/(?:js|themes)/",
+      "(?i)PMA_commonParams"
     ],
     "implies": [
       "php"
@@ -427,7 +455,9 @@
     ],
     "html": [
       "(?i)gon\\.gitlab",
-      "(?i)GitLab"
+      "(?i)<meta[^>]+content=[\"']GitLab[\"'][^>]+name=[\"']application-name[\"']",
+      "(?i)name=[\"']application-name[\"'][^>]+content=[\"']GitLab[\"']",
+      "(?i)/assets/webpack/runtime\\.[0-9a-f]+\\.bundle\\.js"
     ]
   },
   {
@@ -452,6 +482,9 @@
       {
         "name": "x-magento-cache-debug"
       }
+    ],
+    "robots": [
+      "(?im)^Disallow:\\s*/(?:checkout/|customer/account/)"
     ]
   },
   {
@@ -466,7 +499,18 @@
       "wordpress"
     ],
     "html": [
-      "(?i)woocommerce"
+      "(?i)class=[\"'][^\"']*\\bwoocommerce(?:-page|-cart|-checkout)?\\b\\;confidence:55",
+      "(?i)/wp-content/plugins/woocommerce/\\;confidence:60"
+    ],
+    "scripts": [
+      "(?i)/wp-content/plugins/woocommerce/[^\\\"']*\\?[^\\\"']*ver=([0-9]+\\.[0-9][0-9A-Za-z.]*)",
+      "(?i)/wp-content/plugins/woocommerce/"
+    ],
+    "cookies": [
+      "(?i)^\\s*woocommerce_(?:items_in_cart|cart_hash|recently_viewed)="
+    ],
+    "requires": [
+      "wordpress"
     ]
   },
   {
@@ -534,7 +578,10 @@
       "(?i)content=[\"']Roundcube"
     ],
     "html": [
-      "(?i)roundcube"
+      "(?i)/skins/(?:elastic|larry|classic)/",
+      "(?i)/program/js/(?:app|common)\\.js",
+      "(?i)\\brcmail\\.(?:env|command)\\b",
+      "(?i)<title>[^<]*Roundcube\\s*Webmail\\;confidence:60"
     ],
     "implies": [
       "php"
@@ -675,6 +722,9 @@
     "html": [
       "(?i)typo3temp/",
       "(?i)typo3conf/"
+    ],
+    "robots": [
+      "(?im)^Disallow:\\s*/typo3/"
     ]
   },
   {
@@ -922,5 +972,2427 @@
       "(?i)backbone\\.VERSION\\s*=\\s*[\"']([0-9]+\\.[0-9]+\\.[0-9]+)",
       "(?i)backbone\\.js\\s+([0-9]+\\.[0-9]+\\.[0-9]+)"
     ]
+  },
+  {
+    "name": "Citrix NetScaler",
+    "product": "citrix-netscaler",
+    "categories": [
+      "network-device",
+      "load-balancer"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:citrix:netscaler_gateway",
+    "headers": [
+      {
+        "name": "x-ns-version",
+        "pattern": "^(?:NS)?([0-9][0-9.]*)"
+      },
+      {
+        "name": "x-citrix-version",
+        "pattern": "^(?:NS)?([0-9][0-9.]*)"
+      },
+      {
+        "name": "x-ns-build",
+        "pattern": "([0-9][0-9.]*)"
+      }
+    ],
+    "cookies": [
+      "(?i)^\\s*NSC_(?:AAAC|BASEURL|CERT|DLGE|EPAC|TASS|TEMP|TMA[APS]|PERS|USER)=",
+      "(?i)^\\s*citrix_ns_id="
+    ],
+    "html": [
+      "_ctxstxt_NetscalerAAA",
+      "(?i)class=\\\"_ctxstxt_netscalergateway\\\"",
+      "(?i)/vpn/images/AccessGateway\\.ico",
+      "(?i)NS(\\d+\\.\\d+): Build (\\d+\\.\\d+)\\;confidence:70"
+    ],
+    "scripts": [
+      "(?i)/vpn/js/(?:rdx/core/|gateway_login_view\\.js)",
+      "(?i)/logon/LogonPoint/"
+    ],
+    "url": [
+      "(?i)/logon/LogonPoint/tmindex\\.html",
+      "(?i)/vpn/index\\.html"
+    ],
+    "favicon": [
+      -1166125415
+    ]
+  },
+  {
+    "name": "Citrix StoreFront",
+    "product": "citrix-storefront",
+    "categories": [
+      "remote-access"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:citrix:storefront_server",
+    "cookies": [
+      "(?i)^\\s*CtxsAuthId="
+    ],
+    "html": [
+      "(?i)CTXS\\.(?:AccessGateway|WebApiClient)"
+    ],
+    "scripts": [
+      "(?i)/ctxs\\.core(?:\\.min)?\\.js"
+    ],
+    "url": [
+      "(?i)/Citrix/\\w*Web/"
+    ]
+  },
+  {
+    "name": "Fortinet FortiOS",
+    "product": "fortios",
+    "categories": [
+      "firewall",
+      "vpn"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:o:fortinet:fortios",
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^xxxxxxxx-xxxxx$"
+      }
+    ],
+    "cookies": [
+      "(?i)^\\s*SVPNCOOKIE=",
+      "(?i)^\\s*SVPNNETWORKCOOKIE="
+    ],
+    "html": [
+      "(?i)top\\.location\\s*=\\s*[\"']/remote/login[\"']",
+      "(?i)/remote/fgt_lang\\?lang="
+    ],
+    "cert_issuer": [
+      "(?i)OU=FortiGate,\\s*O=Fortinet",
+      "(?i)O=Fortinet Ltd\\."
+    ],
+    "favicon": [
+      945408572
+    ]
+  },
+  {
+    "name": "Ivanti Connect Secure",
+    "product": "ivanti-connect-secure",
+    "categories": [
+      "vpn",
+      "remote-access"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:ivanti:connect_secure",
+    "cookies": [
+      "(?i)^\\s*DSSignInURL=",
+      "(?i)^\\s*DSLastAccess="
+    ],
+    "html": [
+      "(?i)welcome\\.cgi\\?p=logo",
+      "(?i)/dana-na/auth/"
+    ],
+    "scripts": [
+      "(?i)/dana-na/(?:css/ds|js/)"
+    ],
+    "url": [
+      "(?i)/dana-na/auth/url_\\w+/welcome\\.cgi"
+    ]
+  },
+  {
+    "name": "Palo Alto GlobalProtect",
+    "product": "globalprotect",
+    "categories": [
+      "vpn",
+      "firewall"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:o:paloaltonetworks:pan-os",
+    "html": [
+      "(?i)<title>\\s*GlobalProtect Portal\\s*</title>"
+    ],
+    "scripts": [
+      "(?i)/global-protect/portal/(?:css|images|js)/"
+    ],
+    "url": [
+      "(?i)/global-protect/(?:login|prelogin)\\.esp"
+    ],
+    "cert_issuer": [
+      "(?i)O=Palo Alto Networks"
+    ]
+  },
+  {
+    "name": "Cisco ASA WebVPN",
+    "product": "cisco-asa",
+    "categories": [
+      "vpn",
+      "firewall"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:o:cisco:adaptive_security_appliance_software",
+    "cookies": [
+      "(?i)^\\s*webvpn(?:c|context|_portal|Lang|login|SharePoint)?="
+    ],
+    "html": [
+      "(?i)/\\+CSCO[EU]\\+/"
+    ],
+    "url": [
+      "(?i)/\\+CSCOE\\+/logon\\.html"
+    ],
+    "cert_issuer": [
+      "(?i)CN=ASA Temporary Self Signed Certificate"
+    ]
+  },
+  {
+    "name": "F5 BIG-IP",
+    "product": "f5-big-ip",
+    "categories": [
+      "load-balancer"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:f5:big-ip_local_traffic_manager",
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^big-?ip$"
+      }
+    ],
+    "cookies": [
+      "(?i)^\\s*BIGipServer",
+      "(?i)^\\s*BigIPCookie"
+    ],
+    "url": [
+      "(?i)/tmui/login\\.jsp"
+    ],
+    "favicon": [
+      -335242539
+    ]
+  },
+  {
+    "name": "F5 BIG-IP APM",
+    "product": "f5-big-ip-apm",
+    "categories": [
+      "vpn",
+      "remote-access"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:f5:big-ip_access_policy_manager",
+    "cookies": [
+      "(?i)^\\s*(?:MRHSession|LastMRH_Session|MRHSHint)="
+    ],
+    "url": [
+      "(?i)/my\\.policy$"
+    ],
+    "implies": [
+      "f5-big-ip"
+    ]
+  },
+  {
+    "name": "SonicWall SSL-VPN",
+    "product": "sonicwall-sslvpn",
+    "categories": [
+      "vpn",
+      "firewall"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^SonicWALL SSL-?VPN Web Server"
+      }
+    ],
+    "html": [
+      "(?i)<title>\\s*Virtual Office\\s*</title>"
+    ],
+    "cert_issuer": [
+      "(?i)O=SonicWALL"
+    ],
+    "url": [
+      "(?i)/cgi-bin/(?:welcome|sslvpnclient)"
+    ]
+  },
+  {
+    "name": "Check Point Gaia",
+    "product": "checkpoint-gaia",
+    "categories": [
+      "firewall"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^CPWS(?:/([0-9][0-9.]*))?"
+      },
+      {
+        "name": "server",
+        "pattern": "(?i)^Check Point SVN foundation"
+      }
+    ],
+    "url": [
+      "(?i)/clients/MyCRL"
+    ]
+  },
+  {
+    "name": "Array Networks AG",
+    "product": "array-networks-ag",
+    "categories": [
+      "vpn"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)arraynetworks"
+      }
+    ],
+    "cookies": [
+      "(?i)^\\s*ANsession\\d+="
+    ],
+    "html": [
+      "AG_PROXY_ID"
+    ]
+  },
+  {
+    "name": "Sophos Firewall",
+    "product": "sophos-firewall",
+    "categories": [
+      "firewall"
+    ],
+    "confidence": 80,
+    "cert_issuer": [
+      "(?i)CN=SophosApplianceCertificate_"
+    ],
+    "scripts": [
+      "(?i)UserPortalLogin\\.js"
+    ],
+    "url": [
+      "(?i)/webconsole/webpages/(?:login|myaccount)\\.jsp"
+    ]
+  },
+  {
+    "name": "Progress MOVEit Transfer",
+    "product": "moveit-transfer",
+    "categories": [
+      "file-transfer"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:progress:moveit_transfer",
+    "headers": [
+      {
+        "name": "x-moveitisapi-version",
+        "pattern": "([0-9][0-9.]*)"
+      }
+    ],
+    "cookies": [
+      "(?i)^\\s*(?:DMZCookieTest|MIDMZLang|siLockLongTermInstID)="
+    ],
+    "html": [
+      "(?i)<title>[^<]*MOVEit[^<]*</title>",
+      "(?i)/(?:human|guestaccess)\\.aspx",
+      "(?i)MOVEitISAPI"
+    ],
+    "url": [
+      "(?i)/human\\.aspx",
+      "(?i)/MOVEitisapi/"
+    ],
+    "favicon": [
+      989289239
+    ]
+  },
+  {
+    "name": "CrushFTP",
+    "product": "crushftp",
+    "categories": [
+      "file-transfer"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:crushftp:crushftp",
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^CrushFTP(?:\\s+HTTP\\d?\\s+Server)?\\s+Version\\s+([0-9][0-9.]*)"
+      },
+      {
+        "name": "www-authenticate",
+        "pattern": "(?i)realm=\\\"CrushFTP Server Version ([0-9][0-9.]*)\\\""
+      },
+      {
+        "name": "x-dmuser"
+      }
+    ],
+    "cookies": [
+      "(?i)^\\s*CrushAuth="
+    ],
+    "scripts": [
+      "(?i)crushftp_functions\\.js"
+    ],
+    "url": [
+      "(?i)/WebInterface/(?:login\\.html|function/)"
+    ]
+  },
+  {
+    "name": "Fortra GoAnywhere MFT",
+    "product": "goanywhere-mft",
+    "categories": [
+      "file-transfer"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:fortra:goanywhere_mft",
+    "html": [
+      "(?i)/goanywhere/(?:auth|images|css|js)/",
+      "(?i)<title>[^<]*GoAnywhere[^<]*</title>"
+    ],
+    "url": [
+      "(?i)/goanywhere/(?:auth/Login|images)"
+    ],
+    "scripts": [
+      "(?i)/goanywhere/[^\\\"']+\\.(?:js|css)"
+    ]
+  },
+  {
+    "name": "Cleo Harmony",
+    "product": "cleo-harmony",
+    "categories": [
+      "file-transfer"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "vlsync",
+        "pattern": "(?i)n=(?:VLTrader|Harmony|LexiCom);v=([0-9][0-9.]*)"
+      }
+    ],
+    "url": [
+      "(?i)/Synchronization$"
+    ]
+  },
+  {
+    "name": "SolarWinds Serv-U",
+    "product": "serv-u",
+    "categories": [
+      "file-transfer"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:solarwinds:serv-u",
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^Serv-U/([0-9][0-9.]*)"
+      }
+    ]
+  },
+  {
+    "name": "Atlassian Confluence",
+    "product": "confluence",
+    "categories": [
+      "collaboration",
+      "wiki"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:atlassian:confluence_server",
+    "headers": [
+      {
+        "name": "x-confluence-request-time"
+      }
+    ],
+    "meta": [
+      "(?i)name=[\"']ajs-version-number[\"'][^>]+content=[\"']([0-9][0-9.]*)",
+      "(?i)content=[\"']([0-9][0-9.]*)[\"'][^>]+name=[\"']ajs-version-number[\"']"
+    ],
+    "html": [
+      "(?i)com\\.atlassian\\.confluence",
+      "(?i)/s/[^\\\"']*/_/download/(?:resources|superbatch)/"
+    ],
+    "cookies": [
+      "(?i)^\\s*confluence\\.list\\.pages"
+    ],
+    "url": [
+      "(?i)/(?:wiki/)?login\\.action"
+    ]
+  },
+  {
+    "name": "Atlassian Jira",
+    "product": "jira",
+    "categories": [
+      "collaboration",
+      "issue-tracker"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:atlassian:jira_server",
+    "headers": [
+      {
+        "name": "x-arequestid"
+      },
+      {
+        "name": "x-ausername"
+      }
+    ],
+    "meta": [
+      "(?i)name=[\"']ajs-version-number[\"'][^>]+content=[\"']([0-9][0-9.]*)"
+    ],
+    "html": [
+      "(?i)com\\.atlassian\\.jira",
+      "(?i)jira\\.webresources"
+    ],
+    "cookies": [
+      "(?i)^\\s*(?:atlassian\\.xsrf\\.token|JSESSIONID)=.*;.*Path=/jira"
+    ],
+    "url": [
+      "(?i)/secure/Dashboard\\.jspa"
+    ]
+  },
+  {
+    "name": "Atlassian Bitbucket",
+    "product": "bitbucket",
+    "categories": [
+      "collaboration",
+      "vcs"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:atlassian:bitbucket",
+    "headers": [
+      {
+        "name": "x-arequestid"
+      }
+    ],
+    "html": [
+      "(?i)com\\.atlassian\\.bitbucket",
+      "(?i)bitbucket\\.internal\\.layout"
+    ]
+  },
+  {
+    "name": "Gitea",
+    "product": "gitea",
+    "categories": [
+      "vcs"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:gitea:gitea",
+    "meta": [
+      "(?i)name=[\"']generator[\"'][^>]+content=[\"']Gitea(?:\\s+version\\s+([0-9][0-9.]*))?"
+    ],
+    "html": [
+      "(?i)Powered by <a[^>]*>Gitea</a>",
+      "(?i)Gitea Version:\\s*([0-9][0-9.]*)"
+    ],
+    "cookies": [
+      "(?i)^\\s*i_like_gitea="
+    ]
+  },
+  {
+    "name": "JetBrains TeamCity",
+    "product": "teamcity",
+    "categories": [
+      "ci-cd"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:jetbrains:teamcity",
+    "headers": [
+      {
+        "name": "x-teamcity-node-id"
+      }
+    ],
+    "html": [
+      "(?i)TeamCity\\s*(?:Professional\\s*)?<?[^>]*>?\\s*([0-9]+\\.[0-9.]+)\\s*\\(build",
+      "(?i)BS\\.Version\\s*=\\s*[\\\"']?([0-9][0-9.]*)"
+    ],
+    "cookies": [
+      "(?i)^\\s*TCSESSIONID="
+    ],
+    "url": [
+      "(?i)/login\\.html\\?"
+    ]
+  },
+  {
+    "name": "SonarQube",
+    "product": "sonarqube",
+    "categories": [
+      "code-quality"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:sonarsource:sonarqube",
+    "html": [
+      "(?i)<title>\\s*SonarQube\\s*</title>",
+      "(?i)window\\.serverStatus"
+    ],
+    "cookies": [
+      "(?i)^\\s*(?:JWT-SESSION|XSRF-TOKEN)=.*sonar"
+    ],
+    "scripts": [
+      "(?i)/js/out/sonar"
+    ]
+  },
+  {
+    "name": "Zabbix",
+    "product": "zabbix",
+    "categories": [
+      "monitoring"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:zabbix:zabbix",
+    "html": [
+      "(?i)<title>\\s*Zabbix\\s*</title>",
+      "(?i)Zabbix\\s+([0-9]+\\.[0-9]+\\.[0-9]+)\\s*(?:&copy;|©)"
+    ],
+    "cookies": [
+      "(?i)^\\s*zbx_(?:session|sessionid)="
+    ],
+    "scripts": [
+      "(?i)/js/(?:browsers|main|class\\.[a-z]+|vendors~?[a-z.]*)\\.js\\?ver=([0-9]+\\.[0-9]+\\.[0-9]+)",
+      "(?i)/zabbix\\.php\\?action="
+    ],
+    "text": [
+      "(?i)Zabbix\\s+([0-9]+\\.[0-9]+\\.[0-9]+)\\s*(?:©|\\(c\\)|Copyright)"
+    ]
+  },
+  {
+    "name": "Cacti",
+    "product": "cacti",
+    "categories": [
+      "monitoring"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:cacti:cacti",
+    "html": [
+      "(?i)<title>\\s*(?:Login to )?Cacti\\s*</title>",
+      "(?i)Version\\s+([0-9]+\\.[0-9.]+)\\s*\\|\\s*<a[^>]*cacti\\.net"
+    ],
+    "cookies": [
+      "(?i)^\\s*Cacti="
+    ],
+    "text": [
+      "(?i)Cacti[^0-9]{0,40}Version\\s+([0-9]+\\.[0-9][0-9.]*)"
+    ]
+  },
+  {
+    "name": "Nagios",
+    "product": "nagios",
+    "categories": [
+      "monitoring"
+    ],
+    "confidence": 80,
+    "html": [
+      "(?i)<title>\\s*Nagios(?:\\s+XI)?\\s*</title>",
+      "(?i)Nagios(?:&reg;)?\\s+Core(?:&trade;)?\\s+([0-9][0-9.]*)"
+    ],
+    "cookies": [
+      "(?i)^\\s*nagiosxi="
+    ],
+    "text": [
+      "(?i)Nagios\\s+Core[^0-9]{0,20}([0-9]+\\.[0-9][0-9.]*)"
+    ]
+  },
+  {
+    "name": "Splunk",
+    "product": "splunk",
+    "categories": [
+      "siem",
+      "monitoring"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:splunk:splunk",
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^Splunkd"
+      }
+    ],
+    "html": [
+      "(?i)Splunk\\s+(?:Enterprise|Web)",
+      "(?i)/en-US/static/@[0-9A-F.]+/"
+    ],
+    "cookies": [
+      "(?i)^\\s*splunkd_?[0-9]*="
+    ],
+    "url": [
+      "(?i)/en-US/account/login"
+    ]
+  },
+  {
+    "name": "Elasticsearch",
+    "product": "elasticsearch",
+    "categories": [
+      "search",
+      "database"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:elastic:elasticsearch",
+    "headers": [
+      {
+        "name": "x-elastic-product",
+        "pattern": "(?i)^Elasticsearch$"
+      }
+    ],
+    "html": [
+      "(?i)\"cluster_name\"\\s*:",
+      "(?i)\"number\"\\s*:\\s*\"([0-9][0-9.]*)\"[^}]*\"build_flavor\""
+    ]
+  },
+  {
+    "name": "Prometheus",
+    "product": "prometheus",
+    "categories": [
+      "monitoring"
+    ],
+    "confidence": 80,
+    "html": [
+      "(?i)<title>\\s*Prometheus[^<]*</title>",
+      "(?i)PROMETHEUS_CONSOLES"
+    ],
+    "url": [
+      "(?i)/graph$"
+    ]
+  },
+  {
+    "name": "Portainer",
+    "product": "portainer",
+    "categories": [
+      "container-management"
+    ],
+    "confidence": 85,
+    "html": [
+      "(?i)<title>\\s*Portainer\\s*</title>",
+      "(?i)portainer\\.(?:io|agent)"
+    ],
+    "scripts": [
+      "(?i)/portainer\\.[0-9a-f]+\\.js"
+    ]
+  },
+  {
+    "name": "ConnectWise ScreenConnect",
+    "product": "screenconnect",
+    "categories": [
+      "remote-access"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:connectwise:screenconnect",
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^ScreenConnect(?:/([0-9][0-9.]*))?"
+      }
+    ],
+    "html": [
+      "(?i)ScreenConnect\\.(?:Client|Core)",
+      "(?i)<title>\\s*(?:ScreenConnect|ConnectWise Control)"
+    ],
+    "scripts": [
+      "(?i)/Script\\.ashx",
+      "(?i)/Resources/.*ScreenConnect"
+    ]
+  },
+  {
+    "name": "VMware vCenter",
+    "product": "vcenter",
+    "categories": [
+      "virtualization"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:vmware:vcenter_server",
+    "html": [
+      "(?i)<title>\\s*vSphere(?: Web)? Client\\s*</title>",
+      "(?i)VMware vSphere"
+    ],
+    "url": [
+      "(?i)/ui/login",
+      "(?i)/websso/SAML2/SSO/"
+    ],
+    "cookies": [
+      "(?i)^\\s*VSPHERE-UI-JSESSIONID="
+    ]
+  },
+  {
+    "name": "VMware Horizon",
+    "product": "vmware-horizon",
+    "categories": [
+      "remote-access",
+      "virtualization"
+    ],
+    "confidence": 85,
+    "html": [
+      "(?i)<title>\\s*VMware(?:&nbsp;| )?Horizon",
+      "(?i)/portal/webclient/"
+    ],
+    "url": [
+      "(?i)/broker/xml"
+    ],
+    "favicon": [
+      -1255992602,
+      1895360511,
+      -991123252
+    ]
+  },
+  {
+    "name": "Zoho ManageEngine",
+    "product": "manageengine",
+    "categories": [
+      "it-management"
+    ],
+    "confidence": 85,
+    "html": [
+      "(?i)ManageEngine\\s+(?:ADSelfService Plus|ADManager Plus|ServiceDesk Plus|Desktop Central|Endpoint Central|OpManager|PAM360|Password Manager Pro)",
+      "(?i)Zoho Corporation"
+    ],
+    "cookies": [
+      "(?i)^\\s*(?:JSESSIONIDSSO|_zcsr_tmp)="
+    ],
+    "scripts": [
+      "(?i)/build/[^\\\"']*manageengine"
+    ]
+  },
+  {
+    "name": "PaperCut",
+    "product": "papercut",
+    "categories": [
+      "print-management"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:papercut:papercut_mf",
+    "html": [
+      "(?i)PaperCut\\s+(?:MF|NG)",
+      "(?i)<title>\\s*PaperCut"
+    ],
+    "cookies": [
+      "(?i)^\\s*JSESSIONID=.*;.*Path=/(?:app|user)"
+    ],
+    "url": [
+      "(?i)/app\\?service=page/"
+    ]
+  },
+  {
+    "name": "Zimbra Collaboration",
+    "product": "zimbra",
+    "categories": [
+      "mail",
+      "collaboration"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:zimbra:collaboration",
+    "headers": [
+      {
+        "name": "x-zimbra-request-id"
+      }
+    ],
+    "html": [
+      "(?i)Zimbra(?:\\s+Web)?\\s+Client",
+      "(?i)/zimbra/js/",
+      "(?i)ZmSetting"
+    ],
+    "cookies": [
+      "(?i)^\\s*(?:ZM_TEST|ZM_AUTH_TOKEN|ZM_LOGIN_CSRF)="
+    ],
+    "url": [
+      "(?i)/zimbra/(?:mail|public)/"
+    ]
+  },
+  {
+    "name": "Microsoft Outlook Web App",
+    "product": "owa",
+    "categories": [
+      "mail",
+      "webmail"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:microsoft:exchange_server",
+    "html": [
+      "(?i)/owa/auth/([0-9]+\\.[0-9]+\\.[0-9.]+)/themes/",
+      "(?i)/owa/(?:auth|prem|14\\.[0-9.]+)/",
+      "(?i)<title>[^<]*Outlook Web A(?:pp|ccess)[^<]*</title>"
+    ],
+    "cookies": [
+      "(?i)^\\s*(?:OutlookSession|X-OWA-CANARY|exchangecookie)="
+    ],
+    "url": [
+      "(?i)/owa/auth/logon\\.aspx"
+    ],
+    "implies": [
+      "exchange"
+    ]
+  },
+  {
+    "name": "Horde Groupware",
+    "product": "horde",
+    "categories": [
+      "mail",
+      "collaboration"
+    ],
+    "confidence": 80,
+    "html": [
+      "(?i)Horde(?:\\s+Groupware)?\\s+(?:Webmail|Application Framework)"
+    ],
+    "cookies": [
+      "(?i)^\\s*Horde="
+    ]
+  },
+  {
+    "name": "LiteSpeed",
+    "product": "litespeed",
+    "categories": [
+      "web-server"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:litespeedtech:litespeed_web_server",
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^LiteSpeed(?:/([0-9][0-9A-Za-z._-]*))?"
+      },
+      {
+        "name": "x-litespeed-cache"
+      }
+    ],
+    "excludes": [
+      "apache"
+    ]
+  },
+  {
+    "name": "OpenResty",
+    "product": "openresty",
+    "categories": [
+      "web-server"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:openresty:openresty",
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^openresty(?:/([0-9][0-9.]*))?"
+      }
+    ],
+    "implies": [
+      "nginx"
+    ]
+  },
+  {
+    "name": "Caddy",
+    "product": "caddy",
+    "categories": [
+      "web-server"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:caddyserver:caddy",
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^Caddy(?:/([0-9][0-9.]*))?"
+      }
+    ]
+  },
+  {
+    "name": "Eclipse Jetty",
+    "product": "jetty",
+    "categories": [
+      "web-server",
+      "application-server"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:eclipse:jetty",
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^Jetty\\(?([0-9][0-9A-Za-z._-]*)?\\)?"
+      }
+    ],
+    "html": [
+      "(?i)Powered by Jetty:?//?\\s*([0-9][0-9A-Za-z._-]*)"
+    ]
+  },
+  {
+    "name": "HAProxy",
+    "product": "haproxy",
+    "categories": [
+      "load-balancer",
+      "proxy"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:haproxy:haproxy",
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^HAProxy(?:/([0-9][0-9.]*))?"
+      }
+    ],
+    "html": [
+      "(?i)<title>\\s*Statistics Report for HAProxy\\s*</title>",
+      "(?i)HAProxy version ([0-9][0-9A-Za-z._-]*)"
+    ]
+  },
+  {
+    "name": "Squid",
+    "product": "squid",
+    "categories": [
+      "proxy",
+      "cache"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:squid-cache:squid",
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^squid(?:/([0-9][0-9.]*))?"
+      },
+      {
+        "name": "x-squid-error"
+      },
+      {
+        "name": "x-cache",
+        "pattern": "(?i)from .* \\(squid/([0-9][0-9.]*)\\)"
+      }
+    ]
+  },
+  {
+    "name": "Traefik",
+    "product": "traefik",
+    "categories": [
+      "proxy",
+      "load-balancer"
+    ],
+    "confidence": 80,
+    "headers": [
+      {
+        "name": "x-traefik-router"
+      }
+    ],
+    "html": [
+      "(?i)<title>\\s*Traefik\\s*</title>"
+    ]
+  },
+  {
+    "name": "Envoy",
+    "product": "envoy",
+    "categories": [
+      "proxy"
+    ],
+    "confidence": 80,
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^envoy$"
+      },
+      {
+        "name": "x-envoy-upstream-service-time"
+      }
+    ]
+  },
+  {
+    "name": "Oracle WebLogic",
+    "product": "weblogic",
+    "categories": [
+      "application-server"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:oracle:weblogic_server",
+    "headers": [
+      {
+        "name": "x-powered-by",
+        "pattern": "(?i)Servlet/[0-9.]+ JSP/[0-9.]+.*WebLogic"
+      }
+    ],
+    "html": [
+      "(?i)WebLogic Server",
+      "(?i)/console/framework/skins/"
+    ],
+    "url": [
+      "(?i)/console/login/LoginForm\\.jsp"
+    ],
+    "cookies": [
+      "(?i)^\\s*ADMINCONSOLESESSION="
+    ]
+  },
+  {
+    "name": "IBM WebSphere",
+    "product": "websphere",
+    "categories": [
+      "application-server"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:ibm:websphere_application_server",
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)WebSphere Application Server/?([0-9][0-9.]*)?"
+      },
+      {
+        "name": "x-powered-by",
+        "pattern": "(?i)Servlet/[0-9.]+.*IBM"
+      }
+    ],
+    "cookies": [
+      "(?i)^\\s*(?:LtpaToken2?|WASReqURL)="
+    ]
+  },
+  {
+    "name": "JBoss / WildFly",
+    "product": "wildfly",
+    "categories": [
+      "application-server"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "x-powered-by",
+        "pattern": "(?i)(?:JBoss|Undertow|WildFly)[- /]?([0-9][0-9.]*)?"
+      },
+      {
+        "name": "server",
+        "pattern": "(?i)(?:JBoss-|WildFly/|Undertow/)([0-9][0-9.]*)?"
+      }
+    ],
+    "html": [
+      "(?i)JBoss (?:AS|EAP|Application Server)",
+      "(?i)Welcome to WildFly"
+    ]
+  },
+  {
+    "name": "Adobe ColdFusion",
+    "product": "coldfusion",
+    "categories": [
+      "application-server"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:adobe:coldfusion",
+    "cookies": [
+      "(?i)^\\s*(?:CFID|CFTOKEN|CFAUTHORIZATION)="
+    ],
+    "html": [
+      "(?i)/CFIDE/(?:administrator|scripts)/",
+      "(?i)ColdFusion\\s+(?:Administrator|Server)\\s+([0-9]+[0-9.]*)",
+      "(?i)cfform\\.js|/cf_scripts/scripts/"
+    ],
+    "url": [
+      "(?i)/CFIDE/administrator/"
+    ]
+  },
+  {
+    "name": "Apache Struts",
+    "product": "struts",
+    "categories": [
+      "framework"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:apache:struts",
+    "html": [
+      "(?i)struts\\.(?:token|multipart)",
+      "(?i)/struts/(?:js|utils)/"
+    ],
+    "scripts": [
+      "(?i)/struts/[a-z]+/[a-z.]+\\.js"
+    ],
+    "url": []
+  },
+  {
+    "name": "Spring Framework",
+    "product": "spring",
+    "categories": [
+      "framework"
+    ],
+    "confidence": 75,
+    "cpe": "cpe:2.3:a:vmware:spring_framework",
+    "headers": [
+      {
+        "name": "x-application-context"
+      }
+    ],
+    "html": [
+      "(?i)Whitelabel Error Page",
+      "(?i)org\\.springframework\\."
+    ],
+    "cookies": []
+  },
+  {
+    "name": "Sitecore",
+    "product": "sitecore",
+    "categories": [
+      "cms"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:sitecore:experience_platform",
+    "cookies": [
+      "(?i)^\\s*(?:SC_ANALYTICS_GLOBAL_COOKIE|sitecore)="
+    ],
+    "html": [
+      "(?i)/sitecore/(?:shell|service)/",
+      "(?i)Sitecore\\.Context"
+    ],
+    "url": [
+      "(?i)/sitecore/login"
+    ]
+  },
+  {
+    "name": "Adobe Experience Manager",
+    "product": "aem",
+    "categories": [
+      "cms"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:adobe:experience_manager",
+    "html": [
+      "(?i)/etc\\.clientlibs/",
+      "(?i)/etc/designs/",
+      "(?i)cq:template"
+    ],
+    "scripts": [
+      "(?i)/etc\\.clientlibs/[^\\\"']+\\.js"
+    ],
+    "cookies": [
+      "(?i)^\\s*(?:cq-authoring-mode|login-token)="
+    ]
+  },
+  {
+    "name": "Umbraco",
+    "product": "umbraco",
+    "categories": [
+      "cms"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:umbraco:umbraco_cms",
+    "html": [
+      "(?i)/umbraco/(?:assets|backoffice)/",
+      "(?i)umbracoConfigurationStatus"
+    ],
+    "cookies": [
+      "(?i)^\\s*UMB_"
+    ],
+    "url": [
+      "(?i)/umbraco/?$"
+    ],
+    "implies": [
+      "asp.net"
+    ]
+  },
+  {
+    "name": "Craft CMS",
+    "product": "craftcms",
+    "categories": [
+      "cms"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:craftcms:craft_cms",
+    "headers": [
+      {
+        "name": "x-powered-by",
+        "pattern": "(?i)Craft CMS"
+      }
+    ],
+    "cookies": [
+      "(?i)^\\s*CraftSessionId="
+    ],
+    "implies": [
+      "php"
+    ]
+  },
+  {
+    "name": "Ghost",
+    "product": "ghost",
+    "categories": [
+      "cms",
+      "blog"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:ghost:ghost",
+    "meta": [
+      "(?i)name=[\"']generator[\"'][^>]+content=[\"']Ghost\\s*([0-9][0-9.]*)?"
+    ],
+    "html": [
+      "(?i)/assets/built/(?:screen|source)\\.css",
+      "(?i)ghost-(?:head|foot)"
+    ]
+  },
+  {
+    "name": "Strapi",
+    "product": "strapi",
+    "categories": [
+      "cms",
+      "headless-cms"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:strapi:strapi",
+    "headers": [
+      {
+        "name": "x-powered-by",
+        "pattern": "(?i)^Strapi"
+      }
+    ],
+    "html": [
+      "(?i)<title>\\s*Strapi",
+      "(?i)strapi-admin"
+    ]
+  },
+  {
+    "name": "Nextcloud",
+    "product": "nextcloud",
+    "categories": [
+      "file-sharing",
+      "collaboration"
+    ],
+    "confidence": 90,
+    "cpe": "cpe:2.3:a:nextcloud:nextcloud_server",
+    "headers": [
+      {
+        "name": "x-nextcloud-user"
+      }
+    ],
+    "html": [
+      "(?i)data-product-name=[\\\"']Nextcloud",
+      "(?i)/core/js/dist/main\\.js"
+    ],
+    "cookies": [
+      "(?i)^\\s*(?:nc_session_id|nc_username|oc_sessionPassphrase)="
+    ],
+    "meta": [
+      "(?i)name=[\"']apple-itunes-app[\"'][^>]+content=[\"'][^\"']*nextcloud"
+    ],
+    "implies": [
+      "php"
+    ]
+  },
+  {
+    "name": "ownCloud",
+    "product": "owncloud",
+    "categories": [
+      "file-sharing"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:owncloud:owncloud",
+    "html": [
+      "(?i)data-product-name=[\\\"']ownCloud",
+      "(?i)ownCloud\\s+Inc"
+    ],
+    "cookies": [
+      "(?i)^\\s*(?:oc[0-9a-f]{10,}|oc_sessionPassphrase)="
+    ],
+    "implies": [
+      "php"
+    ]
+  },
+  {
+    "name": "PrestaShop",
+    "product": "prestashop",
+    "categories": [
+      "ecommerce"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:prestashop:prestashop",
+    "meta": [
+      "(?i)name=[\"']generator[\"'][^>]+content=[\"']PrestaShop"
+    ],
+    "headers": [
+      {
+        "name": "powered-by",
+        "pattern": "(?i)PrestaShop"
+      }
+    ],
+    "html": [
+      "(?i)var\\s+prestashop\\s*=",
+      "(?i)/modules/ps_(?:searchbar|emailsubscription|shoppingcart|customeraccountlinks|mainmenu|imageslider|featuredproducts|linklist)/",
+      "(?i)\\bprestashop\\.(?:emit|on|cart)\\b",
+      "(?i)id=[\\\"']_desktop_(?:cart|user_info|logo)[\\\"']"
+    ],
+    "cookies": [
+      "(?i)^\\s*PrestaShop-"
+    ],
+    "implies": [
+      "php"
+    ]
+  },
+  {
+    "name": "OpenCart",
+    "product": "opencart",
+    "categories": [
+      "ecommerce"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:opencart:opencart",
+    "html": [
+      "(?i)catalog/view/(?:theme|javascript)/",
+      "(?i)route=common/home"
+    ],
+    "cookies": [
+      "(?i)^\\s*OCSESSID="
+    ],
+    "implies": [
+      "php"
+    ]
+  },
+  {
+    "name": "Django",
+    "product": "django",
+    "categories": [
+      "framework"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:djangoproject:django",
+    "cookies": [
+      "(?i)^\\s*(?:csrftoken|django_language)="
+    ],
+    "html": [
+      "(?i)__admin_media_prefix__",
+      "(?i)/static/admin/css/base\\.css"
+    ],
+    "url": [
+      "(?i)/admin/login/\\?next="
+    ]
+  },
+  {
+    "name": "Ruby on Rails",
+    "product": "rails",
+    "categories": [
+      "framework"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:rubyonrails:rails",
+    "headers": [
+      {
+        "name": "x-runtime"
+      },
+      {
+        "name": "server",
+        "pattern": "(?i)^(?:Phusion Passenger|thin|puma)"
+      }
+    ],
+    "cookies": [
+      "(?i)^\\s*_[a-z0-9_]+_session="
+    ],
+    "meta": [
+      "(?i)name=[\"']csrf-param[\"'][^>]+content=[\"']authenticity_token"
+    ]
+  },
+  {
+    "name": "Nuxt",
+    "product": "nuxt",
+    "categories": [
+      "framework",
+      "javascript-framework"
+    ],
+    "confidence": 80,
+    "html": [
+      "(?i)window\\.__NUXT__",
+      "(?i)/_nuxt/"
+    ],
+    "scripts": [
+      "(?i)/_nuxt/[^\\\"']+\\.js"
+    ],
+    "implies": [
+      "vue"
+    ]
+  },
+  {
+    "name": "Svelte / SvelteKit",
+    "product": "sveltekit",
+    "categories": [
+      "framework",
+      "javascript-framework"
+    ],
+    "confidence": 75,
+    "html": [
+      "(?i)__sveltekit_",
+      "(?i)/_app/immutable/"
+    ],
+    "scripts": [
+      "(?i)/_app/immutable/(?:entry|chunks)/"
+    ]
+  },
+  {
+    "name": "Astro",
+    "product": "astro",
+    "categories": [
+      "framework"
+    ],
+    "confidence": 75,
+    "meta": [
+      "(?i)name=[\"']generator[\"'][^>]+content=[\"']Astro\\s*v?([0-9][0-9.]*)?"
+    ],
+    "html": [
+      "(?i)astro-island",
+      "(?i)data-astro-cid-"
+    ]
+  },
+  {
+    "name": "Symfony",
+    "product": "symfony",
+    "categories": [
+      "framework"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:sensiolabs:symfony",
+    "headers": [
+      {
+        "name": "x-debug-token"
+      },
+      {
+        "name": "x-debug-token-link"
+      }
+    ],
+    "cookies": [
+      "(?i)^\\s*(?:sf_redirect|symfony)="
+    ],
+    "html": [
+      "(?i)/bundles/framework(?:bundle)?/"
+    ],
+    "implies": [
+      "php"
+    ]
+  },
+  {
+    "name": "CodeIgniter",
+    "product": "codeigniter",
+    "categories": [
+      "framework"
+    ],
+    "confidence": 75,
+    "cpe": "cpe:2.3:a:codeigniter:codeigniter",
+    "cookies": [
+      "(?i)^\\s*ci_session(?:ion)?="
+    ],
+    "html": [
+      "(?i)Powered by <a[^>]*>CodeIgniter"
+    ],
+    "implies": [
+      "php"
+    ]
+  },
+  {
+    "name": "Flask",
+    "product": "flask",
+    "categories": [
+      "framework"
+    ],
+    "confidence": 70,
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^Werkzeug/([0-9][0-9.]*)"
+      }
+    ],
+    "cookies": [
+      "(?i)^\\s*session=eyJ"
+    ]
+  },
+  {
+    "name": "Gunicorn",
+    "product": "gunicorn",
+    "categories": [
+      "web-server"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^gunicorn(?:/([0-9][0-9.]*))?"
+      }
+    ]
+  },
+  {
+    "name": "Kestrel",
+    "product": "kestrel",
+    "categories": [
+      "web-server"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^Kestrel$"
+      }
+    ],
+    "implies": [
+      "asp.net"
+    ]
+  },
+  {
+    "name": "phpBB",
+    "product": "phpbb",
+    "categories": [
+      "forum"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:phpbb:phpbb",
+    "meta": [
+      "(?i)name=[\"']generator[\"'][^>]+content=[\"']phpBB\\s*([0-9][0-9.]*)?"
+    ],
+    "cookies": [
+      "(?i)^\\s*phpbb[23]?_"
+    ],
+    "html": [
+      "(?i)Powered by <a[^>]*>phpBB"
+    ],
+    "implies": [
+      "php"
+    ]
+  },
+  {
+    "name": "MediaWiki",
+    "product": "mediawiki",
+    "categories": [
+      "wiki"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:mediawiki:mediawiki",
+    "meta": [
+      "(?i)name=[\"']generator[\"'][^>]+content=[\"']MediaWiki\\s*([0-9][0-9.]*)?"
+    ],
+    "html": [
+      "(?i)/load\\.php\\?[^\\\"']*modules=(?:startup|site)",
+      "(?i)mw\\.config\\.set"
+    ],
+    "implies": [
+      "php"
+    ],
+    "robots": [
+      "(?im)^Disallow:\\s*/w/index\\.php"
+    ]
+  },
+  {
+    "name": "Moodle",
+    "product": "moodle",
+    "categories": [
+      "lms"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:moodle:moodle",
+    "cookies": [
+      "(?i)^\\s*MoodleSession"
+    ],
+    "html": [
+      "(?i)M\\.cfg\\s*=",
+      "(?i)/theme/(?:boost|classic)/"
+    ],
+    "implies": [
+      "php"
+    ],
+    "robots": [
+      "(?im)^Disallow:\\s*/(?:course/|user/view)"
+    ]
+  },
+  {
+    "name": "Jupyter",
+    "product": "jupyter",
+    "categories": [
+      "notebook"
+    ],
+    "confidence": 80,
+    "html": [
+      "(?i)<title>\\s*Jupyter(?:Lab| Notebook)?",
+      "(?i)jupyter-config-data"
+    ],
+    "cookies": [
+      "(?i)^\\s*(?:username-|_xsrf=)"
+    ]
+  },
+  {
+    "name": "MinIO",
+    "product": "minio",
+    "categories": [
+      "object-storage"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^MinIO"
+      }
+    ],
+    "html": [
+      "(?i)<title>\\s*MinIO(?: Console)?\\s*</title>"
+    ]
+  },
+  {
+    "name": "Keycloak",
+    "product": "keycloak",
+    "categories": [
+      "identity",
+      "sso"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:redhat:keycloak",
+    "html": [
+      "(?i)/resources/[^\\\"']+/(?:login|admin)/keycloak",
+      "(?i)kc-(?:form|content)"
+    ],
+    "cookies": [
+      "(?i)^\\s*(?:KEYCLOAK_(?:SESSION|IDENTITY)|AUTH_SESSION_ID)="
+    ],
+    "url": [
+      "(?i)/(?:auth/)?realms/[^/]+/protocol/openid-connect/"
+    ]
+  },
+  {
+    "name": "Apache Solr",
+    "product": "solr",
+    "categories": [
+      "search"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:apache:solr",
+    "html": [
+      "(?i)<title>\\s*Solr Admin",
+      "(?i)solr-admin"
+    ],
+    "url": [
+      "(?i)/solr/(?:admin|#/)"
+    ]
+  },
+  {
+    "name": "RabbitMQ Management",
+    "product": "rabbitmq",
+    "categories": [
+      "message-broker"
+    ],
+    "confidence": 80,
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^(?:Cowboy|RabbitMQ)"
+      }
+    ],
+    "html": [
+      "(?i)<title>[^<]*RabbitMQ Management",
+      "(?i)rabbit@"
+    ]
+  },
+  {
+    "name": "Apache Airflow",
+    "product": "airflow",
+    "categories": [
+      "workflow"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:apache:airflow",
+    "html": [
+      "(?i)<title>\\s*(?:Sign In - )?Airflow",
+      "(?i)/static/appbuilder/"
+    ],
+    "cookies": []
+  },
+  {
+    "name": "Metabase",
+    "product": "metabase",
+    "categories": [
+      "analytics"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:metabase:metabase",
+    "headers": [
+      {
+        "name": "x-metabase-session"
+      }
+    ],
+    "html": [
+      "(?i)<title>\\s*Metabase",
+      "(?i)MetabaseBootstrap"
+    ]
+  },
+  {
+    "name": "Apache Superset",
+    "product": "superset",
+    "categories": [
+      "analytics"
+    ],
+    "confidence": 75,
+    "html": [
+      "(?i)<title>\\s*Superset",
+      "(?i)superset-frontend"
+    ]
+  },
+  {
+    "name": "Odoo",
+    "product": "odoo",
+    "categories": [
+      "erp"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:odoo:odoo",
+    "meta": [
+      "(?i)name=[\"']generator[\"'][^>]+content=[\"']Odoo"
+    ],
+    "cookies": [
+      "(?i)^\\s*session_id=.*;.*Path=/"
+    ],
+    "html": [
+      "(?i)odoo\\.define\\(",
+      "(?i)/web/static/(?:src|lib)/"
+    ]
+  },
+  {
+    "name": "SAP NetWeaver",
+    "product": "sap-netweaver",
+    "categories": [
+      "erp",
+      "application-server"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)SAP NetWeaver Application Server(?:\\s+([0-9][0-9./]*))?"
+      }
+    ],
+    "cookies": [
+      "(?i)^\\s*(?:SAP_SESSIONID|MYSAPSSO2|JSESSIONMARKID)="
+    ],
+    "html": [
+      "(?i)/sap/public/bc/",
+      "(?i)/irj/portal"
+    ]
+  },
+  {
+    "name": "Akamai",
+    "product": "akamai",
+    "categories": [
+      "cdn"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "x-akamai-transformed"
+      },
+      {
+        "name": "akamai-grn"
+      },
+      {
+        "name": "server",
+        "pattern": "(?i)^AkamaiGHost"
+      }
+    ]
+  },
+  {
+    "name": "Fastly",
+    "product": "fastly",
+    "categories": [
+      "cdn"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "x-served-by",
+        "pattern": "(?i)cache-"
+      },
+      {
+        "name": "fastly-io-info"
+      },
+      {
+        "name": "x-fastly-request-id"
+      }
+    ]
+  },
+  {
+    "name": "Amazon CloudFront",
+    "product": "cloudfront",
+    "categories": [
+      "cdn"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "x-amz-cf-id"
+      },
+      {
+        "name": "via",
+        "pattern": "(?i)CloudFront"
+      },
+      {
+        "name": "server",
+        "pattern": "(?i)^CloudFront$"
+      }
+    ]
+  },
+  {
+    "name": "Imperva",
+    "product": "imperva",
+    "categories": [
+      "waf"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "x-iinfo"
+      },
+      {
+        "name": "x-cdn",
+        "pattern": "(?i)Incapsula"
+      }
+    ],
+    "cookies": [
+      "(?i)^\\s*(?:visid_incap|incap_ses)_"
+    ]
+  },
+  {
+    "name": "Sucuri",
+    "product": "sucuri",
+    "categories": [
+      "waf"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "x-sucuri-id"
+      },
+      {
+        "name": "x-sucuri-cache"
+      },
+      {
+        "name": "server",
+        "pattern": "(?i)^Sucuri/Cloudproxy"
+      }
+    ]
+  },
+  {
+    "name": "Vercel",
+    "product": "vercel",
+    "categories": [
+      "hosting"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "x-vercel-id"
+      },
+      {
+        "name": "x-vercel-cache"
+      },
+      {
+        "name": "server",
+        "pattern": "(?i)^Vercel$"
+      }
+    ]
+  },
+  {
+    "name": "Netlify",
+    "product": "netlify",
+    "categories": [
+      "hosting"
+    ],
+    "confidence": 85,
+    "headers": [
+      {
+        "name": "x-nf-request-id"
+      },
+      {
+        "name": "server",
+        "pattern": "(?i)^Netlify$"
+      }
+    ]
+  },
+  {
+    "name": "AWS Elastic Load Balancer",
+    "product": "aws-elb",
+    "categories": [
+      "load-balancer"
+    ],
+    "confidence": 80,
+    "headers": [
+      {
+        "name": "server",
+        "pattern": "(?i)^awselb/([0-9][0-9.]*)"
+      }
+    ],
+    "cookies": [
+      "(?i)^\\s*AWSALB(?:CORS)?="
+    ]
+  },
+  {
+    "name": "Google Cloud Load Balancer",
+    "product": "gcp-lb",
+    "categories": [
+      "load-balancer"
+    ],
+    "confidence": 75,
+    "headers": [
+      {
+        "name": "via",
+        "pattern": "(?i)^1\\.1 google$"
+      },
+      {
+        "name": "server",
+        "pattern": "(?i)^Google Frontend$"
+      }
+    ]
+  },
+  {
+    "name": "Microsoft Azure App Service",
+    "product": "azure-app-service",
+    "categories": [
+      "hosting"
+    ],
+    "confidence": 80,
+    "headers": [
+      {
+        "name": "x-azure-ref"
+      },
+      {
+        "name": "x-aspnet-version"
+      },
+      {
+        "name": "server",
+        "pattern": "(?i)^Microsoft-Azure-Application-Gateway"
+      }
+    ],
+    "cookies": [
+      "(?i)^\\s*ARRAffinity(?:SameSite)?="
+    ]
+  },
+  {
+    "name": "Google Analytics",
+    "product": "google-analytics",
+    "categories": [
+      "analytics"
+    ],
+    "confidence": 90,
+    "scripts": [
+      "(?i)google-analytics\\.com/(?:analytics|ga)\\.js",
+      "(?i)googletagmanager\\.com/gtag/js"
+    ],
+    "html": [
+      "(?i)gtag\\('config'",
+      "(?i)GoogleAnalyticsObject"
+    ]
+  },
+  {
+    "name": "Google Tag Manager",
+    "product": "google-tag-manager",
+    "categories": [
+      "tag-manager"
+    ],
+    "confidence": 90,
+    "scripts": [
+      "(?i)googletagmanager\\.com/gtm\\.js"
+    ],
+    "html": [
+      "(?i)googletagmanager\\.com/ns\\.html"
+    ]
+  },
+  {
+    "name": "Matomo",
+    "product": "matomo",
+    "categories": [
+      "analytics"
+    ],
+    "confidence": 85,
+    "cpe": "cpe:2.3:a:matomo:matomo",
+    "scripts": [
+      "(?i)/(?:matomo|piwik)\\.js"
+    ],
+    "html": [
+      "(?i)var _paq\\s*=",
+      "(?i)matomo\\.php"
+    ]
+  },
+  {
+    "name": "Hotjar",
+    "product": "hotjar",
+    "categories": [
+      "analytics"
+    ],
+    "confidence": 85,
+    "scripts": [
+      "(?i)static\\.hotjar\\.com/c/hotjar-"
+    ],
+    "html": [
+      "(?i)window\\.hj\\s*=|_hjSettings"
+    ]
+  },
+  {
+    "name": "Sentry",
+    "product": "sentry",
+    "categories": [
+      "monitoring",
+      "error-tracking"
+    ],
+    "confidence": 80,
+    "html": [
+      "(?i)Sentry\\.init\\(",
+      "(?i)__SENTRY__"
+    ],
+    "scripts": [
+      "(?i)browser\\.sentry-cdn\\.com/([0-9][0-9.]*)/"
+    ]
+  },
+  {
+    "name": "Cloudflare Turnstile",
+    "product": "turnstile",
+    "categories": [
+      "captcha"
+    ],
+    "confidence": 85,
+    "scripts": [
+      "(?i)challenges\\.cloudflare\\.com/turnstile/"
+    ],
+    "implies": [
+      "cloudflare"
+    ]
+  },
+  {
+    "name": "Google reCAPTCHA",
+    "product": "recaptcha",
+    "categories": [
+      "captcha"
+    ],
+    "confidence": 85,
+    "scripts": [
+      "(?i)(?:www\\.google\\.com|recaptcha\\.net)/recaptcha/(?:api|enterprise)\\.js"
+    ],
+    "html": [
+      "(?i)g-recaptcha"
+    ]
+  },
+  {
+    "name": "jQuery UI",
+    "product": "jquery-ui",
+    "categories": [
+      "javascript-library"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:jqueryui:jquery_ui",
+    "scripts": [
+      "(?i)jquery[.-]ui(?:[.-]([0-9]+\\.[0-9]+(?:\\.[0-9]+)*))?(?:\\.min)?\\.(?:js|css)",
+      "(?i)/(?:ajax/libs|npm)/jquery-ui@?/?([0-9]+\\.[0-9][0-9A-Za-z.\\-]*)/"
+    ],
+    "js_content": [
+      "(?i)/\\*!\\s*jQuery UI\\s*-?\\s*v?([0-9]+\\.[0-9][0-9A-Za-z.]*)",
+      "(?i)version\\s*:\\s*[\\\"']([0-9]+\\.[0-9][0-9A-Za-z.]*)[\\\"']\\s*,\\s*keyCode"
+    ]
+  },
+  {
+    "name": "DOMPurify",
+    "product": "dompurify",
+    "categories": [
+      "javascript-library"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:cure53:dompurify",
+    "scripts": [
+      "(?i)(?:dom)?purify[.-]([0-9]+\\.[0-9]+(?:\\.[0-9]+)*)(?:\\.min)?\\.js",
+      "(?i)/(?:ajax/libs|npm)/dompurify@?/?([0-9]+\\.[0-9][0-9A-Za-z.\\-]*)/",
+      "(?i)/dompurify(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)VERSION\\s*=\\s*[\\\"']([0-9]+\\.[0-9][0-9A-Za-z.]*)[\\\"']"
+    ]
+  },
+  {
+    "name": "Handlebars",
+    "product": "handlebars",
+    "categories": [
+      "javascript-library"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:handlebarsjs:handlebars",
+    "scripts": [
+      "(?i)handlebars(?:[.-]v?([0-9]+\\.[0-9]+(?:\\.[0-9]+)*))?(?:\\.runtime)?(?:\\.min)?\\.js",
+      "(?i)/(?:ajax/libs|npm)/handlebars@?/?([0-9]+\\.[0-9][0-9A-Za-z.\\-]*)/"
+    ],
+    "js_content": [
+      "(?i)Handlebars\\.VERSION\\s*=\\s*[\\\"']([0-9]+\\.[0-9][0-9A-Za-z.]*)[\\\"']"
+    ]
+  },
+  {
+    "name": "Prototype",
+    "product": "prototype",
+    "categories": [
+      "javascript-library"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:prototypejs:prototype",
+    "scripts": [
+      "(?i)prototype[.-]([0-9]+\\.[0-9]+(?:\\.[0-9]+)*)(?:\\.min)?\\.js",
+      "(?i)/(?:ajax/libs|npm)/prototype@?/?([0-9]+\\.[0-9][0-9A-Za-z.\\-]*)/",
+      "(?i)/(?:javascripts?|js|lib)/prototype(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)Version:\\s*[\\\"']?([0-9]+\\.[0-9][0-9A-Za-z.]*)"
+    ]
+  },
+  {
+    "name": "Ember.js",
+    "product": "ember",
+    "categories": [
+      "javascript-library"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:emberjs:ember.js",
+    "scripts": [
+      "(?i)ember[.-]([0-9]+\\.[0-9]+(?:\\.[0-9]+)*)(?:\\.prod|\\.debug)?(?:\\.min)?\\.js",
+      "(?i)/(?:ajax/libs|npm)/ember(?:\\.js)?@?/?([0-9]+\\.[0-9][0-9A-Za-z.\\-]*)/",
+      "(?i)/assets/vendor-[0-9a-f]{32}\\.js"
+    ],
+    "js_content": [
+      "(?i)Ember\\.VERSION\\s*=\\s*[\\\"']([0-9]+\\.[0-9][0-9A-Za-z.]*)"
+    ]
+  },
+  {
+    "name": "Video.js",
+    "product": "video.js",
+    "categories": [
+      "javascript-library"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:videojs:video.js",
+    "scripts": [
+      "(?i)video(?:-js)?[.-]([0-9]+\\.[0-9]+(?:\\.[0-9]+)*)(?:\\.min)?\\.js",
+      "(?i)/(?:ajax/libs|npm)/video\\.js@?/?([0-9]+\\.[0-9][0-9A-Za-z.\\-]*)/",
+      "(?i)/video-js(?:/|\\.min\\.js)"
+    ],
+    "js_content": [
+      "(?i)version\\s*=\\s*[\\\"']([0-9]+\\.[0-9][0-9A-Za-z.]*)[\\\"']\\s*;?\\s*(?:var|const)?\\s*videojs"
+    ]
+  },
+  {
+    "name": "CKEditor",
+    "product": "ckeditor",
+    "categories": [
+      "javascript-library"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:ckeditor:ckeditor",
+    "scripts": [
+      "(?i)ckeditor(?:[45])?(?:[.-]([0-9]+\\.[0-9]+(?:\\.[0-9]+)*))?(?:\\.min)?\\.js",
+      "(?i)/(?:ajax/libs|npm)/ckeditor@?/?([0-9]+\\.[0-9][0-9A-Za-z.\\-]*)/"
+    ],
+    "js_content": [
+      "(?i)version\\s*:\\s*[\\\"']([0-9]+\\.[0-9][0-9A-Za-z.]*)[\\\"']\\s*,\\s*revision"
+    ]
+  },
+  {
+    "name": "TinyMCE",
+    "product": "tinymce",
+    "categories": [
+      "javascript-library"
+    ],
+    "confidence": 80,
+    "cpe": "cpe:2.3:a:tiny:tinymce",
+    "scripts": [
+      "(?i)tinymce(?:[.-]([0-9]+\\.[0-9]+(?:\\.[0-9]+)*))?(?:\\.min)?\\.js",
+      "(?i)/(?:ajax/libs|npm)/tinymce@?/?([0-9]+\\.[0-9][0-9A-Za-z.\\-]*)/"
+    ],
+    "js_content": [
+      "(?i)majorVersion\\s*:\\s*[\\\"']([0-9]+)[\\\"']"
+    ]
+  },
+  {
+    "name": "Plotly.js",
+    "product": "plotly.js",
+    "categories": [
+      "javascript-library"
+    ],
+    "confidence": 80,
+    "scripts": [
+      "(?i)plotly(?:-[a-z]+)?[.-]([0-9]+\\.[0-9]+(?:\\.[0-9]+)*)(?:\\.min)?\\.js",
+      "(?i)/(?:ajax/libs|npm)/plotly(?:\\.js)?@?/?([0-9]+\\.[0-9][0-9A-Za-z.\\-]*)/",
+      "(?i)/plotly(?:-latest)?(?:\\.min)?\\.js"
+    ],
+    "js_content": [
+      "(?i)version\\s*=\\s*[\\\"']([0-9]+\\.[0-9][0-9A-Za-z.]*)[\\\"']\\s*,\\s*.{0,40}plotly"
+    ]
+  },
+  {
+    "name": "Elementor",
+    "product": "elementor",
+    "categories": [
+      "wordpress-plugin"
+    ],
+    "confidence": 85,
+    "requires": [
+      "wordpress"
+    ],
+    "scripts": [
+      "(?i)/wp-content/plugins/elementor/[^\\\"']*\\?[^\\\"']*ver=([0-9]+\\.[0-9][0-9A-Za-z.]*)",
+      "(?i)/wp-content/plugins/elementor/"
+    ],
+    "html": [
+      "(?i)/wp-content/plugins/elementor/\\;confidence:60"
+    ],
+    "implies": [
+      "wordpress"
+    ],
+    "cpe": "cpe:2.3:a:elementor:website_builder"
+  },
+  {
+    "name": "Yoast SEO",
+    "product": "yoast-seo",
+    "categories": [
+      "wordpress-plugin"
+    ],
+    "confidence": 85,
+    "requires": [
+      "wordpress"
+    ],
+    "scripts": [
+      "(?i)/wp-content/plugins/wordpress-seo/[^\\\"']*\\?[^\\\"']*ver=([0-9]+\\.[0-9][0-9A-Za-z.]*)",
+      "(?i)/wp-content/plugins/wordpress-seo/"
+    ],
+    "html": [
+      "(?i)/wp-content/plugins/wordpress-seo/\\;confidence:60"
+    ],
+    "implies": [
+      "wordpress"
+    ],
+    "cpe": "cpe:2.3:a:yoast:yoast_seo"
+  },
+  {
+    "name": "Contact Form 7",
+    "product": "contact-form-7",
+    "categories": [
+      "wordpress-plugin"
+    ],
+    "confidence": 85,
+    "requires": [
+      "wordpress"
+    ],
+    "scripts": [
+      "(?i)/wp-content/plugins/contact-form-7/[^\\\"']*\\?[^\\\"']*ver=([0-9]+\\.[0-9][0-9A-Za-z.]*)",
+      "(?i)/wp-content/plugins/contact-form-7/"
+    ],
+    "html": [
+      "(?i)/wp-content/plugins/contact-form-7/\\;confidence:60"
+    ],
+    "implies": [
+      "wordpress"
+    ],
+    "cpe": "cpe:2.3:a:rocklobster:contact_form_7"
+  },
+  {
+    "name": "WPBakery Page Builder",
+    "product": "wpbakery",
+    "categories": [
+      "wordpress-plugin"
+    ],
+    "confidence": 85,
+    "requires": [
+      "wordpress"
+    ],
+    "scripts": [
+      "(?i)/wp-content/plugins/js_composer/[^\\\"']*\\?[^\\\"']*ver=([0-9]+\\.[0-9][0-9A-Za-z.]*)",
+      "(?i)/wp-content/plugins/js_composer/"
+    ],
+    "html": [
+      "(?i)/wp-content/plugins/js_composer/\\;confidence:60"
+    ],
+    "implies": [
+      "wordpress"
+    ]
+  },
+  {
+    "name": "Slider Revolution",
+    "product": "slider-revolution",
+    "categories": [
+      "wordpress-plugin"
+    ],
+    "confidence": 85,
+    "requires": [
+      "wordpress"
+    ],
+    "scripts": [
+      "(?i)/wp-content/plugins/revslider/[^\\\"']*\\?[^\\\"']*ver=([0-9]+\\.[0-9][0-9A-Za-z.]*)",
+      "(?i)/wp-content/plugins/revslider/"
+    ],
+    "html": [
+      "(?i)/wp-content/plugins/revslider/\\;confidence:60"
+    ],
+    "implies": [
+      "wordpress"
+    ],
+    "cpe": "cpe:2.3:a:sliderrevolution:slider_revolution"
+  },
+  {
+    "name": "WP Rocket",
+    "product": "wp-rocket",
+    "categories": [
+      "wordpress-plugin"
+    ],
+    "confidence": 85,
+    "requires": [
+      "wordpress"
+    ],
+    "scripts": [
+      "(?i)/wp-content/plugins/wp-rocket/[^\\\"']*\\?[^\\\"']*ver=([0-9]+\\.[0-9][0-9A-Za-z.]*)",
+      "(?i)/wp-content/plugins/wp-rocket/"
+    ],
+    "html": [
+      "(?i)/wp-content/plugins/wp-rocket/\\;confidence:60"
+    ],
+    "implies": [
+      "wordpress"
+    ]
+  },
+  {
+    "name": "Wordfence",
+    "product": "wordfence",
+    "categories": [
+      "wordpress-plugin"
+    ],
+    "confidence": 85,
+    "requires": [
+      "wordpress"
+    ],
+    "scripts": [
+      "(?i)/wp-content/plugins/wordfence/[^\\\"']*\\?[^\\\"']*ver=([0-9]+\\.[0-9][0-9A-Za-z.]*)",
+      "(?i)/wp-content/plugins/wordfence/"
+    ],
+    "html": [
+      "(?i)/wp-content/plugins/wordfence/\\;confidence:60"
+    ],
+    "implies": [
+      "wordpress"
+    ],
+    "cpe": "cpe:2.3:a:wordfence:wordfence"
+  },
+  {
+    "name": "WPForms",
+    "product": "wpforms",
+    "categories": [
+      "wordpress-plugin"
+    ],
+    "confidence": 85,
+    "requires": [
+      "wordpress"
+    ],
+    "scripts": [
+      "(?i)/wp-content/plugins/wpforms(?:-lite)?/[^\\\"']*\\?[^\\\"']*ver=([0-9]+\\.[0-9][0-9A-Za-z.]*)",
+      "(?i)/wp-content/plugins/wpforms(?:-lite)?/"
+    ],
+    "html": [
+      "(?i)/wp-content/plugins/wpforms(?:-lite)?/\\;confidence:60"
+    ],
+    "implies": [
+      "wordpress"
+    ]
+  },
+  {
+    "name": "All in One SEO",
+    "product": "all-in-one-seo",
+    "categories": [
+      "wordpress-plugin"
+    ],
+    "confidence": 85,
+    "requires": [
+      "wordpress"
+    ],
+    "scripts": [
+      "(?i)/wp-content/plugins/all-in-one-seo-pack/[^\\\"']*\\?[^\\\"']*ver=([0-9]+\\.[0-9][0-9A-Za-z.]*)",
+      "(?i)/wp-content/plugins/all-in-one-seo-pack/"
+    ],
+    "html": [
+      "(?i)/wp-content/plugins/all-in-one-seo-pack/\\;confidence:60"
+    ],
+    "implies": [
+      "wordpress"
+    ]
+  },
+  {
+    "name": "LiteSpeed Cache",
+    "product": "litespeed-cache",
+    "categories": [
+      "wordpress-plugin"
+    ],
+    "confidence": 85,
+    "requires": [
+      "wordpress"
+    ],
+    "scripts": [
+      "(?i)/wp-content/plugins/litespeed-cache/[^\\\"']*\\?[^\\\"']*ver=([0-9]+\\.[0-9][0-9A-Za-z.]*)",
+      "(?i)/wp-content/plugins/litespeed-cache/"
+    ],
+    "html": [
+      "(?i)/wp-content/plugins/litespeed-cache/\\;confidence:60"
+    ],
+    "implies": [
+      "wordpress"
+    ],
+    "cpe": "cpe:2.3:a:litespeedtech:litespeed_cache"
   }
 ]

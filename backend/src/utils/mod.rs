@@ -1,3 +1,4 @@
+pub mod cpe;
 pub mod crypto;
 pub mod network;
 pub mod validation;

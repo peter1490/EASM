@@ -580,7 +580,8 @@ fn wrap_base64_lines(b64: &str) -> String {
     out
 }
 
-fn extract_icon_link(html: &str) -> Option<String> {
+/// The `href` of the page's declared favicon `<link rel="…icon…">`, if any.
+pub fn extract_icon_link(html: &str) -> Option<String> {
     // Find any <link ... rel="...icon..." ... href="..."> in either attribute order.
     use regex::Regex;
     let re = Regex::new(

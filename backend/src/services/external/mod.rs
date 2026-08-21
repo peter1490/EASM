@@ -6,6 +6,7 @@ pub mod manager;
 pub mod nvd;
 pub mod rate_limited_client;
 pub mod shodan;
+pub mod threat_intel;
 pub mod virustotal;
 
 #[cfg(test)]
@@ -21,6 +22,7 @@ pub use rate_limited_client::RateLimitedClient;
 pub use shodan::{
     ShodanCertificateInfo, ShodanClient, ShodanExtractedAssets, ShodanHostInfo, ShodanResult,
 };
+pub use threat_intel::{EpssScore, KevEntry, ThreatContext, ThreatIntelClient};
 pub use virustotal::{VirusTotalClient, VirusTotalDomainReport, VirusTotalIpReport};
 
 // Type aliases for convenience

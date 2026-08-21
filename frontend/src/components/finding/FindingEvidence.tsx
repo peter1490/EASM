@@ -511,6 +511,157 @@ function SubdomainEnumeration({ data }: { data: Data }) {
   );
 }
 
+function KnownCve({ data }: { data: Data }) {
+  const cveId = asString(data.cve_id);
+  const cvss = asNumber(data.cvss_score);
+  const vector = asString(data.cvss_vector);
+  const service = asString(data.affected_service);
+  const cpe = asString(data.affected_cpe);
+  const detectedVersion = asString(data.detected_version);
+  const affected = asStrings(data.affected_version);
+  const references = asStrings(data.references);
+  const detectionMethod = asString(data.detection_method);
+  const detectionSource = asString(data.detection_source);
+  const evidence = asString(data.fingerprint_value);
+
+  const versionConfirmed = data.version_confirmed !== false;
+  const knownExploited = asBool(data.known_exploited);
+  const kevAdded = asString(data.kev_date_added);
+  const kevDue = asString(data.kev_due_date);
+  const ransomware = asBool(data.known_ransomware_campaign_use);
+  const epss = asNumber(data.epss_probability);
+  const epssPercentile = asNumber(data.epss_percentile);
+  const priority = asNumber(data.priority_score);
+
+  return (
+    <div className="space-y-2">
+      {/* Exploitation evidence first: it is what decides whether this gets
+          worked on today, and a CVSS score alone cannot say. */}
+      <div className="flex flex-wrap items-center gap-2">
+        {cveId && (
+          <ExternalLink href={`https://nvd.nist.gov/vuln/detail/${cveId}`}>
+            <Mono className="text-[12px]">{cveId}</Mono>
+          </ExternalLink>
+        )}
+        {priority != null && (
+          <Chip
+            tone={
+              priority >= 7.5
+                ? { text: "text-crit", wash: "bg-crit-wash" }
+                : priority >= 5
+                  ? { text: "text-high", wash: "bg-high-wash" }
+                  : { text: "text-ink-2", wash: "bg-nil-wash" }
+            }
+          >
+            Priority {priority.toFixed(1)}
+          </Chip>
+        )}
+        {knownExploited && (
+          <Chip tone={{ text: "text-crit", wash: "bg-crit-wash" }}>
+            <Icon name="alert" size={10} />
+            Exploited in the wild
+          </Chip>
+        )}
+        {ransomware && (
+          <Chip tone={{ text: "text-crit", wash: "bg-crit-wash" }}>Ransomware campaigns</Chip>
+        )}
+        {!versionConfirmed && (
+          <Chip tone={{ text: "text-med", wash: "bg-med-wash" }}>
+            <Icon name="alert" size={10} />
+            Unconfirmed
+          </Chip>
+        )}
+      </div>
+
+      {!versionConfirmed && (
+        <p className="text-[11.5px] leading-snug text-ink-3">
+          {service ?? "This product"} only publishes its major version, so the exact build is
+          unknown. This CVE affects some release in the{" "}
+          <span className="mono">{detectedVersion ?? "detected"}</span> series — check the running
+          build before treating it as exploitable.
+        </p>
+      )}
+
+      {cvss != null && (
+        <Row label="CVSS">
+          <span className="flex flex-wrap items-baseline gap-2">
+            <Mono>{cvss.toFixed(1)}</Mono>
+            {vector && <Mono className="text-[10.5px] text-ink-3 break-all">{vector}</Mono>}
+          </span>
+        </Row>
+      )}
+
+      {epss != null && (
+        <Row label="EPSS">
+          <span className="flex flex-wrap items-baseline gap-2">
+            <Mono>{(epss * 100).toFixed(epss < 0.01 ? 2 : 1)}%</Mono>
+            <span className="text-[11.5px] text-ink-3">
+              probability of exploitation in the next 30 days
+              {epssPercentile != null && ` · ${(epssPercentile * 100).toFixed(1)}th percentile`}
+            </span>
+          </span>
+        </Row>
+      )}
+
+      {kevAdded && (
+        <Row label="CISA KEV">
+          <span className="flex flex-wrap items-baseline gap-2">
+            <span>Added {kevAdded}</span>
+            {kevDue && <span className="text-[11.5px] text-ink-3">federal due date {kevDue}</span>}
+          </span>
+        </Row>
+      )}
+
+      {service && (
+        <Row label="Affected">
+          <span className="flex flex-wrap items-baseline gap-2">
+            <Mono>
+              {service}
+              {detectedVersion ? ` ${detectedVersion}` : ""}
+              {!versionConfirmed && detectedVersion ? ".x" : ""}
+            </Mono>
+            {affected.length > 0 && (
+              <span className="text-[11.5px] text-ink-3">vulnerable range: {affected.join(", ")}</span>
+            )}
+          </span>
+        </Row>
+      )}
+
+      {cpe && (
+        <Row label="CPE">
+          <Mono className="text-[10.5px] break-all">{cpe}</Mono>
+        </Row>
+      )}
+
+      {/* How we concluded the product is here at all — the reader needs this to
+          judge the claim, especially for a passive, unauthenticated scan. */}
+      {(detectionMethod || detectionSource || evidence) && (
+        <Row label="Detected via">
+          <span className="flex flex-wrap items-baseline gap-2">
+            {detectionSource && <Mono className="text-[11px]">{detectionSource}</Mono>}
+            {detectionMethod && (
+              <span className="text-[11.5px] text-ink-3">{detectionMethod.replace(/_/g, " ")}</span>
+            )}
+            {evidence && <Mono className="text-[10.5px] text-ink-3 break-all">{evidence}</Mono>}
+          </span>
+        </Row>
+      )}
+
+      {references.length > 0 && (
+        <Disclosure summary={`References (${references.length})`}>
+          <div className="flex flex-col gap-1">
+            {references.slice(0, 25).map((href) => (
+              <ExternalLink key={href} href={href}>
+                <Mono className="text-[10.5px] break-all">{href}</Mono>
+              </ExternalLink>
+            ))}
+          </div>
+        </Disclosure>
+      )}
+    </div>
+  );
+}
+
 function TechnologyDetected({ data }: { data: Data }) {
   const technologies = asObjects(data.technologies);
   const stack = asStrings(data.stack);
@@ -537,6 +688,8 @@ function TechnologyDetected({ data }: { data: Data }) {
             const categories = asStrings(tech.categories);
             const confidence = asNumber(tech.confidence);
             const source = asString(tech.source);
+            const sources = asStrings(tech.sources);
+            const inferred = source === "implied";
             const cpe = asString(tech.cpe);
             return (
               <div key={i} className="flex flex-wrap items-center gap-2">
@@ -548,7 +701,16 @@ function TechnologyDetected({ data }: { data: Data }) {
                   <span className="text-[11.5px] text-ink-3">{categories.join(" · ")}</span>
                 )}
                 {confidence != null && <span className="mono text-[11px] text-ink-3">{confidence}%</span>}
-                {source && <span className="mono text-[10.5px] text-ink-3">{source}</span>}
+                {sources.length > 0 ? (
+                  <span className="mono text-[10.5px] text-ink-3">{sources.join(" + ")}</span>
+                ) : (
+                  source && <span className="mono text-[10.5px] text-ink-3">{source}</span>
+                )}
+                {inferred && (
+                  <span className="text-[11px] text-ink-3" title="Deduced from another product, not observed directly">
+                    inferred
+                  </span>
+                )}
                 {cpe && <span className="mono text-[10.5px] text-ink-3 break-all">{cpe}</span>}
               </div>
             );
@@ -676,6 +838,8 @@ export function FindingEvidence({
       return <SubdomainEnumeration data={payload} />;
     case "technology_detected":
       return <TechnologyDetected data={payload} />;
+    case "known_cve":
+      return <KnownCve data={payload} />;
     default:
       return <Generic data={payload} />;
   }

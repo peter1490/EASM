@@ -18,7 +18,12 @@ export function Spinner({ size = 16, className }: { size?: number; className?: s
 
 export function LoadingBlock({ label = "Loading", className }: { label?: string; className?: string }) {
   return (
-    <div className={cn("flex flex-col items-center justify-center gap-3 py-14 text-ink-3", className)}>
+    // `data-page-loading` is the signal AppShell waits on before revealing a
+    // page after a company switch, so the switch never dips out to a spinner.
+    <div
+      data-page-loading=""
+      className={cn("flex flex-col items-center justify-center gap-3 py-14 text-ink-3", className)}
+    >
       <Spinner size={20} />
       <span className="text-[12.5px]">{label}</span>
     </div>

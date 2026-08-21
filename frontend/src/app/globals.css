@@ -196,14 +196,29 @@ tr:focus-within .row-actions,
   to { transform: translate(-50%, 0); opacity: 1; }
 }
 
+@keyframes company-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 .animate-drawer { animation: drawer-in 160ms cubic-bezier(0.16, 1, 0.3, 1); }
 .animate-scrim { animation: scrim-in 140ms ease-out; }
 .animate-pop { animation: pop-in 160ms cubic-bezier(0.16, 1, 0.3, 1); }
 
+/* Company switch: the page dips out, swaps while invisible, and comes back.
+   COMPANY_FADE_OUT_MS in AuthContext must match `.company-leaving`. */
+.animate-company-in { animation: company-in 220ms ease-out; }
+.company-leaving { opacity: 0; transition: opacity 140ms ease-in; }
+
 @media (prefers-reduced-motion: reduce) {
   .animate-drawer,
   .animate-scrim,
-  .animate-pop {
+  .animate-pop,
+  .animate-company-in {
     animation: none;
+  }
+
+  .company-leaving {
+    transition: none;
   }
 }

@@ -22,12 +22,17 @@ interface AuthContextType {
    * without a full browser reload.
    */
   companyEpoch: number;
+  /** True while a switch is mid-dip: the shell fades the routed page out. */
+  companySwitching: boolean;
   setCompanyId: (companyId: string) => void;
   refreshCompanies: () => Promise<void>;
   login: () => void; // Redirects to login page
   loginLocal: (email: string, password: string) => Promise<boolean>;
   logout: () => Promise<void>;
 }
+
+/** Must match the `.company-leaving` transition in globals.css. */
+const COMPANY_FADE_OUT_MS = 140;
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -37,7 +42,9 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [companies, setCompanies] = useState<CompanyWithRole[]>([]);
   const [companyId, setCompanyIdState] = useState<string | null>(null);
   const [companyEpoch, setCompanyEpoch] = useState(0);
+  const [companySwitching, setCompanySwitching] = useState(false);
   const appliedCompanyId = useRef<string | null>(null);
+  const switchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const router = useRouter();
   const apiBase = getApiBase();
 
@@ -158,8 +165,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
-  const setCompanyId = useCallback((nextCompanyId: string) => {
-    if (nextCompanyId === appliedCompanyId.current) return;
+  const commitCompanyId = useCallback((nextCompanyId: string) => {
     applyCompanyId(nextCompanyId);
 
     // Every record id in the URL belongs to the company we are leaving: a
@@ -173,12 +179,38 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     }
   }, [applyCompanyId, router]);
 
+  useEffect(() => () => {
+    if (switchTimer.current) clearTimeout(switchTimer.current);
+  }, []);
+
+  const setCompanyId = useCallback((nextCompanyId: string) => {
+    if (nextCompanyId === appliedCompanyId.current) return;
+    if (switchTimer.current) clearTimeout(switchTimer.current);
+
+    if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      commitCompanyId(nextCompanyId);
+      return;
+    }
+
+    // Fade the page out first, then swap the label and the content together at
+    // the trough. Committing at the bottom of the dip is what keeps the
+    // switcher from ever naming one company over another's numbers, and it
+    // hides the page's own loading state -- around 50ms -- inside the fade
+    // rather than letting it flash.
+    setCompanySwitching(true);
+    switchTimer.current = setTimeout(() => {
+      switchTimer.current = null;
+      setCompanySwitching(false);
+      commitCompanyId(nextCompanyId);
+    }, COMPANY_FADE_OUT_MS);
+  }, [commitCompanyId]);
+
   const refreshCompanies = useCallback(async () => {
     await loadCompanies();
   }, [loadCompanies]);
 
   return (
-    <AuthContext.Provider value={{ user, loading, companies, companyId, companyEpoch, setCompanyId, refreshCompanies, login, loginLocal, logout }}>
+    <AuthContext.Provider value={{ user, loading, companies, companyId, companyEpoch, companySwitching, setCompanyId, refreshCompanies, login, loginLocal, logout }}>
       {children}
     </AuthContext.Provider>
   );

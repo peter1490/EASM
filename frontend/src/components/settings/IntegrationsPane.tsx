@@ -38,10 +38,18 @@ const HELP_TEXT: Record<string, string> = {
   certspotter_api_token: "API token for CertSpotter certificate search.",
   virustotal_api_key: "API key for VirusTotal enrichment.",
   shodan_api_key: "API key for Shodan discovery.",
-  urlscan_api_key: "API key for URLScan (planned).",
-  otx_api_key: "API key for AlienVault OTX (planned).",
+  urlscan_api_key: "API key for urlscan.io. Optional — the source works without one at a lower rate limit.",
+  otx_api_key: "API key for AlienVault OTX. Optional — passive DNS is served anonymously.",
   clearbit_api_key: "API key for Clearbit enrichment (planned).",
   opencorporates_api_token: "API token for OpenCorporates (planned).",
+  securitytrails_api_key: "API key for SecurityTrails historical DNS.",
+  censys_api_key: "Censys Platform personal access token, for certificate search.",
+  censys_org_id: "Censys organization ID, sent alongside the token. Not a secret.",
+  chaos_api_key: "ProjectDiscovery Chaos API key.",
+  leakix_api_key: "LeakIX API key.",
+  fullhunt_api_key: "FullHunt API key.",
+  binaryedge_api_key: "BinaryEdge API key.",
+  netlas_api_key: "Netlas API key.",
   cors_allow_origins: "Allowed origins for browser requests (comma separated).",
   log_level: "Logging verbosity for backend/frontend.",
   log_format: "Log output format: json or plain.",
@@ -61,9 +69,9 @@ const HELP_TEXT: Record<string, string> = {
   max_cidr_hosts: "Maximum hosts allowed per CIDR scan.",
   max_discovery_depth: "Maximum recursion depth for discovery pivots.",
   subdomain_enum_timeout: "Timeout (seconds) for subdomain enumeration.",
-  enable_wayback: "Toggle Wayback Machine integration (planned).",
-  enable_urlscan: "Toggle URLScan integration (planned).",
-  enable_otx: "Toggle OTX integration (planned).",
+  enable_wayback: "Query the Wayback Machine's URL index. Finds decommissioned hosts nothing else remembers.",
+  enable_urlscan: "Query urlscan.io's scan index.",
+  enable_otx: "Query AlienVault OTX passive DNS.",
   enable_dns_record_expansion: "Expand related DNS records during discovery.",
   enable_web_crawl: "Enable web crawling for link extraction (planned).",
   enable_cloud_storage_discovery: "Discover cloud storage buckets (planned).",
@@ -74,6 +82,27 @@ const HELP_TEXT: Record<string, string> = {
   max_orgs_per_domain: "Max organizations pivoted from a domain.",
   max_domains_per_org: "Max domains pivoted from an organization.",
   skip_unresolved_domains: "Don't add or enqueue domains that fail DNS resolution.",
+  osint_source_concurrency: "How many OSINT sources are queried at once. Enumeration costs the slowest source, not the sum.",
+  osint_source_timeout_seconds: "Wall-clock budget per source. A slow aggregator is dropped rather than holding up the run.",
+  osint_max_results_per_source: "Cap on hostnames accepted from any single source.",
+  enable_dns_bruteforce:
+    "Resolve a wordlist of common labels against the zone. Finds names no passive corpus ever recorded.",
+  enable_dns_permutations:
+    "Mutate the names already found (api → api-dev, api2, dev.api) and resolve the results.",
+  enable_nsec_walk:
+    "Walk the NSEC chain of DNSSEC-signed zones. Free and complete where it works; NSEC3 zones are skipped.",
+  enable_srv_probe: "Query well-known _service._proto SRV labels and follow their targets.",
+  dns_bruteforce_wordlist_path: "Path to a wordlist replacing the built-in one. Falls back to built-in if unreadable.",
+  dns_bruteforce_max_words: "Labels taken from the wordlist, highest-yield first.",
+  dns_permutation_max_candidates: "Ceiling on generated permutations per zone.",
+  dns_permutation_max_seeds: "Known-good names used as permutation seeds.",
+  active_dns_concurrency: "Concurrent in-flight resolutions during active discovery.",
+  enable_asn_discovery: "Attribute resolved addresses to their origin AS and announced netblocks (Team Cymru, RIPEstat).",
+  enable_rdap_lookup: "Look up registry records for registrant organization and abuse contacts.",
+  enable_saas_tenant_discovery: "Read apex TXT verification tokens to inventory the SaaS vendors the domain onboarded.",
+  enable_cname_chain_analysis: "Follow CNAME chains and record every hop — the subdomain-takeover surface.",
+  asn_max_prefixes: "Announced prefixes recorded per ASN.",
+  reverse_dns_sweep_max_hosts: "Addresses reverse-resolved per netblock. 0 disables the sweep.",
   reindex_min_interval_seconds: "Minimum gap between full search reindexes, per company.",
 };
 
@@ -99,6 +128,14 @@ type SettingsFormState = {
   otx_api_key: string;
   clearbit_api_key: string;
   opencorporates_api_token: string;
+  securitytrails_api_key: string;
+  censys_api_key: string;
+  censys_org_id: string;
+  chaos_api_key: string;
+  leakix_api_key: string;
+  fullhunt_api_key: string;
+  binaryedge_api_key: string;
+  netlas_api_key: string;
   cors_allow_origins: string;
   log_level: string;
   log_format: string;
@@ -131,12 +168,33 @@ type SettingsFormState = {
   max_orgs_per_domain: string;
   max_domains_per_org: string;
   skip_unresolved_domains: boolean;
+  osint_source_concurrency: string;
+  osint_source_timeout_seconds: string;
+  osint_max_results_per_source: string;
+  enable_dns_bruteforce: boolean;
+  enable_dns_permutations: boolean;
+  enable_nsec_walk: boolean;
+  enable_srv_probe: boolean;
+  dns_bruteforce_wordlist_path: string;
+  dns_bruteforce_max_words: string;
+  dns_permutation_max_candidates: string;
+  dns_permutation_max_seeds: string;
+  active_dns_concurrency: string;
+  enable_asn_discovery: boolean;
+  enable_rdap_lookup: boolean;
+  enable_saas_tenant_discovery: boolean;
+  enable_cname_chain_analysis: boolean;
+  asn_max_prefixes: string;
+  reverse_dns_sweep_max_hosts: string;
   reindex_min_interval_seconds: string;
 };
 
 /**
- * The nine encrypted fields. A secret only ever reaches the PATCH body when the
- * user actually typed in it — see `secretTouched` below.
+ * The encrypted fields. A secret only ever reaches the PATCH body when the user
+ * actually typed in it — see `secretTouched` below.
+ *
+ * `censys_org_id` is deliberately absent: it pairs with the Censys token but is
+ * a plain identifier, useless on its own, so it is an ordinary text field.
  */
 type SecretKey =
   | "google_client_secret"
@@ -147,14 +205,28 @@ type SecretKey =
   | "urlscan_api_key"
   | "otx_api_key"
   | "clearbit_api_key"
-  | "opencorporates_api_token";
+  | "opencorporates_api_token"
+  | "securitytrails_api_key"
+  | "censys_api_key"
+  | "chaos_api_key"
+  | "leakix_api_key"
+  | "fullhunt_api_key"
+  | "binaryedge_api_key"
+  | "netlas_api_key";
 
 const PROVIDER_SECRETS: Array<{ key: SecretKey; label: string }> = [
   { key: "certspotter_api_token", label: "CertSpotter API token" },
   { key: "virustotal_api_key", label: "VirusTotal API key" },
   { key: "shodan_api_key", label: "Shodan API key" },
-  { key: "urlscan_api_key", label: "URLScan API key" },
-  { key: "otx_api_key", label: "OTX API key" },
+  { key: "securitytrails_api_key", label: "SecurityTrails API key" },
+  { key: "censys_api_key", label: "Censys access token" },
+  { key: "chaos_api_key", label: "Chaos API key" },
+  { key: "leakix_api_key", label: "LeakIX API key" },
+  { key: "fullhunt_api_key", label: "FullHunt API key" },
+  { key: "binaryedge_api_key", label: "BinaryEdge API key" },
+  { key: "netlas_api_key", label: "Netlas API key" },
+  { key: "urlscan_api_key", label: "urlscan.io API key (optional)" },
+  { key: "otx_api_key", label: "OTX API key (optional)" },
   { key: "clearbit_api_key", label: "Clearbit API key" },
   { key: "opencorporates_api_token", label: "OpenCorporates token" },
 ];
@@ -179,6 +251,14 @@ const settingsToForm = (view: SettingsView): SettingsFormState => ({
   otx_api_key: view.otx_api_key.value || "",
   clearbit_api_key: view.clearbit_api_key.value || "",
   opencorporates_api_token: view.opencorporates_api_token.value || "",
+  securitytrails_api_key: view.securitytrails_api_key.value || "",
+  censys_api_key: view.censys_api_key.value || "",
+  censys_org_id: view.censys_org_id || "",
+  chaos_api_key: view.chaos_api_key.value || "",
+  leakix_api_key: view.leakix_api_key.value || "",
+  fullhunt_api_key: view.fullhunt_api_key.value || "",
+  binaryedge_api_key: view.binaryedge_api_key.value || "",
+  netlas_api_key: view.netlas_api_key.value || "",
   cors_allow_origins: listToString(view.cors_allow_origins),
   log_level: view.log_level,
   log_format: view.log_format,
@@ -211,6 +291,24 @@ const settingsToForm = (view: SettingsView): SettingsFormState => ({
   max_orgs_per_domain: view.max_orgs_per_domain.toString(),
   max_domains_per_org: view.max_domains_per_org.toString(),
   skip_unresolved_domains: view.skip_unresolved_domains,
+  osint_source_concurrency: view.osint_source_concurrency.toString(),
+  osint_source_timeout_seconds: view.osint_source_timeout_seconds.toString(),
+  osint_max_results_per_source: view.osint_max_results_per_source.toString(),
+  enable_dns_bruteforce: view.enable_dns_bruteforce,
+  enable_dns_permutations: view.enable_dns_permutations,
+  enable_nsec_walk: view.enable_nsec_walk,
+  enable_srv_probe: view.enable_srv_probe,
+  dns_bruteforce_wordlist_path: view.dns_bruteforce_wordlist_path || "",
+  dns_bruteforce_max_words: view.dns_bruteforce_max_words.toString(),
+  dns_permutation_max_candidates: view.dns_permutation_max_candidates.toString(),
+  dns_permutation_max_seeds: view.dns_permutation_max_seeds.toString(),
+  active_dns_concurrency: view.active_dns_concurrency.toString(),
+  enable_asn_discovery: view.enable_asn_discovery,
+  enable_rdap_lookup: view.enable_rdap_lookup,
+  enable_saas_tenant_discovery: view.enable_saas_tenant_discovery,
+  enable_cname_chain_analysis: view.enable_cname_chain_analysis,
+  asn_max_prefixes: view.asn_max_prefixes.toString(),
+  reverse_dns_sweep_max_hosts: view.reverse_dns_sweep_max_hosts.toString(),
   reindex_min_interval_seconds: view.reindex_min_interval_seconds.toString(),
 });
 
@@ -439,6 +537,25 @@ export function IntegrationsPane() {
       max_orgs_per_domain: toNumber(current.max_orgs_per_domain),
       max_domains_per_org: toNumber(current.max_domains_per_org),
       skip_unresolved_domains: current.skip_unresolved_domains,
+      censys_org_id: current.censys_org_id || null,
+      osint_source_concurrency: toNumber(current.osint_source_concurrency),
+      osint_source_timeout_seconds: toNumber(current.osint_source_timeout_seconds),
+      osint_max_results_per_source: toNumber(current.osint_max_results_per_source),
+      enable_dns_bruteforce: current.enable_dns_bruteforce,
+      enable_dns_permutations: current.enable_dns_permutations,
+      enable_nsec_walk: current.enable_nsec_walk,
+      enable_srv_probe: current.enable_srv_probe,
+      dns_bruteforce_wordlist_path: current.dns_bruteforce_wordlist_path || null,
+      dns_bruteforce_max_words: toNumber(current.dns_bruteforce_max_words),
+      dns_permutation_max_candidates: toNumber(current.dns_permutation_max_candidates),
+      dns_permutation_max_seeds: toNumber(current.dns_permutation_max_seeds),
+      active_dns_concurrency: toNumber(current.active_dns_concurrency),
+      enable_asn_discovery: current.enable_asn_discovery,
+      enable_rdap_lookup: current.enable_rdap_lookup,
+      enable_saas_tenant_discovery: current.enable_saas_tenant_discovery,
+      enable_cname_chain_analysis: current.enable_cname_chain_analysis,
+      asn_max_prefixes: toNumber(current.asn_max_prefixes),
+      reverse_dns_sweep_max_hosts: toNumber(current.reverse_dns_sweep_max_hosts),
       reindex_min_interval_seconds: toNumber(current.reindex_min_interval_seconds),
     };
 
@@ -453,6 +570,14 @@ export function IntegrationsPane() {
     if (secretTouched.clearbit_api_key) payload.clearbit_api_key = current.clearbit_api_key || null;
     if (secretTouched.opencorporates_api_token)
       payload.opencorporates_api_token = current.opencorporates_api_token || null;
+    if (secretTouched.securitytrails_api_key)
+      payload.securitytrails_api_key = current.securitytrails_api_key || null;
+    if (secretTouched.censys_api_key) payload.censys_api_key = current.censys_api_key || null;
+    if (secretTouched.chaos_api_key) payload.chaos_api_key = current.chaos_api_key || null;
+    if (secretTouched.leakix_api_key) payload.leakix_api_key = current.leakix_api_key || null;
+    if (secretTouched.fullhunt_api_key) payload.fullhunt_api_key = current.fullhunt_api_key || null;
+    if (secretTouched.binaryedge_api_key) payload.binaryedge_api_key = current.binaryedge_api_key || null;
+    if (secretTouched.netlas_api_key) payload.netlas_api_key = current.netlas_api_key || null;
 
     return payload;
   }
@@ -612,6 +737,10 @@ export function IntegrationsPane() {
             </Note>
           )}
           <div className="grid gap-4 sm:grid-cols-2">{PROVIDER_SECRETS.map((s) => secret(s.key, s.label))}</div>
+          <div className="h-px bg-rule" />
+          <div className="grid gap-4 sm:grid-cols-2">
+            {text("censys_org_id", "Censys organization ID", { placeholder: "Sent with the Censys token" })}
+          </div>
         </div>
       </Card>
 
@@ -700,6 +829,98 @@ export function IntegrationsPane() {
               onChange={(v) => set(key, v as never)}
             />
           ))}
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader
+          title="Passive OSINT fan-out"
+          hint="Nineteen corpora, queried in parallel"
+        />
+        <div className="p-4 space-y-4">
+          <Note icon="search">
+            Sources are queried concurrently, so enumeration costs the slowest source rather than the sum of all of
+            them. Eight of them need no API key at all; the rest report <span className="mono">skipped</span> until you
+            add one.
+          </Note>
+          <div className="grid gap-4 sm:grid-cols-2">
+            {text("osint_source_concurrency", "Sources queried at once", { type: "number" })}
+            {text("osint_source_timeout_seconds", "Per-source timeout (s)", { type: "number" })}
+            {text("osint_max_results_per_source", "Max hostnames per source", { type: "number" })}
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader
+          title="Active DNS discovery"
+          hint="Names no passive corpus ever recorded"
+        />
+        <div className="p-4 space-y-4">
+          <Note icon="search">
+            Wildcard detection runs first and gates everything here: a catch-all zone answers every query, so without a
+            baseline a brute force would &ldquo;confirm&rdquo; the entire wordlist.
+          </Note>
+          <div className="grid gap-x-8 sm:grid-cols-2">
+            {(
+              [
+                ["enable_dns_bruteforce", "Wordlist brute force"],
+                ["enable_dns_permutations", "Permutations of known names"],
+                ["enable_nsec_walk", "DNSSEC NSEC zone walk"],
+                ["enable_srv_probe", "SRV service probing"],
+              ] as Array<[keyof SettingsFormState, string]>
+            ).map(([key, label]) => (
+              <ToggleRow
+                key={key}
+                label={label}
+                help={HELP_TEXT[key]}
+                checked={form[key] as boolean}
+                onChange={(v) => set(key, v as never)}
+              />
+            ))}
+          </div>
+          <div className="h-px bg-rule" />
+          <div className="grid gap-4 sm:grid-cols-2">
+            {text("dns_bruteforce_max_words", "Brute-force labels", { type: "number" })}
+            {text("dns_permutation_max_candidates", "Max permutations", { type: "number" })}
+            {text("dns_permutation_max_seeds", "Permutation seeds", { type: "number" })}
+            {text("active_dns_concurrency", "Active DNS concurrency", { type: "number" })}
+          </div>
+          {text("dns_bruteforce_wordlist_path", "Custom wordlist path", {
+            placeholder: "Leave empty to use the built-in list",
+          })}
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader
+          title="Infrastructure attribution"
+          hint="Address space, registries and tenancy"
+        />
+        <div className="p-4 space-y-4">
+          <div className="grid gap-x-8 sm:grid-cols-2">
+            {(
+              [
+                ["enable_asn_discovery", "ASN and netblock attribution"],
+                ["enable_rdap_lookup", "RDAP registry lookup"],
+                ["enable_saas_tenant_discovery", "SaaS tenancy from TXT tokens"],
+                ["enable_cname_chain_analysis", "CNAME chain analysis"],
+              ] as Array<[keyof SettingsFormState, string]>
+            ).map(([key, label]) => (
+              <ToggleRow
+                key={key}
+                label={label}
+                help={HELP_TEXT[key]}
+                checked={form[key] as boolean}
+                onChange={(v) => set(key, v as never)}
+              />
+            ))}
+          </div>
+          <div className="h-px bg-rule" />
+          <div className="grid gap-4 sm:grid-cols-2">
+            {text("asn_max_prefixes", "Prefixes recorded per ASN", { type: "number" })}
+            {text("reverse_dns_sweep_max_hosts", "Reverse sweep hosts per netblock", { type: "number" })}
+          </div>
         </div>
       </Card>
 

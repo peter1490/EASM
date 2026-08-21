@@ -35,7 +35,15 @@ pub const TYPE_TXT: u16 = 16;
 pub const TYPE_AAAA: u16 = 28;
 pub const TYPE_SRV: u16 = 33;
 pub const TYPE_DS: u16 = 43;
+/// NSEC — the "next secure" record. In a signed zone that does not use NSEC3,
+/// a denial-of-existence answer names the *next* owner in canonical order,
+/// which is enough to walk the entire zone. See RFC 4034 §4.
+pub const TYPE_NSEC: u16 = 47;
 pub const TYPE_DNSKEY: u16 = 48;
+/// NSEC3 — the hashed variant. It denies existence without naming the next
+/// owner in the clear, so a zone using it cannot be walked without cracking
+/// the hashes offline.
+pub const TYPE_NSEC3: u16 = 50;
 pub const TYPE_TLSA: u16 = 52;
 pub const TYPE_CAA: u16 = 257;
 pub const TYPE_AXFR: u16 = 252;
@@ -267,6 +275,23 @@ fn render_rdata(msg: &[u8], rtype: u16, rdata_start: usize, rdlength: usize) -> 
                 flags, rdata[2], rdata[3], role
             )
         }
+        // The NSEC rdata is `next owner name` followed by a type bitmap. Only
+        // the next owner matters for zone walking, and it is the leading field.
+        TYPE_NSEC if rdlength >= 1 => read_name(msg, rdata_start)
+            .map(|(name, _)| name)
+            .unwrap_or_default(),
+        TYPE_NSEC3 if rdlength >= 5 => {
+            // Report enough to tell an opt-out zone from a fully signed one
+            // without attempting to crack anything.
+            let algorithm = rdata[0];
+            let flags = rdata[1];
+            let iterations = u16::from_be_bytes([rdata[2], rdata[3]]);
+            let opt_out = flags & 0x01 != 0;
+            format!(
+                "algorithm={} iterations={} opt_out={}",
+                algorithm, iterations, opt_out
+            )
+        }
         TYPE_DS if rdlength >= 4 => {
             let key_tag = u16::from_be_bytes([rdata[0], rdata[1]]);
             format!(
@@ -288,18 +313,29 @@ fn push_edns0(msg: &mut Vec<u8>, dnssec_ok: bool) {
     msg.push(0); // EDNS version 0
     msg.extend_from_slice(&if dnssec_ok { 0x8000u16 } else { 0 }.to_be_bytes());
     msg.extend_from_slice(&0u16.to_be_bytes()); // no options
-    // ARCOUNT becomes 1.
+                                                // ARCOUNT becomes 1.
     msg[11] = 1;
 }
 
 /// Parse the answer section of a DNS response, ignoring authority and additional.
 fn parse_answers(msg: &[u8]) -> Option<(u8, Vec<ZoneRecord>)> {
+    parse_sections(msg).map(|(rcode, answers, _authority)| (rcode, answers))
+}
+
+/// Parse a DNS response into `(rcode, answer records, authority records)`.
+///
+/// The authority section is not decoration for zone walking: an NSEC proof of
+/// non-existence is returned *there*, never in the answer section, and a stub
+/// resolver hands back only answers. Reading it is the whole reason this
+/// module speaks the wire format directly.
+fn parse_sections(msg: &[u8]) -> Option<(u8, Vec<ZoneRecord>, Vec<ZoneRecord>)> {
     if msg.len() < 12 {
         return None;
     }
     let rcode = msg[3] & 0x0F;
     let qdcount = u16::from_be_bytes([msg[4], msg[5]]) as usize;
     let ancount = u16::from_be_bytes([msg[6], msg[7]]) as usize;
+    let nscount = u16::from_be_bytes([msg[8], msg[9]]) as usize;
 
     let mut pos = 12;
     for _ in 0..qdcount {
@@ -307,34 +343,43 @@ fn parse_answers(msg: &[u8]) -> Option<(u8, Vec<ZoneRecord>)> {
         pos = next + 4; // QTYPE + QCLASS
     }
 
-    let mut records = Vec::new();
-    for _ in 0..ancount {
-        if pos >= msg.len() {
-            break;
+    let mut answers = Vec::new();
+    let mut authority = Vec::new();
+    for section in 0..2 {
+        let count = if section == 0 { ancount } else { nscount };
+        for _ in 0..count {
+            if pos >= msg.len() {
+                break;
+            }
+            let Some((name, next)) = read_name(msg, pos) else {
+                break;
+            };
+            pos = next;
+            if pos + 10 > msg.len() {
+                break;
+            }
+            let rtype = u16::from_be_bytes([msg[pos], msg[pos + 1]]);
+            let ttl = u32::from_be_bytes([msg[pos + 4], msg[pos + 5], msg[pos + 6], msg[pos + 7]]);
+            let rdlength = u16::from_be_bytes([msg[pos + 8], msg[pos + 9]]) as usize;
+            pos += 10;
+            if pos + rdlength > msg.len() {
+                break;
+            }
+            let record = ZoneRecord {
+                name,
+                record_type: type_name(rtype),
+                ttl,
+                value: render_rdata(msg, rtype, pos, rdlength),
+            };
+            if section == 0 {
+                answers.push(record);
+            } else {
+                authority.push(record);
+            }
+            pos += rdlength;
         }
-        let Some((name, next)) = read_name(msg, pos) else {
-            break;
-        };
-        pos = next;
-        if pos + 10 > msg.len() {
-            break;
-        }
-        let rtype = u16::from_be_bytes([msg[pos], msg[pos + 1]]);
-        let ttl = u32::from_be_bytes([msg[pos + 4], msg[pos + 5], msg[pos + 6], msg[pos + 7]]);
-        let rdlength = u16::from_be_bytes([msg[pos + 8], msg[pos + 9]]) as usize;
-        pos += 10;
-        if pos + rdlength > msg.len() {
-            break;
-        }
-        records.push(ZoneRecord {
-            name,
-            record_type: type_name(rtype),
-            ttl,
-            value: render_rdata(msg, rtype, pos, rdlength),
-        });
-        pos += rdlength;
     }
-    Some((rcode, records))
+    Some((rcode, answers, authority))
 }
 
 fn rcode_name(rcode: u8) -> &'static str {
@@ -385,7 +430,7 @@ pub async fn query_over_udp(
     let id = query_id();
     let mut query = build_query(name, qtype, id);
     query[2] |= 0x01; // recursion desired
-    // DNSKEY and DS answers are large and DNSSEC-relevant; ask for them properly.
+                      // DNSKEY and DS answers are large and DNSSEC-relevant; ask for them properly.
     push_edns0(&mut query, true);
 
     let bind: SocketAddr = if nameserver.is_ipv4() {
@@ -449,6 +494,160 @@ pub async fn query_system(
             Ok((0, records)) => return Ok(records),
             Ok((3, _)) => return Ok(Vec::new()),
             Ok((rcode, _)) => last_error = format!("{} from {}", rcode_name(rcode), resolver),
+            Err(e) => last_error = e,
+        }
+    }
+    Err(last_error)
+}
+
+/// One DNS answer, including the authority section.
+#[derive(Debug, Clone)]
+pub struct DnsAnswer {
+    pub rcode: u8,
+    pub answers: Vec<ZoneRecord>,
+    /// Records from the authority section. NSEC / NSEC3 denial-of-existence
+    /// proofs live here, not in `answers`.
+    pub authority: Vec<ZoneRecord>,
+}
+
+impl DnsAnswer {
+    /// Every record of one type across both sections.
+    pub fn records_of_type(&self, record_type: &str) -> Vec<&ZoneRecord> {
+        self.answers
+            .iter()
+            .chain(self.authority.iter())
+            .filter(|record| record.record_type == record_type)
+            .collect()
+    }
+}
+
+/// Query one nameserver with the DNSSEC OK bit set and return both sections.
+///
+/// Unlike [`query_over_udp`] this keeps the authority section, because the
+/// records that make zone walking possible are only ever returned there.
+pub async fn query_with_authority(
+    name: &str,
+    qtype: u16,
+    nameserver: SocketAddr,
+    timeout: Duration,
+) -> Result<DnsAnswer, String> {
+    let id = query_id();
+    let mut query = build_query(name, qtype, id);
+    query[2] |= 0x01; // recursion desired
+    push_edns0(&mut query, true);
+
+    let bind: SocketAddr = if nameserver.is_ipv4() {
+        "0.0.0.0:0".parse().expect("valid bind address")
+    } else {
+        "[::]:0".parse().expect("valid bind address")
+    };
+    let socket = tokio::net::UdpSocket::bind(bind)
+        .await
+        .map_err(|e| e.to_string())?;
+    socket
+        .connect(nameserver)
+        .await
+        .map_err(|e| e.to_string())?;
+    socket.send(&query).await.map_err(|e| e.to_string())?;
+
+    let mut buffer = vec![0u8; UDP_BUFFER_SIZE as usize];
+    let len = tokio::time::timeout(timeout, socket.recv(&mut buffer))
+        .await
+        .map_err(|_| "query timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    buffer.truncate(len);
+
+    if buffer.len() < 12 || buffer[0..2] != query[0..2] {
+        return Err("DNS response did not match the query id".to_string());
+    }
+
+    // A signed denial routinely overflows 4096 bytes once RRSIGs are attached;
+    // taking the truncated body would drop exactly the NSEC we came for.
+    if buffer[2] & 0x02 != 0 {
+        let (rcode, answers, authority) =
+            query_sections_over_tcp(name, qtype, nameserver, timeout).await?;
+        return Ok(DnsAnswer {
+            rcode,
+            answers,
+            authority,
+        });
+    }
+
+    let (rcode, answers, authority) =
+        parse_sections(&buffer).ok_or_else(|| "malformed DNS response".to_string())?;
+    Ok(DnsAnswer {
+        rcode,
+        answers,
+        authority,
+    })
+}
+
+/// TCP variant of [`query_with_authority`], used when a UDP answer is truncated.
+async fn query_sections_over_tcp(
+    name: &str,
+    qtype: u16,
+    nameserver: SocketAddr,
+    timeout: Duration,
+) -> Result<(u8, Vec<ZoneRecord>, Vec<ZoneRecord>), String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let id = query_id();
+    let mut query = build_query(name, qtype, id);
+    query[2] |= 0x01;
+    push_edns0(&mut query, true);
+
+    let mut stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(nameserver))
+        .await
+        .map_err(|_| "connection timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+
+    let mut framed = Vec::with_capacity(query.len() + 2);
+    framed.extend_from_slice(&(query.len() as u16).to_be_bytes());
+    framed.extend_from_slice(&query);
+    tokio::time::timeout(timeout, stream.write_all(&framed))
+        .await
+        .map_err(|_| "write timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+
+    let mut length_bytes = [0u8; 2];
+    tokio::time::timeout(timeout, stream.read_exact(&mut length_bytes))
+        .await
+        .map_err(|_| "read timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    let length = u16::from_be_bytes(length_bytes) as usize;
+    if length == 0 || length > MAX_TRANSFER_BYTES {
+        return Err(format!("implausible DNS message length {}", length));
+    }
+
+    let mut buffer = vec![0u8; length];
+    tokio::time::timeout(timeout, stream.read_exact(&mut buffer))
+        .await
+        .map_err(|_| "read timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+
+    parse_sections(&buffer).ok_or_else(|| "malformed DNS response".to_string())
+}
+
+/// Ask the system resolvers for one name, keeping the authority section.
+///
+/// Tries each configured resolver in turn. NXDOMAIN is a *useful* answer here —
+/// it is the case that carries the NSEC proof — so it is returned rather than
+/// flattened into an empty result.
+pub async fn query_system_with_authority(
+    name: &str,
+    qtype: u16,
+    timeout: Duration,
+) -> Result<DnsAnswer, String> {
+    let resolvers = system_resolvers();
+    if resolvers.is_empty() {
+        return Err("no system resolver is configured".to_string());
+    }
+    let mut last_error = String::from("no resolver answered");
+    for resolver in resolvers {
+        match query_with_authority(name, qtype, SocketAddr::new(resolver, 53), timeout).await {
+            // NOERROR and NXDOMAIN are both definite answers about existence.
+            Ok(answer) if answer.rcode == 0 || answer.rcode == 3 => return Ok(answer),
+            Ok(answer) => last_error = format!("{} from {}", rcode_name(answer.rcode), resolver),
             Err(e) => last_error = e,
         }
     }
@@ -614,7 +813,11 @@ mod tests {
     #[test]
     fn query_is_well_formed() {
         let query = build_query("example.com", TYPE_AXFR, 0x1234);
-        assert_eq!(&query[0..2], &[0x12, 0x34], "id is echoed back by the server");
+        assert_eq!(
+            &query[0..2],
+            &[0x12, 0x34],
+            "id is echoed back by the server"
+        );
         assert_eq!(u16::from_be_bytes([query[4], query[5]]), 1, "one question");
         // 7"example" 3"com" 0
         assert_eq!(&query[12..13], &[7]);
@@ -732,17 +935,28 @@ mod tests {
         let mut query = build_query("example.com", TYPE_DNSKEY, 1);
         let before = query.len();
         push_edns0(&mut query, true);
-        assert_eq!(u16::from_be_bytes([query[10], query[11]]), 1, "ARCOUNT becomes 1");
+        assert_eq!(
+            u16::from_be_bytes([query[10], query[11]]),
+            1,
+            "ARCOUNT becomes 1"
+        );
         let opt = &query[before..];
         assert_eq!(opt[0], 0, "OPT owner name is the root");
         assert_eq!(u16::from_be_bytes([opt[1], opt[2]]), 41, "TYPE = OPT");
         assert_eq!(u16::from_be_bytes([opt[3], opt[4]]), UDP_BUFFER_SIZE);
-        assert_eq!(u16::from_be_bytes([opt[7], opt[8]]) & 0x8000, 0x8000, "DO bit set");
+        assert_eq!(
+            u16::from_be_bytes([opt[7], opt[8]]) & 0x8000,
+            0x8000,
+            "DO bit set"
+        );
 
         let mut plain = build_query("example.com", TYPE_A, 1);
         let before = plain.len();
         push_edns0(&mut plain, false);
-        assert_eq!(u16::from_be_bytes([plain[before + 7], plain[before + 8]]) & 0x8000, 0);
+        assert_eq!(
+            u16::from_be_bytes([plain[before + 7], plain[before + 8]]) & 0x8000,
+            0
+        );
     }
 
     #[test]
@@ -775,7 +989,11 @@ mod tests {
         assert!(records[0].value.contains("KSK"), "{}", records[0].value);
         assert!(records[0].value.contains("algorithm=13"));
         assert_eq!(records[1].record_type, "DS");
-        assert!(records[1].value.contains("keytag=4660"), "{}", records[1].value);
+        assert!(
+            records[1].value.contains("keytag=4660"),
+            "{}",
+            records[1].value
+        );
     }
 
     #[test]
@@ -808,5 +1026,106 @@ mod tests {
         let (_, records) = parse_answers(&msg).unwrap();
         assert_eq!(records[0].value, "10 mail.example.com");
         assert_eq!(records[1].value, "v=spf1 -all");
+    }
+
+    /// Build a response with `answers` in the answer section and `authority` in
+    /// the authority section, so the two can be told apart.
+    fn message_with_sections(
+        answers: &[(&str, u16, Vec<u8>)],
+        authority: &[(&str, u16, Vec<u8>)],
+    ) -> Vec<u8> {
+        let mut msg = vec![0x00, 0x01, 0x84, 0x03]; // NXDOMAIN, authoritative
+        msg.extend_from_slice(&0u16.to_be_bytes()); // QDCOUNT
+        msg.extend_from_slice(&(answers.len() as u16).to_be_bytes());
+        msg.extend_from_slice(&(authority.len() as u16).to_be_bytes());
+        msg.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
+
+        for section in [answers, authority] {
+            for (name, rtype, rdata) in section {
+                encode_name(name, &mut msg);
+                msg.extend_from_slice(&rtype.to_be_bytes());
+                msg.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
+                msg.extend_from_slice(&300u32.to_be_bytes());
+                msg.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+                msg.extend_from_slice(rdata);
+            }
+        }
+        msg
+    }
+
+    #[test]
+    fn nsec_records_are_read_from_the_authority_section() {
+        // The proof of non-existence never appears in the answer section, which
+        // is exactly why a stub resolver cannot walk a zone.
+        let mut nsec_rdata = Vec::new();
+        encode_name("beta.example.com", &mut nsec_rdata);
+        nsec_rdata.extend_from_slice(&[0x00, 0x07, 0x62, 0x01, 0x80, 0x08, 0x00, 0x03, 0x80]);
+
+        let msg = message_with_sections(&[], &[("alpha.example.com", TYPE_NSEC, nsec_rdata)]);
+        let (rcode, answers, authority) = parse_sections(&msg).unwrap();
+
+        assert_eq!(rcode, 3, "NXDOMAIN is the answer that carries the proof");
+        assert!(answers.is_empty());
+        assert_eq!(authority.len(), 1);
+        assert_eq!(authority[0].record_type, "NSEC");
+        // Only the next owner name matters for the walk; the type bitmap is not.
+        assert_eq!(authority[0].value, "beta.example.com");
+    }
+
+    #[test]
+    fn nsec3_is_reported_with_its_parameters_rather_than_a_next_name() {
+        // algorithm=1 (SHA-1), flags=1 (opt-out), iterations=10, salt len 0.
+        let nsec3_rdata = vec![0x01, 0x01, 0x00, 0x0a, 0x00];
+        let msg = message_with_sections(&[], &[("hashed.example.com", TYPE_NSEC3, nsec3_rdata)]);
+        let (_, _, authority) = parse_sections(&msg).unwrap();
+
+        assert_eq!(authority[0].record_type, "NSEC3");
+        assert_eq!(authority[0].value, "algorithm=1 iterations=10 opt_out=true");
+    }
+
+    #[test]
+    fn dns_answer_searches_both_sections_for_a_type() {
+        let mut nsec_rdata = Vec::new();
+        encode_name("next.example.com", &mut nsec_rdata);
+        nsec_rdata.push(0x00);
+
+        let msg = message_with_sections(
+            &[("example.com", TYPE_A, vec![192, 0, 2, 1])],
+            &[("example.com", TYPE_NSEC, nsec_rdata)],
+        );
+        let (rcode, answers, authority) = parse_sections(&msg).unwrap();
+        let answer = DnsAnswer {
+            rcode,
+            answers,
+            authority,
+        };
+
+        assert_eq!(answer.records_of_type("A").len(), 1);
+        assert_eq!(answer.records_of_type("NSEC").len(), 1);
+        assert!(answer.records_of_type("AAAA").is_empty());
+    }
+
+    #[test]
+    fn parse_answers_still_ignores_the_authority_section() {
+        // The existing callers rely on this: an NS record in the authority
+        // section of a delegation must not be mistaken for an answer.
+        let mut ns_rdata = Vec::new();
+        encode_name("ns1.example.com", &mut ns_rdata);
+
+        let msg = message_with_sections(&[], &[("example.com", TYPE_NS, ns_rdata)]);
+        let (_, records) = parse_answers(&msg).unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn a_truncated_message_does_not_panic() {
+        let mut nsec_rdata = Vec::new();
+        encode_name("next.example.com", &mut nsec_rdata);
+        let msg = message_with_sections(&[], &[("example.com", TYPE_NSEC, nsec_rdata)]);
+
+        // Cut the message short at every offset; none may panic.
+        for cut in 0..msg.len() {
+            let _ = parse_sections(&msg[..cut]);
+        }
     }
 }

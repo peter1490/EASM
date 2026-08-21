@@ -7,12 +7,106 @@ All‑in‑one EASM security tool with a high-performance Rust backend and a Nex
 - **High Performance**: Rust backend for optimal performance and memory safety
 - **Async Architecture**: Fully asynchronous using Tokio runtime
 - **PostgreSQL Database**: Robust data persistence with SQLx
-- **External Integrations**: Support for Shodan, VirusTotal, CertSpotter, and more
-- **Asset Discovery**: Automated discovery with confidence scoring
+- **External Integrations**: 19 passive OSINT corpora, eight of which need no API key
+- **Asset Discovery**: Passive fan-out, active DNS and infrastructure attribution,
+  with evidence-weighted confidence scoring — see below
 - **Deep Protocol Scanning**: SSL/TLS, DNS and HTTP assessments at the depth of the
   dedicated tools — see below
 - **Evidence Management**: File upload and storage capabilities
 - **Modern UI**: Next.js frontend with real-time updates
+
+## Discovery
+
+Discovery answers one question — *what does this organisation actually expose?* —
+and every passive corpus has the same blind spot: it can only report a name
+something already recorded. A host that never got a certificate, was never
+crawled and was never resolved from a monitored resolver is invisible to all of
+them at once, and those are disproportionately the interesting ones.
+
+So discovery runs in three layers, each reaching what the one before it cannot.
+
+### 1. Passive fan-out — 19 corpora, queried in parallel
+
+Sources are queried **concurrently**, so enumeration costs the *slowest* source
+rather than the sum of all of them. A dead endpoint, an expired key or a rate
+limit yields a `failed` execution record and the union of everything else; a
+source with no credential yields `skipped`. Neither aborts the run.
+
+| Needs no API key | Needs an API key |
+| --- | --- |
+| crt.sh, AlienVault OTX, HackerTarget, RapidDNS, AnubisDB, urlscan.io, Wayback Machine, Columbus, Digitorus | Shodan, VirusTotal, CertSpotter, SecurityTrails, Censys, Chaos, LeakIX, FullHunt, BinaryEdge, Netlas |
+
+### 2. Active DNS — the names no corpus recorded
+
+**Wildcard detection runs first and gates everything else.** A zone with
+`*.example.com A 1.2.3.4` answers every query, so a naive brute force "finds"
+the entire wordlist. Random labels that cannot plausibly exist establish a
+per-zone baseline — at every level, because `*.dev.example.com` is common — and
+every candidate is checked against it. A zone that answers differently for each
+nonsense label is marked as rotating, and resolution alone proves nothing there.
+This is the discipline `puredns` and `shuffledns` apply, and skipping it is the
+single most common way an enumeration pipeline produces garbage.
+
+Then, in ascending order of cost:
+
+- **NSEC zone walking** — free and *complete*. A DNSSEC zone signed with NSEC
+  hands over its own contents: each denial-of-existence answer names the next
+  owner in canonical order (RFC 4034 §4), so following the chain enumerates the
+  whole zone with no guessing. Reading it requires the **authority** section of
+  an NXDOMAIN response, which a stub resolver discards — so `dns_wire` speaks
+  the wire format directly. NSEC3 zones are detected and reported as not
+  walkable rather than half-walked.
+- **SRV probing** — 61 well-known `_service._proto` labels whose targets name
+  mail, directory and telephony infrastructure nothing links to.
+- **Brute force** — a curated, hit-rate-ordered label list. Point
+  `DNS_BRUTEFORCE_WORDLIST_PATH` at a bigger list to replace it.
+- **Permutation** — mutates the names already known to exist (`api` →
+  `api-dev`, `dev-api`, `dev.api`, `api2`), the way `alterx` and `gotator` do.
+  It runs last because it needs known-good names to mutate, and numeric
+  successors preserve zero padding (`web01` → `web02`, never `web2`).
+
+### 3. Infrastructure attribution — from names to address space
+
+A name inventory is not an asset inventory. Hosts with no forward DNS record —
+jump boxes, management interfaces, appliances — live in address space the
+organisation owns, and are found by going the other way:
+
+- **ASN and netblock** via Team Cymru's IP-to-ASN service (over DNS, no key) for
+  the routing fact, and RIPEstat (over HTTP, no key) for every prefix that AS
+  announces. Addresses belonging to a cloud or CDN AS are recognised and *not*
+  expanded — sweeping Amazon's netblocks on the strength of one EC2 host is
+  worse than useless.
+- **Reverse-DNS sweep** of the covering prefix, bounded three ways: a per-prefix
+  host cap, once per prefix per run, and the resolver's own rate limit.
+- **RDAP** (RFC 9082/9083) for registrant organisation and abuse contacts —
+  structured JSON rather than scraped port-43 WHOIS text.
+- **SaaS tenancy** from apex TXT verification tokens. A vendor token is durable
+  proof the organisation completed an ownership challenge, which makes the apex
+  TXT set a better vendor inventory than most procurement systems hold — and the
+  tenancies imply predictable hostnames (`autodiscover.`, `support.`, `status.`)
+  worth resolving.
+- **CNAME chains**, recorded hop by hop: a chain still pointing at a
+  deprovisioned cloud tenant is the classic subdomain-takeover finding.
+- **Lateral pivots** — favicon hash, JARM, HTML analytics IDs, SPF/DMARC/MX.
+  These find *sibling* infrastructure rather than subdomains. JARM fingerprints
+  are read from Shodan's own records rather than computed locally: JARM is a
+  fuzzy hash of ten precisely-shaped ClientHellos, and a locally-computed value
+  differing in any detail would query `ssl.jarm:` with something the index has
+  never seen — a pivot that silently returns nothing instead of failing loudly.
+
+### Confidence: corroboration, not repetition
+
+Counting raw sources was defensible with four of them. With nineteen it is not:
+crt.sh, CertSpotter, Censys and Digitorus all read the same certificate
+transparency logs, so four hits there is **one fact observed four times**, not
+four independent facts. Scoring it as four would let a single CT entry reach
+maximum confidence.
+
+Every source is therefore assigned an *evidence class* — certificate
+transparency, passive DNS, internet scan, web archive, active DNS, active probe,
+registry, shared attribute. Confidence is the strongest single source's own
+weight, plus a bonus for each **additional independent class**. A fifth CT
+aggregator adds nothing; passive DNS agreeing with CT does.
 
 ## Scanning
 

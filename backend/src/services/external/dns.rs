@@ -7,7 +7,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
-use trust_dns_resolver::proto::rr::{Record, RecordType};
+use trust_dns_resolver::proto::rr::{RData, Record, RecordType};
 use trust_dns_resolver::TokioAsyncResolver;
 
 /// DNS resolution configuration
@@ -159,6 +159,148 @@ pub fn parse_dmarc(record: &str) -> DmarcReportDomains {
     out.forensic.sort();
     out.forensic.dedup();
     out
+}
+
+/// A SaaS tenancy proven by a DNS verification token.
+///
+/// To onboard a domain, most SaaS vendors make the customer publish a token in
+/// a TXT record at the apex. Those records never expire on their own, so the
+/// apex of a mature organisation is a near-complete inventory of the vendors it
+/// has ever onboarded — including the ones nobody remembers procuring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaasTenancy {
+    /// Vendor name, e.g. `Google Workspace`.
+    pub vendor: &'static str,
+    /// The token prefix that identified it.
+    pub token_prefix: &'static str,
+    /// The full record, kept as evidence.
+    pub record: String,
+    /// Hostname the record implies is worth adding to the inventory, when the
+    /// vendor's tenancy is reachable at a predictable name.
+    pub implied_hostname: Option<String>,
+}
+
+/// Verification-token prefixes and the vendor each identifies.
+///
+/// Prefix matching, not substring: a token is defined by how the record
+/// *starts*, and matching anywhere in the string would let an unrelated SPF
+/// record claim a vendor.
+static SAAS_VERIFICATION_TOKENS: &[(&str, &str)] = &[
+    (
+        "google-site-verification=",
+        "Google Workspace / Search Console",
+    ),
+    ("MS=", "Microsoft 365"),
+    ("ms-domain-verification=", "Microsoft"),
+    ("atlassian-domain-verification=", "Atlassian"),
+    ("atlassian-sending-domain-verification=", "Atlassian"),
+    ("adobe-idp-site-verification=", "Adobe"),
+    ("adobe-sign-verification=", "Adobe Sign"),
+    ("docusign=", "DocuSign"),
+    ("dropbox-domain-verification=", "Dropbox"),
+    ("facebook-domain-verification=", "Meta"),
+    ("slack-domain-verification=", "Slack"),
+    ("zoom-domain-verification=", "Zoom"),
+    ("zoom_verify_", "Zoom"),
+    ("stripe-verification=", "Stripe"),
+    ("shopify-verification=", "Shopify"),
+    ("apple-domain-verification=", "Apple Business"),
+    ("citrix-verification-code=", "Citrix"),
+    ("cisco-ci-domain-verification=", "Cisco"),
+    ("miro-verification=", "Miro"),
+    ("mongodb-site-verification=", "MongoDB Atlas"),
+    ("openai-domain-verification=", "OpenAI"),
+    ("asana-domain-verification=", "Asana"),
+    ("notion-domain-verification=", "Notion"),
+    ("canva-site-verification=", "Canva"),
+    ("box-domain-verification=", "Box"),
+    ("smartsheet-site-validation=", "Smartsheet"),
+    ("workplace-domain-verification=", "Workplace"),
+    ("logmein-verification-code=", "LogMeIn / GoTo"),
+    ("mailru-verification:", "Mail.ru"),
+    ("yandex-verification:", "Yandex"),
+    ("globalsign-domain-verification=", "GlobalSign"),
+    ("pardot", "Salesforce Pardot"),
+    ("sendinblue-code:", "Brevo"),
+    ("brevo-code:", "Brevo"),
+    ("mailgun-verification=", "Mailgun"),
+    ("postman-domain-verification=", "Postman"),
+    ("segment-site-verification=", "Segment"),
+    ("intercom-domain-verification=", "Intercom"),
+    ("zendesk_verification=", "Zendesk"),
+    ("freshdesk-verification=", "Freshworks"),
+    ("statuspage-domain-verification=", "Atlassian Statuspage"),
+    ("cloudhealth=", "VMware CloudHealth"),
+    ("wrike-verification=", "Wrike"),
+    ("webexdomainverification", "Cisco Webex"),
+    ("_globalsign-domain-verification=", "GlobalSign"),
+    ("have-i-been-pwned-verification=", "Have I Been Pwned"),
+    ("onetrust-domain-verification=", "OneTrust"),
+    ("knowbe4-site-verification=", "KnowBe4"),
+    ("dynatrace-site-verification=", "Dynatrace"),
+    ("detectify-verification=", "Detectify"),
+    ("loaderio=", "loader.io"),
+    ("status-page-domain-verification=", "Statuspage"),
+    ("h1-domain-verification=", "HackerOne"),
+    ("bugcrowd-verification=", "Bugcrowd"),
+];
+
+/// Hostnames a tenancy implies, keyed by vendor.
+///
+/// A Zendesk tenant is reachable at `support.<domain>` far more often than not,
+/// and `autodiscover.<domain>` is a Microsoft 365 constant. These are *implied*
+/// candidates, verified by resolution downstream like any other guess.
+static SAAS_IMPLIED_HOSTNAMES: &[(&str, &str)] = &[
+    ("Microsoft 365", "autodiscover"),
+    ("Zendesk", "support"),
+    ("Atlassian", "jira"),
+    ("Atlassian Statuspage", "status"),
+    ("Statuspage", "status"),
+    ("Freshworks", "support"),
+    ("Salesforce Pardot", "go"),
+    ("Shopify", "shop"),
+];
+
+/// Identify the SaaS tenancies proven by a set of apex TXT records.
+pub fn parse_saas_verifications(records: &[String], domain: &str) -> Vec<SaasTenancy> {
+    let mut found: Vec<SaasTenancy> = Vec::new();
+
+    for record in records {
+        let trimmed = record.trim().trim_matches('"');
+        let lowered = trimmed.to_lowercase();
+
+        // SPF and DMARC are handled by their own parsers and would otherwise
+        // match the loose prefixes below.
+        if lowered.starts_with("v=spf1") || lowered.starts_with("v=dmarc1") {
+            continue;
+        }
+
+        for (prefix, vendor) in SAAS_VERIFICATION_TOKENS {
+            if !lowered.starts_with(&prefix.to_lowercase()) {
+                continue;
+            }
+            // One record proves one tenancy; a vendor already seen is not
+            // re-reported just because it published two tokens.
+            if found.iter().any(|tenancy| tenancy.vendor == *vendor) {
+                break;
+            }
+
+            let implied_hostname = SAAS_IMPLIED_HOSTNAMES
+                .iter()
+                .find(|(implied_vendor, _)| implied_vendor == vendor)
+                .map(|(_, label)| format!("{}.{}", label, domain));
+
+            found.push(SaasTenancy {
+                vendor,
+                token_prefix: prefix,
+                record: trimmed.to_string(),
+                implied_hostname,
+            });
+            break;
+        }
+    }
+
+    found
 }
 
 /// Async DNS resolver with timeout handling and concurrency limits
@@ -552,6 +694,65 @@ impl DnsResolver {
     /// A security scan needs the rest — SOA, SRV, DNSKEY, DS, TLSA, HTTPS — and
     /// enumerating a helper per type would be a hundred lines of the same code,
     /// so this hands the caller the records and lets it match on what it asked for.
+    /// Identify SaaS tenancies from the apex TXT records.
+    ///
+    /// A verification token is proof the organisation once completed an
+    /// ownership challenge for that vendor — which makes the apex TXT set a
+    /// better vendor inventory than most procurement systems hold.
+    pub async fn lookup_saas_tenancies(&self, domain: &str) -> Result<Vec<SaasTenancy>, ApiError> {
+        let records = self.lookup_txt(domain).await?;
+        Ok(parse_saas_verifications(&records, domain))
+    }
+
+    /// Follow a hostname's CNAME chain.
+    ///
+    /// The chain is the takeover surface: a CNAME pointing at a deprovisioned
+    /// cloud tenant is the classic dangling-record finding, and the
+    /// intermediate targets frequently name infrastructure the organisation
+    /// owns but never published.
+    ///
+    /// The hop limit stops a deliberately looping chain from spinning.
+    pub async fn lookup_cname_chain(
+        &self,
+        hostname: &str,
+        max_hops: usize,
+    ) -> Result<Vec<String>, ApiError> {
+        let mut chain: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut current = hostname.trim_end_matches('.').to_lowercase();
+        seen.insert(current.clone());
+
+        for _ in 0..max_hops {
+            let records = match self.lookup_records(&current, RecordType::CNAME).await {
+                Ok(records) => records,
+                // No CNAME is the common case and ends the walk cleanly.
+                Err(_) => break,
+            };
+
+            let Some(target) = records
+                .iter()
+                .filter_map(|record| match record.data() {
+                    Some(RData::CNAME(name)) => {
+                        Some(name.to_utf8().trim_end_matches('.').to_lowercase())
+                    }
+                    _ => None,
+                })
+                .find(|target| !target.is_empty())
+            else {
+                break;
+            };
+
+            if !seen.insert(target.clone()) {
+                tracing::debug!("CNAME chain for {} loops at {}", hostname, target);
+                break;
+            }
+            chain.push(target.clone());
+            current = target;
+        }
+
+        Ok(chain)
+    }
+
     pub async fn lookup_records(
         &self,
         name: &str,
@@ -614,9 +815,7 @@ impl DnsResolver {
         name: &str,
         record_type: RecordType,
     ) -> Result<Vec<Record>, ApiError> {
-        use trust_dns_resolver::config::{
-            NameServerConfigGroup, ResolverConfig, ResolverOpts,
-        };
+        use trust_dns_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
 
         let group = NameServerConfigGroup::from_ips_clear(&[nameserver], 53, true);
         let config = ResolverConfig::from_parts(None, Vec::new(), group);
@@ -878,6 +1077,79 @@ mod tests {
         let parsed = parse_dmarc("v=spf1 -all");
         assert!(parsed.aggregate.is_empty());
         assert!(parsed.forensic.is_empty());
+    }
+
+    #[test]
+    fn saas_verification_tokens_identify_the_vendor() {
+        let records = vec![
+            "v=spf1 include:_spf.google.com ~all".to_string(),
+            "google-site-verification=AbCdEf123".to_string(),
+            "MS=ms12345678".to_string(),
+            "atlassian-domain-verification=xyz".to_string(),
+            "some unrelated free text".to_string(),
+        ];
+        let found = parse_saas_verifications(&records, "example.com");
+        let vendors: Vec<&str> = found.iter().map(|t| t.vendor).collect();
+
+        assert!(vendors.contains(&"Google Workspace / Search Console"));
+        assert!(vendors.contains(&"Microsoft 365"));
+        assert!(vendors.contains(&"Atlassian"));
+        assert_eq!(found.len(), 3, "free text and SPF must not match");
+    }
+
+    #[test]
+    fn spf_and_dmarc_records_are_not_mistaken_for_verification_tokens() {
+        let records = vec![
+            "v=spf1 -all".to_string(),
+            "v=DMARC1; p=reject; rua=mailto:d@example.com".to_string(),
+        ];
+        assert!(parse_saas_verifications(&records, "example.com").is_empty());
+    }
+
+    #[test]
+    fn a_token_matches_only_as_a_prefix() {
+        // A record that merely mentions a token elsewhere is not proof of tenancy.
+        let records = vec!["note: we removed the google-site-verification= record".to_string()];
+        assert!(parse_saas_verifications(&records, "example.com").is_empty());
+    }
+
+    #[test]
+    fn a_vendor_with_two_tokens_is_reported_once() {
+        let records = vec![
+            "google-site-verification=first".to_string(),
+            "google-site-verification=second".to_string(),
+        ];
+        assert_eq!(parse_saas_verifications(&records, "example.com").len(), 1);
+    }
+
+    #[test]
+    fn tenancies_imply_predictable_hostnames_only_where_they_exist() {
+        let found = parse_saas_verifications(
+            &[
+                "MS=ms1".to_string(),
+                "zendesk_verification=abc".to_string(),
+                "stripe-verification=xyz".to_string(),
+            ],
+            "example.com",
+        );
+
+        let implied: Vec<Option<String>> = found
+            .iter()
+            .map(|tenancy| tenancy.implied_hostname.clone())
+            .collect();
+
+        assert!(implied.contains(&Some("autodiscover.example.com".to_string())));
+        assert!(implied.contains(&Some("support.example.com".to_string())));
+        // Stripe has no predictable tenant hostname, so none is invented.
+        assert!(implied.contains(&None));
+    }
+
+    #[test]
+    fn quoted_txt_records_are_unwrapped_before_matching() {
+        let records = vec!["\"google-site-verification=quoted\"".to_string()];
+        let found = parse_saas_verifications(&records, "example.com");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].record, "google-site-verification=quoted");
     }
 
     #[tokio::test]

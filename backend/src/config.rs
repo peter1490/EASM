@@ -195,6 +195,17 @@ pub struct Settings {
     pub otx_api_key: Option<String>,
     pub clearbit_api_key: Option<String>,
     pub opencorporates_api_token: Option<String>,
+    // Additional passive OSINT corpora. All optional: a source without its key
+    // is skipped, never failed, so discovery still runs on the eight key-free
+    // sources alone.
+    pub securitytrails_api_key: Option<String>,
+    pub censys_api_key: Option<String>,
+    pub censys_org_id: Option<String>,
+    pub chaos_api_key: Option<String>,
+    pub leakix_api_key: Option<String>,
+    pub fullhunt_api_key: Option<String>,
+    pub binaryedge_api_key: Option<String>,
+    pub netlas_api_key: Option<String>,
 
     // Security
     #[serde(deserialize_with = "deserialize_comma_separated")]
@@ -279,8 +290,36 @@ pub struct Settings {
     // domains that share infrastructure or mail relays with the seed. They can
     // match unrelated SaaS tenants — keep these bounded.
     pub shodan_lateral_pivots_enabled: bool, // Master switch for Shodan-backed lateral pivots
-    pub lateral_pivot_max_results: u32, // Max hosts a single Shodan pivot may yield
+    pub lateral_pivot_max_results: u32,      // Max hosts a single Shodan pivot may yield
     pub lateral_pivot_max_html_needles: u32, // Max unique HTML fingerprints to pivot per host
+
+    // Passive OSINT fan-out
+    // Sources are queried concurrently, so enumeration costs the slowest source
+    // rather than the sum of all of them.
+    pub osint_source_concurrency: u32, // Sources queried at once
+    pub osint_source_timeout_seconds: f64, // Wall-clock budget per source
+    pub osint_max_results_per_source: u32, // Cap on hostnames taken from one source
+
+    // Active DNS discovery
+    // Reaches names no passive corpus recorded. Every technique is gated behind
+    // wildcard detection, which runs unconditionally when any of them is on.
+    pub enable_dns_bruteforce: bool,
+    pub enable_dns_permutations: bool,
+    pub enable_nsec_walk: bool,
+    pub enable_srv_probe: bool,
+    pub dns_bruteforce_wordlist_path: Option<String>, // Overrides the built-in list
+    pub dns_bruteforce_max_words: u32,
+    pub dns_permutation_max_candidates: u32,
+    pub dns_permutation_max_seeds: u32,
+    pub active_dns_concurrency: u32,
+
+    // Infrastructure attribution
+    pub enable_asn_discovery: bool, // Team Cymru + RIPEstat netblock attribution
+    pub enable_rdap_lookup: bool,   // Registry organisation / contact pivot
+    pub enable_saas_tenant_discovery: bool, // TXT verification tokens
+    pub enable_cname_chain_analysis: bool,
+    pub asn_max_prefixes: u32, // Announced prefixes recorded per ASN
+    pub reverse_dns_sweep_max_hosts: u32, // Addresses swept per netblock (0 disables)
 
     // Rate Limiting
     pub rate_limit_enabled: bool,
@@ -348,6 +387,14 @@ impl Settings {
             .set_default("otx_api_key", None::<String>)?
             .set_default("clearbit_api_key", None::<String>)?
             .set_default("opencorporates_api_token", None::<String>)?
+            .set_default("securitytrails_api_key", None::<String>)?
+            .set_default("censys_api_key", None::<String>)?
+            .set_default("censys_org_id", None::<String>)?
+            .set_default("chaos_api_key", None::<String>)?
+            .set_default("leakix_api_key", None::<String>)?
+            .set_default("fullhunt_api_key", None::<String>)?
+            .set_default("binaryedge_api_key", None::<String>)?
+            .set_default("netlas_api_key", None::<String>)?
 
             // Security defaults
             .set_default("cors_allow_origins", "http://localhost:80,http://127.0.0.1:80")?
@@ -400,8 +447,11 @@ impl Settings {
             .set_default("max_discovery_depth", 3u32)?
             .set_default("subdomain_enum_timeout", 60.0)?
             .set_default("enable_wayback", true)?
-            .set_default("enable_urlscan", false)?
-            .set_default("enable_otx", false)?
+            // urlscan.io and AlienVault OTX default off historically only
+            // because they were unimplemented. Both are now real, key-free
+            // corpora, so both default on.
+            .set_default("enable_urlscan", true)?
+            .set_default("enable_otx", true)?
             .set_default("enable_dns_record_expansion", true)?
             .set_default("enable_web_crawl", true)?
             .set_default("enable_cloud_storage_discovery", true)?
@@ -420,6 +470,24 @@ impl Settings {
             .set_default("shodan_lateral_pivots_enabled", true)?
             .set_default("lateral_pivot_max_results", 200u32)?
             .set_default("lateral_pivot_max_html_needles", 3u32)?
+            .set_default("osint_source_concurrency", 12u32)?
+            .set_default("osint_source_timeout_seconds", 25.0)?
+            .set_default("osint_max_results_per_source", 5000u32)?
+            .set_default("enable_dns_bruteforce", true)?
+            .set_default("enable_dns_permutations", true)?
+            .set_default("enable_nsec_walk", true)?
+            .set_default("enable_srv_probe", true)?
+            .set_default("dns_bruteforce_wordlist_path", None::<String>)?
+            .set_default("dns_bruteforce_max_words", 2000u32)?
+            .set_default("dns_permutation_max_candidates", 5000u32)?
+            .set_default("dns_permutation_max_seeds", 50u32)?
+            .set_default("active_dns_concurrency", 50u32)?
+            .set_default("enable_asn_discovery", true)?
+            .set_default("enable_rdap_lookup", true)?
+            .set_default("enable_saas_tenant_discovery", true)?
+            .set_default("enable_cname_chain_analysis", true)?
+            .set_default("asn_max_prefixes", 64u32)?
+            .set_default("reverse_dns_sweep_max_hosts", 256u32)?
 
             // Rate Limiting defaults
             .set_default("rate_limit_enabled", true)?
@@ -495,6 +563,33 @@ impl Settings {
             }
             if let Some(v) = read_env("OPENCORPORATES_API_TOKEN") {
                 builder = builder.set_override("opencorporates_api_token", v)?;
+            }
+            if let Some(v) = read_env("SECURITYTRAILS_API_KEY") {
+                builder = builder.set_override("securitytrails_api_key", v)?;
+            }
+            if let Some(v) = read_env("CENSYS_API_KEY") {
+                builder = builder.set_override("censys_api_key", v)?;
+            }
+            if let Some(v) = read_env("CENSYS_ORG_ID") {
+                builder = builder.set_override("censys_org_id", v)?;
+            }
+            if let Some(v) = read_env("CHAOS_API_KEY") {
+                builder = builder.set_override("chaos_api_key", v)?;
+            }
+            if let Some(v) = read_env("LEAKIX_API_KEY") {
+                builder = builder.set_override("leakix_api_key", v)?;
+            }
+            if let Some(v) = read_env("FULLHUNT_API_KEY") {
+                builder = builder.set_override("fullhunt_api_key", v)?;
+            }
+            if let Some(v) = read_env("BINARYEDGE_API_KEY") {
+                builder = builder.set_override("binaryedge_api_key", v)?;
+            }
+            if let Some(v) = read_env("NETLAS_API_KEY") {
+                builder = builder.set_override("netlas_api_key", v)?;
+            }
+            if let Some(v) = read_env("DNS_BRUTEFORCE_WORDLIST_PATH") {
+                builder = builder.set_override("dns_bruteforce_wordlist_path", v)?;
             }
             if let Some(v) =
                 read_env("CORS_ALLOW_ORIGINS").or_else(|| std::env::var("CORS_ALLOW_ORIGINS").ok())
@@ -654,6 +749,48 @@ impl Settings {
                 builder = builder.set_override("reindex_min_interval_seconds", v)?;
             }
             if let Some(v) =
+                read_env("OSINT_SOURCE_CONCURRENCY").and_then(|s| s.parse::<u32>().ok())
+            {
+                builder = builder.set_override("osint_source_concurrency", v)?;
+            }
+            if let Some(v) =
+                read_env("OSINT_SOURCE_TIMEOUT_SECONDS").and_then(|s| s.parse::<f64>().ok())
+            {
+                builder = builder.set_override("osint_source_timeout_seconds", v)?;
+            }
+            if let Some(v) =
+                read_env("OSINT_MAX_RESULTS_PER_SOURCE").and_then(|s| s.parse::<u32>().ok())
+            {
+                builder = builder.set_override("osint_max_results_per_source", v)?;
+            }
+            if let Some(v) =
+                read_env("DNS_BRUTEFORCE_MAX_WORDS").and_then(|s| s.parse::<u32>().ok())
+            {
+                builder = builder.set_override("dns_bruteforce_max_words", v)?;
+            }
+            if let Some(v) =
+                read_env("DNS_PERMUTATION_MAX_CANDIDATES").and_then(|s| s.parse::<u32>().ok())
+            {
+                builder = builder.set_override("dns_permutation_max_candidates", v)?;
+            }
+            if let Some(v) =
+                read_env("DNS_PERMUTATION_MAX_SEEDS").and_then(|s| s.parse::<u32>().ok())
+            {
+                builder = builder.set_override("dns_permutation_max_seeds", v)?;
+            }
+            if let Some(v) = read_env("ACTIVE_DNS_CONCURRENCY").and_then(|s| s.parse::<u32>().ok())
+            {
+                builder = builder.set_override("active_dns_concurrency", v)?;
+            }
+            if let Some(v) = read_env("ASN_MAX_PREFIXES").and_then(|s| s.parse::<u32>().ok()) {
+                builder = builder.set_override("asn_max_prefixes", v)?;
+            }
+            if let Some(v) =
+                read_env("REVERSE_DNS_SWEEP_MAX_HOSTS").and_then(|s| s.parse::<u32>().ok())
+            {
+                builder = builder.set_override("reverse_dns_sweep_max_hosts", v)?;
+            }
+            if let Some(v) =
                 read_env("AUTH_SESSION_EXPIRY_SECONDS").and_then(|s| s.parse::<u64>().ok())
             {
                 builder = builder.set_override("auth_session_expiry_seconds", v)?;
@@ -686,6 +823,30 @@ impl Settings {
             }
             if let Some(v) = parse_bool_env("SKIP_UNRESOLVED_DOMAINS") {
                 builder = builder.set_override("skip_unresolved_domains", v)?;
+            }
+            if let Some(v) = parse_bool_env("ENABLE_DNS_BRUTEFORCE") {
+                builder = builder.set_override("enable_dns_bruteforce", v)?;
+            }
+            if let Some(v) = parse_bool_env("ENABLE_DNS_PERMUTATIONS") {
+                builder = builder.set_override("enable_dns_permutations", v)?;
+            }
+            if let Some(v) = parse_bool_env("ENABLE_NSEC_WALK") {
+                builder = builder.set_override("enable_nsec_walk", v)?;
+            }
+            if let Some(v) = parse_bool_env("ENABLE_SRV_PROBE") {
+                builder = builder.set_override("enable_srv_probe", v)?;
+            }
+            if let Some(v) = parse_bool_env("ENABLE_ASN_DISCOVERY") {
+                builder = builder.set_override("enable_asn_discovery", v)?;
+            }
+            if let Some(v) = parse_bool_env("ENABLE_RDAP_LOOKUP") {
+                builder = builder.set_override("enable_rdap_lookup", v)?;
+            }
+            if let Some(v) = parse_bool_env("ENABLE_SAAS_TENANT_DISCOVERY") {
+                builder = builder.set_override("enable_saas_tenant_discovery", v)?;
+            }
+            if let Some(v) = parse_bool_env("ENABLE_CNAME_CHAIN_ANALYSIS") {
+                builder = builder.set_override("enable_cname_chain_analysis", v)?;
             }
             if let Some(v) = parse_bool_env("RATE_LIMIT_ENABLED") {
                 builder = builder.set_override("rate_limit_enabled", v)?;
@@ -864,6 +1025,44 @@ impl Settings {
         if !(0.0..=1.0).contains(&self.related_asset_confidence_default) {
             return Err(ConfigError::Validation(
                 "related_asset_confidence_default must be between 0.0 and 1.0".to_string(),
+            ));
+        }
+
+        if self.osint_source_concurrency == 0 || self.osint_source_concurrency > 64 {
+            return Err(ConfigError::Validation(
+                "osint_source_concurrency must be between 1 and 64".to_string(),
+            ));
+        }
+
+        if self.osint_source_timeout_seconds <= 0.0 || self.osint_source_timeout_seconds > 300.0 {
+            return Err(ConfigError::Validation(
+                "osint_source_timeout_seconds must be between 0 and 300".to_string(),
+            ));
+        }
+
+        if self.osint_max_results_per_source == 0 {
+            return Err(ConfigError::Validation(
+                "osint_max_results_per_source must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.active_dns_concurrency == 0 || self.active_dns_concurrency > 1000 {
+            return Err(ConfigError::Validation(
+                "active_dns_concurrency must be between 1 and 1000".to_string(),
+            ));
+        }
+
+        // A brute force big enough to be a denial-of-service against the target's
+        // own resolvers is not discovery. The cap is generous but finite.
+        if self.dns_bruteforce_max_words > 1_000_000 {
+            return Err(ConfigError::Validation(
+                "dns_bruteforce_max_words must not exceed 1000000".to_string(),
+            ));
+        }
+
+        if self.dns_permutation_max_candidates > 250_000 {
+            return Err(ConfigError::Validation(
+                "dns_permutation_max_candidates must not exceed 250000".to_string(),
             ));
         }
 

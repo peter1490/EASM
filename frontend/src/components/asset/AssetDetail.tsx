@@ -603,7 +603,11 @@ export function AssetDetail({
           {asset.sources.length === 0 ? (
             <span className="text-[12.5px] text-ink-3">None recorded</span>
           ) : (
-            uniq(asset.sources).map((source) => <Chip key={source}>{source}</Chip>)
+            uniq(asset.sources).map((source) => (
+              <Chip key={source} wrap>
+                {source}
+              </Chip>
+            ))
           )}
         </div>
       </div>

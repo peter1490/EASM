@@ -79,6 +79,22 @@ pub struct ManagedSettings {
     pub clearbit_api_key: Option<String>,
     #[serde(default)]
     pub opencorporates_api_token: Option<String>,
+    #[serde(default)]
+    pub securitytrails_api_key: Option<String>,
+    #[serde(default)]
+    pub censys_api_key: Option<String>,
+    #[serde(default)]
+    pub censys_org_id: Option<String>,
+    #[serde(default)]
+    pub chaos_api_key: Option<String>,
+    #[serde(default)]
+    pub leakix_api_key: Option<String>,
+    #[serde(default)]
+    pub fullhunt_api_key: Option<String>,
+    #[serde(default)]
+    pub binaryedge_api_key: Option<String>,
+    #[serde(default)]
+    pub netlas_api_key: Option<String>,
 
     // CORS
     #[serde(default = "default_cors")]
@@ -133,9 +149,9 @@ pub struct ManagedSettings {
     // OSINT toggles
     #[serde(default = "default_true")]
     pub enable_wayback: bool,
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub enable_urlscan: bool,
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub enable_otx: bool,
     #[serde(default = "default_true")]
     pub enable_dns_record_expansion: bool,
@@ -160,6 +176,48 @@ pub struct ManagedSettings {
 
     #[serde(default = "default_false")]
     pub skip_unresolved_domains: bool,
+
+    // Passive OSINT fan-out
+    #[serde(default = "default_osint_source_concurrency")]
+    pub osint_source_concurrency: u32,
+    #[serde(default = "default_osint_source_timeout")]
+    pub osint_source_timeout_seconds: f64,
+    #[serde(default = "default_osint_max_results_per_source")]
+    pub osint_max_results_per_source: u32,
+
+    // Active DNS discovery
+    #[serde(default = "default_true")]
+    pub enable_dns_bruteforce: bool,
+    #[serde(default = "default_true")]
+    pub enable_dns_permutations: bool,
+    #[serde(default = "default_true")]
+    pub enable_nsec_walk: bool,
+    #[serde(default = "default_true")]
+    pub enable_srv_probe: bool,
+    #[serde(default)]
+    pub dns_bruteforce_wordlist_path: Option<String>,
+    #[serde(default = "default_dns_bruteforce_max_words")]
+    pub dns_bruteforce_max_words: u32,
+    #[serde(default = "default_dns_permutation_max_candidates")]
+    pub dns_permutation_max_candidates: u32,
+    #[serde(default = "default_dns_permutation_max_seeds")]
+    pub dns_permutation_max_seeds: u32,
+    #[serde(default = "default_active_dns_concurrency")]
+    pub active_dns_concurrency: u32,
+
+    // Infrastructure attribution
+    #[serde(default = "default_true")]
+    pub enable_asn_discovery: bool,
+    #[serde(default = "default_true")]
+    pub enable_rdap_lookup: bool,
+    #[serde(default = "default_true")]
+    pub enable_saas_tenant_discovery: bool,
+    #[serde(default = "default_true")]
+    pub enable_cname_chain_analysis: bool,
+    #[serde(default = "default_asn_max_prefixes")]
+    pub asn_max_prefixes: u32,
+    #[serde(default = "default_reverse_dns_sweep_max_hosts")]
+    pub reverse_dns_sweep_max_hosts: u32,
 
     // Search
     #[serde(default = "default_reindex_min_interval_seconds")]
@@ -250,6 +308,42 @@ const fn default_reindex_min_interval_seconds() -> u32 {
     300
 }
 
+const fn default_osint_source_concurrency() -> u32 {
+    12
+}
+
+fn default_osint_source_timeout() -> f64 {
+    25.0
+}
+
+const fn default_osint_max_results_per_source() -> u32 {
+    5000
+}
+
+const fn default_dns_bruteforce_max_words() -> u32 {
+    2000
+}
+
+const fn default_dns_permutation_max_candidates() -> u32 {
+    5000
+}
+
+const fn default_dns_permutation_max_seeds() -> u32 {
+    50
+}
+
+const fn default_active_dns_concurrency() -> u32 {
+    50
+}
+
+const fn default_asn_max_prefixes() -> u32 {
+    64
+}
+
+const fn default_reverse_dns_sweep_max_hosts() -> u32 {
+    256
+}
+
 impl Default for ManagedSettings {
     fn default() -> Self {
         Self {
@@ -272,6 +366,14 @@ impl Default for ManagedSettings {
             otx_api_key: None,
             clearbit_api_key: None,
             opencorporates_api_token: None,
+            securitytrails_api_key: None,
+            censys_api_key: None,
+            censys_org_id: None,
+            chaos_api_key: None,
+            leakix_api_key: None,
+            fullhunt_api_key: None,
+            binaryedge_api_key: None,
+            netlas_api_key: None,
 
             cors_allow_origins: default_cors(),
 
@@ -299,8 +401,8 @@ impl Default for ManagedSettings {
             subdomain_enum_timeout: default_subdomain_timeout(),
 
             enable_wayback: default_true(),
-            enable_urlscan: default_false(),
-            enable_otx: default_false(),
+            enable_urlscan: default_true(),
+            enable_otx: default_true(),
             enable_dns_record_expansion: default_true(),
             enable_web_crawl: default_true(),
             enable_cloud_storage_discovery: default_true(),
@@ -313,6 +415,27 @@ impl Default for ManagedSettings {
             max_domains_per_org: default_max_domains_per_org(),
 
             skip_unresolved_domains: default_false(),
+
+            osint_source_concurrency: default_osint_source_concurrency(),
+            osint_source_timeout_seconds: default_osint_source_timeout(),
+            osint_max_results_per_source: default_osint_max_results_per_source(),
+
+            enable_dns_bruteforce: default_true(),
+            enable_dns_permutations: default_true(),
+            enable_nsec_walk: default_true(),
+            enable_srv_probe: default_true(),
+            dns_bruteforce_wordlist_path: None,
+            dns_bruteforce_max_words: default_dns_bruteforce_max_words(),
+            dns_permutation_max_candidates: default_dns_permutation_max_candidates(),
+            dns_permutation_max_seeds: default_dns_permutation_max_seeds(),
+            active_dns_concurrency: default_active_dns_concurrency(),
+
+            enable_asn_discovery: default_true(),
+            enable_rdap_lookup: default_true(),
+            enable_saas_tenant_discovery: default_true(),
+            enable_cname_chain_analysis: default_true(),
+            asn_max_prefixes: default_asn_max_prefixes(),
+            reverse_dns_sweep_max_hosts: default_reverse_dns_sweep_max_hosts(),
 
             reindex_min_interval_seconds: default_reindex_min_interval_seconds(),
         }
@@ -339,6 +462,15 @@ impl ManagedSettings {
         clone.otx_api_key = normalize_opt(&clone.otx_api_key);
         clone.clearbit_api_key = normalize_opt(&clone.clearbit_api_key);
         clone.opencorporates_api_token = normalize_opt(&clone.opencorporates_api_token);
+        clone.securitytrails_api_key = normalize_opt(&clone.securitytrails_api_key);
+        clone.censys_api_key = normalize_opt(&clone.censys_api_key);
+        clone.censys_org_id = normalize_opt(&clone.censys_org_id);
+        clone.chaos_api_key = normalize_opt(&clone.chaos_api_key);
+        clone.leakix_api_key = normalize_opt(&clone.leakix_api_key);
+        clone.fullhunt_api_key = normalize_opt(&clone.fullhunt_api_key);
+        clone.binaryedge_api_key = normalize_opt(&clone.binaryedge_api_key);
+        clone.netlas_api_key = normalize_opt(&clone.netlas_api_key);
+        clone.dns_bruteforce_wordlist_path = normalize_opt(&clone.dns_bruteforce_wordlist_path);
         clone.google_allowed_domains = normalize_vec(&clone.google_allowed_domains);
         clone.cors_allow_origins = normalize_vec(&clone.cors_allow_origins);
         clone.evidence_allowed_types = normalize_vec(&clone.evidence_allowed_types);
@@ -369,6 +501,14 @@ impl ManagedSettings {
         settings.otx_api_key = normalized.otx_api_key;
         settings.clearbit_api_key = normalized.clearbit_api_key;
         settings.opencorporates_api_token = normalized.opencorporates_api_token;
+        settings.securitytrails_api_key = normalized.securitytrails_api_key;
+        settings.censys_api_key = normalized.censys_api_key;
+        settings.censys_org_id = normalized.censys_org_id;
+        settings.chaos_api_key = normalized.chaos_api_key;
+        settings.leakix_api_key = normalized.leakix_api_key;
+        settings.fullhunt_api_key = normalized.fullhunt_api_key;
+        settings.binaryedge_api_key = normalized.binaryedge_api_key;
+        settings.netlas_api_key = normalized.netlas_api_key;
 
         // CORS
         settings.cors_allow_origins = normalized.cors_allow_origins;
@@ -417,6 +557,30 @@ impl ManagedSettings {
 
         settings.skip_unresolved_domains = normalized.skip_unresolved_domains;
 
+        // Passive OSINT fan-out
+        settings.osint_source_concurrency = normalized.osint_source_concurrency;
+        settings.osint_source_timeout_seconds = normalized.osint_source_timeout_seconds;
+        settings.osint_max_results_per_source = normalized.osint_max_results_per_source;
+
+        // Active DNS discovery
+        settings.enable_dns_bruteforce = normalized.enable_dns_bruteforce;
+        settings.enable_dns_permutations = normalized.enable_dns_permutations;
+        settings.enable_nsec_walk = normalized.enable_nsec_walk;
+        settings.enable_srv_probe = normalized.enable_srv_probe;
+        settings.dns_bruteforce_wordlist_path = normalized.dns_bruteforce_wordlist_path;
+        settings.dns_bruteforce_max_words = normalized.dns_bruteforce_max_words;
+        settings.dns_permutation_max_candidates = normalized.dns_permutation_max_candidates;
+        settings.dns_permutation_max_seeds = normalized.dns_permutation_max_seeds;
+        settings.active_dns_concurrency = normalized.active_dns_concurrency;
+
+        // Infrastructure attribution
+        settings.enable_asn_discovery = normalized.enable_asn_discovery;
+        settings.enable_rdap_lookup = normalized.enable_rdap_lookup;
+        settings.enable_saas_tenant_discovery = normalized.enable_saas_tenant_discovery;
+        settings.enable_cname_chain_analysis = normalized.enable_cname_chain_analysis;
+        settings.asn_max_prefixes = normalized.asn_max_prefixes;
+        settings.reverse_dns_sweep_max_hosts = normalized.reverse_dns_sweep_max_hosts;
+
         settings.reindex_min_interval_seconds = normalized.reindex_min_interval_seconds;
     }
 }
@@ -443,6 +607,14 @@ impl From<&Settings> for ManagedSettings {
             otx_api_key: settings.otx_api_key.clone(),
             clearbit_api_key: settings.clearbit_api_key.clone(),
             opencorporates_api_token: settings.opencorporates_api_token.clone(),
+            securitytrails_api_key: settings.securitytrails_api_key.clone(),
+            censys_api_key: settings.censys_api_key.clone(),
+            censys_org_id: settings.censys_org_id.clone(),
+            chaos_api_key: settings.chaos_api_key.clone(),
+            leakix_api_key: settings.leakix_api_key.clone(),
+            fullhunt_api_key: settings.fullhunt_api_key.clone(),
+            binaryedge_api_key: settings.binaryedge_api_key.clone(),
+            netlas_api_key: settings.netlas_api_key.clone(),
 
             cors_allow_origins: settings.cors_allow_origins.clone(),
 
@@ -484,6 +656,27 @@ impl From<&Settings> for ManagedSettings {
             max_domains_per_org: settings.max_domains_per_org,
 
             skip_unresolved_domains: settings.skip_unresolved_domains,
+
+            osint_source_concurrency: settings.osint_source_concurrency,
+            osint_source_timeout_seconds: settings.osint_source_timeout_seconds,
+            osint_max_results_per_source: settings.osint_max_results_per_source,
+
+            enable_dns_bruteforce: settings.enable_dns_bruteforce,
+            enable_dns_permutations: settings.enable_dns_permutations,
+            enable_nsec_walk: settings.enable_nsec_walk,
+            enable_srv_probe: settings.enable_srv_probe,
+            dns_bruteforce_wordlist_path: settings.dns_bruteforce_wordlist_path.clone(),
+            dns_bruteforce_max_words: settings.dns_bruteforce_max_words,
+            dns_permutation_max_candidates: settings.dns_permutation_max_candidates,
+            dns_permutation_max_seeds: settings.dns_permutation_max_seeds,
+            active_dns_concurrency: settings.active_dns_concurrency,
+
+            enable_asn_discovery: settings.enable_asn_discovery,
+            enable_rdap_lookup: settings.enable_rdap_lookup,
+            enable_saas_tenant_discovery: settings.enable_saas_tenant_discovery,
+            enable_cname_chain_analysis: settings.enable_cname_chain_analysis,
+            asn_max_prefixes: settings.asn_max_prefixes,
+            reverse_dns_sweep_max_hosts: settings.reverse_dns_sweep_max_hosts,
 
             reindex_min_interval_seconds: settings.reindex_min_interval_seconds,
         }

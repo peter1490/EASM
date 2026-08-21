@@ -26,6 +26,23 @@ pub struct ShodanResult {
     pub isp: Option<String>,
     pub asn: Option<String>,
     pub domains: Option<Vec<String>>,
+    /// TLS banner, when the service speaks TLS. Carries the JARM fingerprint.
+    #[serde(default)]
+    pub ssl: Option<ShodanSsl>,
+}
+
+/// The TLS portion of a Shodan banner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShodanSsl {
+    /// JARM fingerprint as Shodan computed it.
+    ///
+    /// Reading Shodan's own value rather than computing one locally is
+    /// deliberate: JARM is a *fuzzy* hash of ten precisely-shaped ClientHellos,
+    /// and a locally-computed fingerprint that differs from Shodan's in any
+    /// detail would query `ssl.jarm:` with a value the index has never seen —
+    /// a pivot that silently returns nothing rather than failing loudly.
+    #[serde(default)]
+    pub jarm: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -633,11 +650,8 @@ impl ShodanClient {
         let mut extracted = self.extract_assets_from_results(&results);
         if max_results > 0 && extracted.domains.len() > max_results {
             // Defensive trim — should be unreachable given the count pre-check.
-            let trimmed: HashSet<String> = extracted
-                .domains
-                .into_iter()
-                .take(max_results)
-                .collect();
+            let trimmed: HashSet<String> =
+                extracted.domains.into_iter().take(max_results).collect();
             extracted.domains = trimmed;
         }
         Ok(extracted)
@@ -842,7 +856,10 @@ impl ShodanClient {
         // Structural backstop against runaway suffixing: a name past the DNS limits is
         // never a real host, so drop it rather than persist it and recurse into it.
         if composed.len() > MAX_HOSTNAME_LEN || composed.split('.').count() > MAX_HOSTNAME_LABELS {
-            tracing::debug!("Discarding over-long composed Shodan hostname: {}", composed);
+            tracing::debug!(
+                "Discarding over-long composed Shodan hostname: {}",
+                composed
+            );
             return None;
         }
 
@@ -955,6 +972,7 @@ mod tests {
             isp: None,
             asn: None,
             domains: None,
+            ssl: None,
         };
         assert_eq!(
             ShodanClient::stable_result_key(&result),
@@ -982,7 +1000,10 @@ mod tests {
 
         assert_eq!(
             composed,
-            vec!["audio.example.com".to_string(), "media.example.com".to_string()]
+            vec![
+                "audio.example.com".to_string(),
+                "media.example.com".to_string()
+            ]
         );
 
         // The queried hostname is irrelevant to composition: even three levels deep the
@@ -997,7 +1018,10 @@ mod tests {
     #[test]
     fn test_compose_dns_hostname_rejects_over_long_names() {
         let deep = vec!["a"; 130].join(".");
-        assert_eq!(ShodanClient::compose_dns_hostname("example.com", &deep), None);
+        assert_eq!(
+            ShodanClient::compose_dns_hostname("example.com", &deep),
+            None
+        );
 
         let long_label = "b".repeat(250);
         assert_eq!(

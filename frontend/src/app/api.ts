@@ -1332,6 +1332,14 @@ export type SettingsView = {
   otx_api_key: SecretField;
   clearbit_api_key: SecretField;
   opencorporates_api_token: SecretField;
+  securitytrails_api_key: SecretField;
+  censys_api_key: SecretField;
+  censys_org_id: string | null;
+  chaos_api_key: SecretField;
+  leakix_api_key: SecretField;
+  fullhunt_api_key: SecretField;
+  binaryedge_api_key: SecretField;
+  netlas_api_key: SecretField;
   cors_allow_origins: string[];
   log_level: string;
   log_format: string;
@@ -1365,6 +1373,30 @@ export type SettingsView = {
   max_domains_per_org: number;
   skip_unresolved_domains: boolean;
 
+  // Passive OSINT fan-out
+  osint_source_concurrency: number;
+  osint_source_timeout_seconds: number;
+  osint_max_results_per_source: number;
+
+  // Active DNS discovery
+  enable_dns_bruteforce: boolean;
+  enable_dns_permutations: boolean;
+  enable_nsec_walk: boolean;
+  enable_srv_probe: boolean;
+  dns_bruteforce_wordlist_path: string | null;
+  dns_bruteforce_max_words: number;
+  dns_permutation_max_candidates: number;
+  dns_permutation_max_seeds: number;
+  active_dns_concurrency: number;
+
+  // Infrastructure attribution
+  enable_asn_discovery: boolean;
+  enable_rdap_lookup: boolean;
+  enable_saas_tenant_discovery: boolean;
+  enable_cname_chain_analysis: boolean;
+  asn_max_prefixes: number;
+  reverse_dns_sweep_max_hosts: number;
+
   // Search
   reindex_min_interval_seconds: number;
 };
@@ -1393,6 +1425,14 @@ export type SettingsUpdatePayload = {
   otx_api_key?: string | null;
   clearbit_api_key?: string | null;
   opencorporates_api_token?: string | null;
+  securitytrails_api_key?: string | null;
+  censys_api_key?: string | null;
+  censys_org_id?: string | null;
+  chaos_api_key?: string | null;
+  leakix_api_key?: string | null;
+  fullhunt_api_key?: string | null;
+  binaryedge_api_key?: string | null;
+  netlas_api_key?: string | null;
   cors_allow_origins?: string[];
   log_level?: string;
   log_format?: string;
@@ -1425,6 +1465,28 @@ export type SettingsUpdatePayload = {
   max_orgs_per_domain?: number;
   max_domains_per_org?: number;
   skip_unresolved_domains?: boolean;
+
+  osint_source_concurrency?: number;
+  osint_source_timeout_seconds?: number;
+  osint_max_results_per_source?: number;
+
+  enable_dns_bruteforce?: boolean;
+  enable_dns_permutations?: boolean;
+  enable_nsec_walk?: boolean;
+  enable_srv_probe?: boolean;
+  dns_bruteforce_wordlist_path?: string | null;
+  dns_bruteforce_max_words?: number;
+  dns_permutation_max_candidates?: number;
+  dns_permutation_max_seeds?: number;
+  active_dns_concurrency?: number;
+
+  enable_asn_discovery?: boolean;
+  enable_rdap_lookup?: boolean;
+  enable_saas_tenant_discovery?: boolean;
+  enable_cname_chain_analysis?: boolean;
+  asn_max_prefixes?: number;
+  reverse_dns_sweep_max_hosts?: number;
+
   reindex_min_interval_seconds?: number;
 };
 

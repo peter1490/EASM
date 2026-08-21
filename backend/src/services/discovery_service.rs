@@ -34,7 +34,10 @@ use crate::{
     },
     services::{
         confidence::ConfidenceScorer,
-        external::{DnsResolver, ExternalServicesManager, HttpAnalyzer},
+        external::{
+            ActiveDnsConfig, ActiveDnsDiscovery, ActiveDnsResult, AsnClient, DnsResolver,
+            ExternalServicesManager, HttpAnalyzer,
+        },
         task_manager::{TaskContext, TaskManager, TaskType},
         RiskService, SecurityScanService,
     },
@@ -109,12 +112,49 @@ static KNOWN_CLOUD_PROVIDER_KEYWORDS: &[&str] = &[
     "imperva",
 ];
 
-/// Discovery source priority for canonical ordering and primary discovery method selection.
+/// Canonical source ordering, strongest evidence first.
+///
+/// Two things read this: the order sources are listed against an asset, and
+/// which one becomes the asset's `discovery_method`. So it is ranked by how
+/// much a source proves, not by how fast it answers — a name confirmed by live
+/// DNS outranks the same name seen in a web archive, whichever arrived first.
+///
+/// Sources absent from this list sort after it in the order they were recorded.
 static DISCOVERY_SOURCE_PRIORITY: &[SourceType] = &[
-    SourceType::Shodan,
-    SourceType::Virustotal,
+    // Observed live, by us.
+    SourceType::DnsResolution,
+    SourceType::NsecWalk,
+    SourceType::DnsBruteforce,
+    SourceType::SrvRecord,
+    SourceType::CnameChain,
+    SourceType::DnsPermutation,
+    // Certificate transparency.
     SourceType::Crtsh,
     SourceType::Certspotter,
+    SourceType::Censys,
+    SourceType::Digitorus,
+    SourceType::TlsCertificate,
+    // Passive DNS and scan corpora.
+    SourceType::Shodan,
+    SourceType::Virustotal,
+    SourceType::SecurityTrails,
+    SourceType::Chaos,
+    SourceType::BinaryEdge,
+    SourceType::Netlas,
+    SourceType::FullHunt,
+    SourceType::LeakIx,
+    SourceType::Otx,
+    SourceType::HackerTarget,
+    SourceType::RapidDns,
+    SourceType::AnubisDb,
+    SourceType::Columbus,
+    // Archives.
+    SourceType::UrlScan,
+    SourceType::Wayback,
+    // Infrastructure attribution.
+    SourceType::ReverseDns,
+    SourceType::AsnNetblock,
+    SourceType::TxtVerification,
 ];
 
 /// Discovery run status tracking (in-memory for real-time updates)
@@ -158,6 +198,9 @@ pub struct DiscoveryService {
     external_services: Arc<ExternalServicesManager>,
     dns_resolver: Arc<DnsResolver>,
     http_analyzer: Arc<HttpAnalyzer>,
+    /// ASN, netblock and RDAP attribution. `None` only if the HTTP client could
+    /// not be built at start-up; attribution is then skipped rather than fatal.
+    asn_client: Option<Arc<AsnClient>>,
 
     // Utilities
     task_manager: Arc<TaskManager>,
@@ -167,6 +210,11 @@ pub struct DiscoveryService {
     // State
     status: Arc<Mutex<HashMap<Uuid, DiscoveryStatus>>>,
     ip_cloud_provider_cache: Arc<Mutex<HashMap<String, bool>>>,
+    /// `(run_id, prefix)` pairs already reverse-swept.
+    ///
+    /// Every resolved address in a zone tends to sit in the same handful of
+    /// prefixes; without this the same /24 would be swept once per hostname.
+    swept_prefixes: Arc<Mutex<HashSet<(Uuid, String)>>>,
 }
 
 impl DiscoveryService {
@@ -196,6 +244,16 @@ impl DiscoveryService {
             security_scan_service: None,
             risk_service,
             external_services,
+            asn_client: AsnClient::new(
+                Arc::clone(&dns_resolver),
+                std::time::Duration::from_secs(15),
+            )
+            .map(Arc::new)
+            .map_err(|e| {
+                tracing::warn!("ASN attribution unavailable: {}", e);
+                e
+            })
+            .ok(),
             dns_resolver,
             http_analyzer,
             task_manager,
@@ -203,6 +261,7 @@ impl DiscoveryService {
             confidence_scorer: Arc::new(ConfidenceScorer::new()),
             status: Arc::new(Mutex::new(HashMap::new())),
             ip_cloud_provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            swept_prefixes: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -1096,7 +1155,11 @@ impl DiscoveryService {
 
         let domain_asset_id = domain_asset.0;
 
-        // Step 1: Subdomain enumeration from multiple sources
+        // Every hostname the passive stage confirmed, in discovery order. The
+        // active stage mutates these, so it has to run second.
+        let mut passive_hostnames: Vec<String> = Vec::new();
+
+        // Step 1: Passive enumeration — every configured OSINT corpus, in parallel
         match self
             .external_services
             .enumerate_subdomains(&canonical_domain)
@@ -1138,6 +1201,8 @@ impl DiscoveryService {
                         }
                     }
 
+                    passive_hostnames.push(subdomain.clone());
+
                     let source_types = subdomain_result
                         .hostname_sources
                         .get(subdomain)
@@ -1145,7 +1210,7 @@ impl DiscoveryService {
                         .unwrap_or_else(|| vec![SourceType::UserInput]);
                     let source_names: Vec<String> =
                         source_types.iter().map(|s| s.to_string()).collect();
-                    let confidence = self.calculate_subdomain_confidence(source_types.len());
+                    let confidence = Self::calculate_subdomain_confidence(&source_types);
 
                     let asset = self
                         .create_or_update_asset_with_sources(
@@ -1205,7 +1270,49 @@ impl DiscoveryService {
             }
         }
 
-        // Step 2: DNS resolution
+        // Step 2: Active DNS discovery — the names no corpus ever recorded.
+        //
+        // Wildcard detection runs inside this stage and gates everything that
+        // follows it; without it a catch-all zone would "confirm" the entire
+        // wordlist. Seeded with the passive results so permutation has real
+        // names to mutate.
+        if settings.enable_dns_bruteforce
+            || settings.enable_dns_permutations
+            || settings.enable_nsec_walk
+            || settings.enable_srv_probe
+        {
+            match self
+                .run_active_dns(
+                    run_id,
+                    company_id,
+                    &canonical_domain,
+                    domain_asset_id,
+                    seed_id,
+                    &passive_hostnames,
+                    depth,
+                    max_depth,
+                )
+                .await
+            {
+                Ok((active_result, active)) => {
+                    tracing::info!(
+                        "Active DNS for {}: {} brute-forced, {} permuted, {} from NSEC, {} SRV targets",
+                        canonical_domain,
+                        active.bruteforced.len(),
+                        active.permutations.len(),
+                        active.nsec_names.len(),
+                        active.srv_targets.len()
+                    );
+                    result.merge(active_result);
+                }
+                Err(e) => {
+                    tracing::warn!("Active DNS failed for {}: {}", canonical_domain, e);
+                    result.warnings.push(format!("Active DNS failed: {}", e));
+                }
+            }
+        }
+
+        // Step 3: DNS resolution
         match self.dns_resolver.resolve_hostname(&canonical_domain).await {
             Ok(ips) => {
                 for ip in ips {
@@ -1244,6 +1351,18 @@ impl DiscoveryService {
                     )
                     .await?;
 
+                    // Attribute the address to its origin AS and netblock. This
+                    // is what turns a name inventory into an address-space
+                    // inventory; cloud and CDN addresses are recognised and
+                    // skipped inside the helper.
+                    match self
+                        .attribute_ip_infrastructure(run_id, company_id, &ip_str, asset.0, seed_id)
+                        .await
+                    {
+                        Ok(attribution) => result.merge(attribution),
+                        Err(e) => tracing::debug!("ASN attribution failed for {}: {}", ip_str, e),
+                    }
+
                     // IP recursion is intentionally disabled: discovered IPs are persisted,
                     // but never enqueued for further recursive discovery.
                 }
@@ -1253,7 +1372,7 @@ impl DiscoveryService {
             }
         }
 
-        // Step 3: TLS Certificate analysis (for pivoting)
+        // Step 4: TLS Certificate analysis (for pivoting)
         match self
             .http_analyzer
             .get_tls_certificate_info(&canonical_domain, 443)
@@ -1385,18 +1504,716 @@ impl DiscoveryService {
             }
         }
 
-        // Step 4: Lateral OSINT pivots (favicon, HTML fingerprints, DNS metadata).
+        // Step 5: SaaS tenancy from apex TXT verification tokens.
+        if settings.enable_saas_tenant_discovery {
+            match self
+                .record_saas_tenancies(
+                    run_id,
+                    company_id,
+                    &canonical_domain,
+                    domain_asset_id,
+                    seed_id,
+                    depth,
+                    max_depth,
+                )
+                .await
+            {
+                Ok(saas_result) => result.merge(saas_result),
+                Err(e) => tracing::debug!(
+                    "SaaS tenancy discovery failed for {}: {}",
+                    canonical_domain,
+                    e
+                ),
+            }
+        }
+
+        // Step 6: CNAME chain — the takeover surface, and the infrastructure
+        // hostnames a CNAME points at along the way.
+        if settings.enable_cname_chain_analysis {
+            match self
+                .record_cname_chain(
+                    run_id,
+                    company_id,
+                    &canonical_domain,
+                    domain_asset_id,
+                    seed_id,
+                    depth,
+                    max_depth,
+                )
+                .await
+            {
+                Ok(cname_result) => result.merge(cname_result),
+                Err(e) => tracing::debug!(
+                    "CNAME chain analysis failed for {}: {}",
+                    canonical_domain,
+                    e
+                ),
+            }
+        }
+
+        // Step 7: Lateral OSINT pivots (favicon, HTML fingerprints, DNS metadata).
         // These surface apex domains that share infrastructure or mail relays with
         // the seed. By design they do NOT trigger further recursion — lateral hits
         // can be unrelated SaaS tenants and the analyst triages in the UI.
         if let Err(e) = self
-            .run_lateral_pivots(run_id, company_id, &canonical_domain, domain_asset_id, seed_id)
+            .run_lateral_pivots(
+                run_id,
+                company_id,
+                &canonical_domain,
+                domain_asset_id,
+                seed_id,
+            )
             .await
         {
             tracing::debug!("Lateral pivots failed for {}: {}", canonical_domain, e);
             result
                 .warnings
                 .push(format!("Lateral pivots failed: {}", e));
+        }
+
+        Ok(result)
+    }
+
+    /// Build the active-DNS configuration from the live settings.
+    fn active_dns_config(&self, settings: &Settings) -> ActiveDnsConfig {
+        ActiveDnsConfig {
+            bruteforce_enabled: settings.enable_dns_bruteforce,
+            permutations_enabled: settings.enable_dns_permutations,
+            nsec_walk_enabled: settings.enable_nsec_walk,
+            srv_probe_enabled: settings.enable_srv_probe,
+            concurrency: settings.active_dns_concurrency.max(1) as usize,
+            max_bruteforce_words: settings.dns_bruteforce_max_words as usize,
+            max_permutations: settings.dns_permutation_max_candidates as usize,
+            max_permutation_seeds: settings.dns_permutation_max_seeds as usize,
+            wordlist_path: settings.dns_bruteforce_wordlist_path.clone(),
+            query_timeout: self.dns_resolver.config().query_timeout,
+        }
+    }
+
+    /// Run the active DNS stage and persist everything it finds.
+    ///
+    /// Runs *after* passive enumeration, because permutation needs known-good
+    /// names to mutate and brute force should not re-resolve names a corpus
+    /// already handed us. Each technique gets its own `SourceType`, so the
+    /// asset graph records that a host was guessed rather than observed.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_active_dns(
+        &self,
+        run_id: Uuid,
+        company_id: Uuid,
+        canonical_domain: &str,
+        domain_asset_id: Uuid,
+        seed_id: Option<Uuid>,
+        known_hostnames: &[String],
+        depth: i32,
+        max_depth: i32,
+    ) -> Result<(DiscoveryResult, ActiveDnsResult), ApiError> {
+        let settings = self.current_settings();
+        let config = self.active_dns_config(&settings);
+
+        let discovery = ActiveDnsDiscovery::new(Arc::clone(&self.dns_resolver), config);
+        let active = discovery.discover(canonical_domain, known_hostnames).await;
+
+        let mut result = DiscoveryResult::default();
+        result.warnings.extend(active.warnings.iter().cloned());
+
+        // Each technique is persisted separately so the source recorded against
+        // an asset is the one that actually found it.
+        let batches: Vec<(SourceType, Vec<String>, serde_json::Value)> = vec![
+            (
+                SourceType::NsecWalk,
+                active.nsec_names.clone(),
+                json!({
+                    "technique": "dnssec_nsec_zone_walk",
+                    "zone": canonical_domain,
+                }),
+            ),
+            (
+                SourceType::DnsBruteforce,
+                active
+                    .bruteforced
+                    .iter()
+                    .map(|host| host.hostname.clone())
+                    .collect(),
+                json!({
+                    "technique": "dns_bruteforce",
+                    "zone": canonical_domain,
+                    "wildcard_filtered": !active.wildcard.wildcard_zones().is_empty(),
+                }),
+            ),
+            (
+                SourceType::DnsPermutation,
+                active
+                    .permutations
+                    .iter()
+                    .map(|host| host.hostname.clone())
+                    .collect(),
+                json!({
+                    "technique": "dns_permutation",
+                    "zone": canonical_domain,
+                    "wildcard_filtered": !active.wildcard.wildcard_zones().is_empty(),
+                }),
+            ),
+            (
+                SourceType::SrvRecord,
+                active
+                    .srv_targets
+                    .iter()
+                    .map(|(_, target)| target.clone())
+                    .collect(),
+                json!({
+                    "technique": "srv_record_probe",
+                    "zone": canonical_domain,
+                    "srv_labels": active
+                        .srv_targets
+                        .iter()
+                        .map(|(label, _)| label.clone())
+                        .collect::<Vec<_>>(),
+                }),
+            ),
+        ];
+
+        for (source, hostnames, metadata) in batches {
+            if hostnames.is_empty() {
+                continue;
+            }
+            // An SRV target routinely points outside the zone (a hosted PBX, a
+            // mail provider); a name found *inside* the zone is a subdomain and
+            // is worth recursing into, one found outside is not.
+            let recurse = !matches!(source, SourceType::SrvRecord);
+            let batch = self
+                .persist_discovered_hostnames(
+                    run_id,
+                    company_id,
+                    canonical_domain,
+                    domain_asset_id,
+                    seed_id,
+                    source,
+                    hostnames,
+                    metadata,
+                    RelationshipType::HasSubdomain,
+                    recurse,
+                    depth,
+                    max_depth,
+                )
+                .await?;
+            result.merge(batch);
+        }
+
+        Ok((result, active))
+    }
+
+    /// Persist a batch of hostnames discovered by one technique.
+    ///
+    /// Shared by every non-pivot discovery path so scoping, blacklisting,
+    /// relationship recording and recursion behave identically no matter which
+    /// technique produced the name.
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_discovered_hostnames(
+        &self,
+        run_id: Uuid,
+        company_id: Uuid,
+        parent_domain: &str,
+        parent_asset_id: Uuid,
+        seed_id: Option<Uuid>,
+        source: SourceType,
+        hostnames: Vec<String>,
+        metadata: serde_json::Value,
+        relationship: RelationshipType,
+        enqueue_for_recursion: bool,
+        depth: i32,
+        max_depth: i32,
+    ) -> Result<DiscoveryResult, ApiError> {
+        let mut result = DiscoveryResult::default();
+        let confidence = source.confidence_weight();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        for raw in hostnames {
+            let Some(canonical) = Self::normalize_discovery_hostname(&raw) else {
+                continue;
+            };
+            if canonical == parent_domain || !seen.insert(canonical.clone()) {
+                continue;
+            }
+            if self
+                .is_item_blacklisted(company_id, "domain", &canonical)
+                .await?
+            {
+                continue;
+            }
+
+            let asset = self
+                .create_or_update_asset_with_sources(
+                    run_id,
+                    company_id,
+                    AssetType::Domain,
+                    &canonical,
+                    vec![source.clone()],
+                    confidence,
+                    seed_id,
+                    Some(parent_asset_id),
+                    Some(metadata.clone()),
+                )
+                .await?;
+
+            if asset.1 {
+                result.assets_created.push(asset.0);
+            } else {
+                result.assets_updated.push(asset.0);
+            }
+
+            self.create_relationship(
+                run_id,
+                parent_asset_id,
+                asset.0,
+                relationship.clone(),
+                confidence,
+            )
+            .await?;
+
+            // Only names inside the zone are recursed into. A CNAME target or
+            // SRV host in somebody else's zone is evidence, not a branch to
+            // enumerate on their behalf.
+            let inside_zone =
+                crate::services::external::active_dns::is_within(&canonical, parent_domain);
+            if enqueue_for_recursion && inside_zone && depth < max_depth {
+                self.queue_for_discovery(
+                    run_id,
+                    QueueItemType::Domain,
+                    &canonical,
+                    seed_id,
+                    Some(parent_asset_id),
+                    depth + 1,
+                    4,
+                )
+                .await?;
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Record the SaaS tenancies proven by the apex TXT records.
+    ///
+    /// A verification token is durable evidence that the organisation onboarded
+    /// a vendor. Two things fall out of it: an inventory of third-party services
+    /// holding the organisation's data, and a short list of predictable tenant
+    /// hostnames (`support.`, `autodiscover.`, `status.`) worth resolving.
+    #[allow(clippy::too_many_arguments)]
+    async fn record_saas_tenancies(
+        &self,
+        run_id: Uuid,
+        company_id: Uuid,
+        canonical_domain: &str,
+        domain_asset_id: Uuid,
+        seed_id: Option<Uuid>,
+        depth: i32,
+        max_depth: i32,
+    ) -> Result<DiscoveryResult, ApiError> {
+        let mut result = DiscoveryResult::default();
+
+        let tenancies = match self
+            .dns_resolver
+            .lookup_saas_tenancies(canonical_domain)
+            .await
+        {
+            Ok(tenancies) => tenancies,
+            Err(e) => {
+                tracing::debug!("SaaS tenancy lookup failed for {}: {}", canonical_domain, e);
+                return Ok(result);
+            }
+        };
+
+        if tenancies.is_empty() {
+            return Ok(result);
+        }
+
+        let vendors: Vec<&str> = tenancies.iter().map(|tenancy| tenancy.vendor).collect();
+        tracing::info!(
+            "{} publishes verification tokens for {} SaaS vendors: {}",
+            canonical_domain,
+            vendors.len(),
+            vendors.join(", ")
+        );
+
+        // The vendor list belongs on the domain asset: it describes the domain,
+        // not a separate asset of its own.
+        if let Err(e) = self
+            .asset_repo
+            .merge_metadata(
+                company_id,
+                &domain_asset_id,
+                json!({
+                    "saas_tenancies": tenancies
+                        .iter()
+                        .map(|tenancy| json!({
+                            "vendor": tenancy.vendor,
+                            "token_prefix": tenancy.token_prefix,
+                        }))
+                        .collect::<Vec<_>>(),
+                }),
+            )
+            .await
+        {
+            tracing::debug!(
+                "Could not record SaaS tenancies on {}: {}",
+                canonical_domain,
+                e
+            );
+        }
+
+        // Only the hostnames a tenancy actually implies; these are candidates
+        // and are resolved before being kept, like any other guess.
+        let mut implied: Vec<String> = Vec::new();
+        for tenancy in &tenancies {
+            if let Some(hostname) = tenancy.implied_hostname.as_ref() {
+                match self.dns_resolver.resolve_hostname(hostname).await {
+                    Ok(ips) if ips.iter().any(|ip| !ip.is_loopback()) => {
+                        implied.push(hostname.clone())
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if !implied.is_empty() {
+            let batch = self
+                .persist_discovered_hostnames(
+                    run_id,
+                    company_id,
+                    canonical_domain,
+                    domain_asset_id,
+                    seed_id,
+                    SourceType::TxtVerification,
+                    implied,
+                    json!({
+                        "technique": "saas_verification_token",
+                        "vendors": vendors,
+                    }),
+                    RelationshipType::HasSubdomain,
+                    true,
+                    depth,
+                    max_depth,
+                )
+                .await?;
+            result.merge(batch);
+        }
+
+        Ok(result)
+    }
+
+    /// Walk a hostname's CNAME chain and record every hop.
+    ///
+    /// The chain is where subdomain takeover lives: a CNAME still pointing at a
+    /// deprovisioned cloud tenant is claimable by anyone. Recording the hops as
+    /// assets puts them in front of the scanner rather than leaving them
+    /// implicit. Targets outside the zone are recorded but never recursed into.
+    #[allow(clippy::too_many_arguments)]
+    async fn record_cname_chain(
+        &self,
+        run_id: Uuid,
+        company_id: Uuid,
+        canonical_domain: &str,
+        domain_asset_id: Uuid,
+        seed_id: Option<Uuid>,
+        depth: i32,
+        max_depth: i32,
+    ) -> Result<DiscoveryResult, ApiError> {
+        let chain = match self
+            .dns_resolver
+            .lookup_cname_chain(canonical_domain, 8)
+            .await
+        {
+            Ok(chain) if !chain.is_empty() => chain,
+            _ => return Ok(DiscoveryResult::default()),
+        };
+
+        self.persist_discovered_hostnames(
+            run_id,
+            company_id,
+            canonical_domain,
+            domain_asset_id,
+            seed_id,
+            SourceType::CnameChain,
+            chain.clone(),
+            json!({
+                "technique": "cname_chain",
+                "source_hostname": canonical_domain,
+                "chain": chain,
+            }),
+            RelationshipType::DiscoveredVia,
+            true,
+            depth,
+            max_depth,
+        )
+        .await
+    }
+
+    /// Attribute an address to its AS and netblock, and record the ASN asset.
+    ///
+    /// This is the step that turns a list of names into a list of *owned
+    /// address space*. Team Cymru answers the routing question over DNS;
+    /// RIPEstat turns the AS number into the full set of prefixes it announces,
+    /// which is where hosts with no DNS name at all are found.
+    #[allow(clippy::too_many_arguments)]
+    async fn attribute_ip_infrastructure(
+        &self,
+        run_id: Uuid,
+        company_id: Uuid,
+        ip: &str,
+        ip_asset_id: Uuid,
+        seed_id: Option<Uuid>,
+    ) -> Result<DiscoveryResult, ApiError> {
+        let mut result = DiscoveryResult::default();
+        let settings = self.current_settings();
+
+        if !settings.enable_asn_discovery {
+            return Ok(result);
+        }
+        let Some(client) = self.asn_client.as_ref() else {
+            return Ok(result);
+        };
+        let Ok(parsed) = ip.parse::<std::net::IpAddr>() else {
+            return Ok(result);
+        };
+
+        let attribution = match client.lookup_ip_asn(&parsed).await {
+            Ok(attribution) => attribution,
+            Err(e) => {
+                tracing::debug!("ASN attribution failed for {}: {}", ip, e);
+                return Ok(result);
+            }
+        };
+
+        let Some(asn) = attribution.asn else {
+            return Ok(result);
+        };
+
+        // A cloud or CDN AS is not the organisation's address space. Recording
+        // "this asset belongs to AS16509" is true and useless; sweeping Amazon's
+        // netblocks on its strength would be actively harmful.
+        let owner = attribution.organization().unwrap_or_default().to_string();
+        if self.is_known_cloud_provider_name(&owner) {
+            tracing::debug!(
+                "Skipping netblock expansion for {}: AS{} ({}) is shared infrastructure",
+                ip,
+                asn,
+                owner
+            );
+            return Ok(result);
+        }
+
+        let asn_identifier = format!("AS{}", asn);
+        let prefixes = match client.announced_prefixes(asn).await {
+            Ok(prefixes) => prefixes,
+            Err(e) => {
+                tracing::debug!("RIPEstat prefix lookup failed for AS{}: {}", asn, e);
+                Default::default()
+            }
+        };
+
+        let recorded_prefixes: Vec<String> = prefixes
+            .prefixes
+            .iter()
+            .take(settings.asn_max_prefixes as usize)
+            .cloned()
+            .collect();
+
+        let asn_asset = self
+            .create_or_update_asset_with_sources(
+                run_id,
+                company_id,
+                AssetType::Asn,
+                &asn_identifier,
+                vec![SourceType::AsnNetblock],
+                SourceType::AsnNetblock.confidence_weight(),
+                seed_id,
+                Some(ip_asset_id),
+                Some(json!({
+                    "technique": "bgp_origin_attribution",
+                    "as_name": attribution.as_name,
+                    "holder": prefixes.holder.clone().or(attribution.holder.clone()),
+                    "country": attribution.country,
+                    "registry": attribution.registry,
+                    "announced_prefixes": recorded_prefixes,
+                    "announced_prefix_count": prefixes.prefixes.len(),
+                    "observed_prefix": attribution.prefix,
+                    "attributed_from_ip": ip,
+                })),
+            )
+            .await?;
+
+        if asn_asset.1 {
+            result.assets_created.push(asn_asset.0);
+        } else {
+            result.assets_updated.push(asn_asset.0);
+        }
+
+        self.create_relationship(
+            run_id,
+            asn_asset.0,
+            ip_asset_id,
+            RelationshipType::BelongsToAsn,
+            SourceType::AsnNetblock.confidence_weight(),
+        )
+        .await?;
+
+        // Sweep the covering prefix. Hosts with no forward DNS record still
+        // usually have a PTR, which is why this finds management interfaces and
+        // appliances that name-based enumeration never will.
+        if let Some(prefix) = attribution.prefix.as_deref() {
+            let sweep = self
+                .reverse_sweep_prefix(run_id, company_id, prefix, asn_asset.0, seed_id)
+                .await?;
+            result.merge(sweep);
+        }
+
+        Ok(result)
+    }
+
+    /// Reverse-resolve every address in a netblock and record the names found.
+    ///
+    /// Bounded three ways, because an unbounded sweep of a large prefix is a
+    /// denial-of-service against the target's own resolvers:
+    ///
+    /// - `reverse_dns_sweep_max_hosts` caps addresses per prefix (0 disables it)
+    /// - a prefix is swept at most once per discovery run
+    /// - the resolver's own concurrency and rate limits still apply
+    ///
+    /// Discovered names are recorded but never enqueued for recursion: a PTR in
+    /// a shared hosting range routinely names somebody else's domain.
+    async fn reverse_sweep_prefix(
+        &self,
+        run_id: Uuid,
+        company_id: Uuid,
+        prefix: &str,
+        asn_asset_id: Uuid,
+        seed_id: Option<Uuid>,
+    ) -> Result<DiscoveryResult, ApiError> {
+        let mut result = DiscoveryResult::default();
+        let settings = self.current_settings();
+        let max_hosts = settings.reverse_dns_sweep_max_hosts as usize;
+        if max_hosts == 0 {
+            return Ok(result);
+        }
+
+        {
+            let mut swept = self.swept_prefixes.lock().await;
+            if !swept.insert((run_id, prefix.to_string())) {
+                return Ok(result);
+            }
+        }
+
+        let Ok(network) = prefix.parse::<ipnet::IpNet>() else {
+            return Ok(result);
+        };
+        // `.take()` on the iterator rather than expanding first: a /16 would
+        // otherwise materialise 65 534 addresses just to discard most of them.
+        let addresses: Vec<std::net::IpAddr> = network.hosts().take(max_hosts).collect();
+        if addresses.is_empty() {
+            return Ok(result);
+        }
+
+        // The prefix length gives the host count arithmetically; calling
+        // `.count()` on the iterator would walk all 65 534 addresses of a /16
+        // purely to write a log line.
+        let total_hosts =
+            2u128.saturating_pow(u32::from(network.max_prefix_len() - network.prefix_len()));
+        tracing::info!(
+            "Reverse-sweeping {} ({} of {} addresses)",
+            prefix,
+            addresses.len(),
+            total_hosts
+        );
+
+        let sweep = self.dns_resolver.reverse_lookup_concurrent(addresses).await;
+
+        for entry in sweep {
+            if entry.hostnames.is_empty() {
+                continue;
+            }
+            let ip_str = entry.ip.to_string();
+
+            if self.is_item_blacklisted(company_id, "ip", &ip_str).await? {
+                continue;
+            }
+
+            let ip_asset = self
+                .create_or_update_asset_with_sources(
+                    run_id,
+                    company_id,
+                    AssetType::Ip,
+                    &ip_str,
+                    vec![SourceType::AsnNetblock],
+                    SourceType::AsnNetblock.confidence_weight(),
+                    seed_id,
+                    Some(asn_asset_id),
+                    Some(json!({
+                        "technique": "reverse_dns_sweep",
+                        "prefix": prefix,
+                    })),
+                )
+                .await?;
+
+            if ip_asset.1 {
+                result.assets_created.push(ip_asset.0);
+            } else {
+                result.assets_updated.push(ip_asset.0);
+            }
+
+            self.create_relationship(
+                run_id,
+                asn_asset_id,
+                ip_asset.0,
+                RelationshipType::BelongsToAsn,
+                SourceType::AsnNetblock.confidence_weight(),
+            )
+            .await?;
+
+            for hostname in entry.hostnames {
+                let Some(canonical) = Self::normalize_discovery_hostname(&hostname) else {
+                    continue;
+                };
+                if self
+                    .is_item_blacklisted(company_id, "domain", &canonical)
+                    .await?
+                {
+                    continue;
+                }
+
+                let host_asset = self
+                    .create_or_update_asset_with_sources(
+                        run_id,
+                        company_id,
+                        AssetType::Domain,
+                        &canonical,
+                        vec![SourceType::ReverseDns],
+                        SourceType::ReverseDns.confidence_weight(),
+                        seed_id,
+                        Some(ip_asset.0),
+                        Some(json!({
+                            "technique": "reverse_dns_sweep",
+                            "prefix": prefix,
+                            "reverse_resolved_from": ip_str,
+                        })),
+                    )
+                    .await?;
+
+                if host_asset.1 {
+                    result.assets_created.push(host_asset.0);
+                } else {
+                    result.assets_updated.push(host_asset.0);
+                }
+
+                self.create_relationship(
+                    run_id,
+                    ip_asset.0,
+                    host_asset.0,
+                    RelationshipType::ReverseResolvesTo,
+                    SourceType::ReverseDns.confidence_weight(),
+                )
+                .await?;
+            }
         }
 
         Ok(result)
@@ -1430,7 +2247,11 @@ impl DiscoveryService {
 
         // --- Favicon-hash pivot ---
         if shodan_enabled {
-            match self.http_analyzer.fetch_favicon_hash(canonical_domain).await {
+            match self
+                .http_analyzer
+                .fetch_favicon_hash(canonical_domain)
+                .await
+            {
                 Ok(Some(hash)) => {
                     match self
                         .external_services
@@ -1467,6 +2288,68 @@ impl DiscoveryService {
                 Err(e) => {
                     tracing::debug!("Favicon fetch failed for {}: {}", canonical_domain, e);
                 }
+            }
+        }
+
+        // --- JARM pivot ---
+        // JARM fingerprints a server's whole TLS stack, so it groups hosts by
+        // *how they are built* rather than by what they serve — which is how
+        // sibling infrastructure behind different names gets found. The
+        // fingerprint is read from Shodan's own record so the value queried is
+        // one its index actually contains.
+        if shodan_enabled {
+            match self.dns_resolver.resolve_hostname(canonical_domain).await {
+                Ok(ips) => {
+                    if let Some(ip) = ips.iter().find(|ip| !ip.is_loopback()) {
+                        let ip_str = ip.to_string();
+                        match self.external_services.shodan_jarm_for_ip(&ip_str).await {
+                            Ok(Some(jarm)) => {
+                                match self
+                                    .external_services
+                                    .shodan_jarm_pivot(&jarm, max_results)
+                                    .await
+                                {
+                                    Ok(extracted) => {
+                                        self.persist_lateral_pivot_hosts(
+                                            run_id,
+                                            company_id,
+                                            domain_asset_id,
+                                            seed_id,
+                                            SourceType::JarmPivot,
+                                            RelationshipType::DiscoveredVia,
+                                            extracted.domains.into_iter().collect(),
+                                            json!({
+                                                "pivot": "jarm",
+                                                "jarm": jarm,
+                                                "observed_on_ip": ip_str,
+                                                "seed_domain": canonical_domain,
+                                            }),
+                                        )
+                                        .await?;
+                                    }
+                                    Err(e) => tracing::debug!(
+                                        "Shodan JARM pivot failed for {}: {}",
+                                        canonical_domain,
+                                        e
+                                    ),
+                                }
+                            }
+                            Ok(None) => tracing::debug!(
+                                "Shodan has no JARM fingerprint for {} ({})",
+                                canonical_domain,
+                                ip_str
+                            ),
+                            Err(e) => {
+                                tracing::debug!("Shodan host lookup failed for {}: {}", ip_str, e)
+                            }
+                        }
+                    }
+                }
+                Err(e) => tracing::debug!(
+                    "Could not resolve {} for the JARM pivot: {}",
+                    canonical_domain,
+                    e
+                ),
             }
         }
 
@@ -1593,7 +2476,9 @@ impl DiscoveryService {
         // A small dedicated reqwest client avoids polluting probe_url's API.
         let client = reqwest::Client::builder()
             .timeout(analyzer.config().request_timeout)
-            .redirect(reqwest::redirect::Policy::limited(analyzer.config().max_redirects))
+            .redirect(reqwest::redirect::Policy::limited(
+                analyzer.config().max_redirects,
+            ))
             .user_agent(&analyzer.config().user_agent)
             .build()
             .map_err(ApiError::HttpClient)?;
@@ -2160,6 +3045,18 @@ impl DiscoveryService {
 
         let ip_asset_id = ip_asset.0;
 
+        // Attribute the address to its origin AS and announced netblocks. A seed
+        // IP is exactly the case where this matters most: one address the
+        // analyst knows about frequently sits in a /24 the organisation owns
+        // outright, and nothing else in that range has a DNS name.
+        match self
+            .attribute_ip_infrastructure(run_id, company_id, ip, ip_asset_id, seed_id)
+            .await
+        {
+            Ok(attribution) => result.merge(attribution),
+            Err(e) => tracing::debug!("ASN attribution failed for {}: {}", ip, e),
+        }
+
         // Reverse DNS lookup
         if let Ok(ip_addr) = ip.parse() {
             match self.dns_resolver.reverse_lookup(&ip_addr).await {
@@ -2603,10 +3500,46 @@ impl DiscoveryService {
     }
 
     /// Calculate confidence for subdomain discovery
-    fn calculate_subdomain_confidence(&self, source_count: usize) -> f64 {
-        self.calculate_multi_source_confidence(0.5, source_count)
+    /// Confidence for a hostname, given every source that reported it.
+    ///
+    /// Counting raw sources was defensible with four of them. With nineteen it
+    /// is not: crt.sh, CertSpotter, Censys and Digitorus all read the same
+    /// certificate transparency logs, so four hits there is one fact observed
+    /// four times, not four independent facts. Scoring it as four would let a
+    /// single CT entry reach maximum confidence.
+    ///
+    /// So the score is:
+    ///
+    /// - **base** — the strongest single source's own weight. A name in a CT
+    ///   log starts high because a CA logged it; a name seen only in a web
+    ///   archive starts low because it may be years dead.
+    /// - **corroboration** — `+0.06` for each *additional independent evidence
+    ///   class* (see [`SourceType::evidence_class`]), so passive DNS agreeing
+    ///   with CT counts, and a fifth CT aggregator does not.
+    ///
+    /// Capped below 1.0: only a seed or an analyst gets certainty.
+    fn calculate_subdomain_confidence(sources: &[SourceType]) -> f64 {
+        if sources.is_empty() {
+            return 0.5;
+        }
+
+        let base = sources
+            .iter()
+            .map(|source| source.confidence_weight())
+            .fold(0.0_f64, f64::max);
+
+        let independent_classes: HashSet<_> = sources
+            .iter()
+            .map(|source| source.evidence_class())
+            .collect();
+        let corroboration = independent_classes.len().saturating_sub(1) as f64 * 0.06;
+
+        (base + corroboration).clamp(0.0, 0.95)
     }
 
+    /// Confidence for a discovery path whose floor is set by the path itself
+    /// rather than by the source — an organisation or ASN pivot, say, where the
+    /// link to the company is what is uncertain, not the asset's existence.
     fn calculate_multi_source_confidence(&self, base: f64, source_count: usize) -> f64 {
         let effective_source_count = source_count.max(1);
         let boost = ((effective_source_count as f64) - 1.0) * 0.1;
@@ -2725,6 +3658,7 @@ impl Clone for DiscoveryService {
             security_scan_service: self.security_scan_service.clone(),
             risk_service: Arc::clone(&self.risk_service),
             external_services: Arc::clone(&self.external_services),
+            asn_client: self.asn_client.clone(),
             dns_resolver: Arc::clone(&self.dns_resolver),
             http_analyzer: Arc::clone(&self.http_analyzer),
             task_manager: Arc::clone(&self.task_manager),
@@ -2732,6 +3666,7 @@ impl Clone for DiscoveryService {
             confidence_scorer: Arc::clone(&self.confidence_scorer),
             status: Arc::clone(&self.status),
             ip_cloud_provider_cache: Arc::clone(&self.ip_cloud_provider_cache),
+            swept_prefixes: Arc::clone(&self.swept_prefixes),
         }
     }
 }
@@ -2765,14 +3700,120 @@ mod tests {
             SourceType::Crtsh,
             SourceType::Virustotal,
         ]);
+        // Certificate transparency outranks scan data: a CA logging the name is
+        // stronger evidence of ownership than a scanner having seen it answer.
         assert_eq!(
             ordered,
             vec![
+                SourceType::Crtsh,
                 SourceType::Shodan,
-                SourceType::Virustotal,
-                SourceType::Crtsh
+                SourceType::Virustotal
             ]
         );
+    }
+
+    #[test]
+    fn test_order_source_types_puts_live_dns_first() {
+        let ordered = DiscoveryService::order_source_types(vec![
+            SourceType::Wayback,
+            SourceType::DnsResolution,
+            SourceType::Crtsh,
+        ]);
+        assert_eq!(
+            ordered,
+            vec![
+                SourceType::DnsResolution,
+                SourceType::Crtsh,
+                SourceType::Wayback
+            ]
+        );
+    }
+
+    #[test]
+    fn test_order_source_types_keeps_unranked_sources_in_insertion_order() {
+        // Nothing ranks lateral pivots; they must trail in the order recorded
+        // rather than being reshuffled.
+        let ordered = DiscoveryService::order_source_types(vec![
+            SourceType::MxPivot,
+            SourceType::Crtsh,
+            SourceType::FaviconPivot,
+        ]);
+        assert_eq!(
+            ordered,
+            vec![
+                SourceType::Crtsh,
+                SourceType::MxPivot,
+                SourceType::FaviconPivot
+            ]
+        );
+    }
+
+    #[test]
+    fn confidence_rewards_independent_corroboration_not_repetition() {
+        // Four aggregators, all reading the same certificate transparency logs.
+        // That is one fact seen four times.
+        let all_ct = DiscoveryService::calculate_subdomain_confidence(&[
+            SourceType::Crtsh,
+            SourceType::Certspotter,
+            SourceType::Censys,
+            SourceType::Digitorus,
+        ]);
+        let single_ct = DiscoveryService::calculate_subdomain_confidence(&[SourceType::Crtsh]);
+        assert_eq!(
+            all_ct, single_ct,
+            "sources in one evidence class must not stack"
+        );
+
+        // Certificate transparency plus passive DNS: two independent facts.
+        let two_classes =
+            DiscoveryService::calculate_subdomain_confidence(&[SourceType::Crtsh, SourceType::Otx]);
+        assert!(
+            two_classes > single_ct,
+            "independent corroboration must raise confidence"
+        );
+
+        // And a third class raises it again.
+        let three_classes = DiscoveryService::calculate_subdomain_confidence(&[
+            SourceType::Crtsh,
+            SourceType::Otx,
+            SourceType::Shodan,
+        ]);
+        assert!(three_classes > two_classes);
+    }
+
+    #[test]
+    fn confidence_is_anchored_on_the_strongest_source() {
+        // A web archive alone is weak: the name existed once, not necessarily now.
+        let archive_only = DiscoveryService::calculate_subdomain_confidence(&[SourceType::Wayback]);
+        // Live resolution is the strongest evidence there is short of a seed.
+        let resolved =
+            DiscoveryService::calculate_subdomain_confidence(&[SourceType::DnsResolution]);
+        assert!(archive_only < resolved);
+
+        // Adding a weak source never lowers the score below the strong one.
+        let both = DiscoveryService::calculate_subdomain_confidence(&[
+            SourceType::DnsResolution,
+            SourceType::Wayback,
+        ]);
+        assert!(both >= resolved);
+    }
+
+    #[test]
+    fn confidence_never_reaches_certainty_and_handles_no_sources() {
+        let everything = DiscoveryService::calculate_subdomain_confidence(&[
+            SourceType::DnsResolution,
+            SourceType::Crtsh,
+            SourceType::Otx,
+            SourceType::Shodan,
+            SourceType::Wayback,
+            SourceType::AsnNetblock,
+        ]);
+        assert!(
+            everything < 1.0,
+            "only a seed or an analyst gets certainty, got {everything}"
+        );
+        // An empty source list is a bug elsewhere, but must not panic or score 0.
+        assert_eq!(DiscoveryService::calculate_subdomain_confidence(&[]), 0.5);
     }
 
     #[test]

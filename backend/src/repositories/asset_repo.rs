@@ -53,6 +53,18 @@ pub trait AssetRepository {
         id: &Uuid,
         importance: i32,
     ) -> Result<Asset, ApiError>;
+    /// Shallow-merge a JSON object into an asset's `metadata`.
+    ///
+    /// For enrichment that describes an existing asset rather than discovering
+    /// a new one — SaaS tenancy, attribution — where going through
+    /// `create_or_merge` would wrongly record a new discovery source and nudge
+    /// the confidence score.
+    async fn merge_metadata(
+        &self,
+        company_id: Uuid,
+        id: &Uuid,
+        metadata: serde_json::Value,
+    ) -> Result<(), ApiError>;
     async fn update_comment(
         &self,
         company_id: Uuid,
@@ -574,6 +586,34 @@ impl AssetRepository for SqlxAssetRepository {
         .await?;
 
         Ok(Asset::from(row))
+    }
+
+    async fn merge_metadata(
+        &self,
+        company_id: Uuid,
+        id: &Uuid,
+        metadata: serde_json::Value,
+    ) -> Result<(), ApiError> {
+        // `||` on jsonb is a shallow merge: keys in the new object replace
+        // existing ones, everything else is preserved.
+        let result = sqlx::query(
+            r#"
+            UPDATE assets
+            SET metadata = metadata || $1, updated_at = NOW()
+            WHERE id = $2 AND company_id = $3
+            "#,
+        )
+        .bind(&metadata)
+        .bind(id)
+        .bind(company_id)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(ApiError::NotFound(format!("Asset {} not found", id)));
+        }
+
+        Ok(())
     }
 
     async fn update_comment(

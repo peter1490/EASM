@@ -11,9 +11,11 @@ This document provides a comprehensive overview of the EASM discovery system arc
 1. [High-Level Overview](#high-level-overview)
 2. [Entry Point Flow](#entry-point-flow)
 3. [Seed Processing Flow](#seed-processing-flow)
-4. [Shodan Comprehensive Extraction](#shodan-comprehensive-extraction)
-5. [Recursive Discovery](#recursive-discovery)
-6. [Data Flow Diagram](#data-flow-diagram)
+4. [The Domain Pipeline](#the-domain-pipeline)
+5. [Shodan Comprehensive Extraction](#shodan-comprehensive-extraction)
+6. [Recursive Discovery](#recursive-discovery)
+7. [Data Flow Diagram](#data-flow-diagram)
+8. [Confidence Scoring](#confidence-scoring)
 
 ---
 
@@ -26,8 +28,9 @@ This document provides a comprehensive overview of the EASM discovery system arc
 │  User Seeds → Discovery Engine → Asset Extraction → Database    │
 │                                                                  │
 │  Supports: Domains, Organizations, ASNs, CIDRs, Keywords        │
-│  Sources: Shodan, VirusTotal, crt.sh, CertSpotter, DNS          │
-│  Assets: IPs, Domains, Certificates, All stored with metadata   │
+│  Layers:  Passive fan-out → Active DNS → Infra attribution      │
+│  Sources: 19 passive corpora (8 key-free) + active DNS + BGP    │
+│  Assets: IPs, Domains, Certificates, ASNs, with full lineage    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -332,6 +335,81 @@ discover_from_keyword(keyword)
 │  being less specific than other methods         │
 └─────────────────────────────────────────────────┘
 ```
+
+---
+
+## 🧭 The Domain Pipeline
+
+A domain seed runs through seven stages, in this order. The order is load-bearing:
+permutation needs known-good names to mutate, and wildcard detection has to
+happen before any guessed name is believed.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 1. PASSIVE FAN-OUT                            services/external/        │
+│                                               passive_sources.rs        │
+│    19 corpora, queried CONCURRENTLY.                                     │
+│    Cost = slowest source, not the sum.                                   │
+│                                                                          │
+│    No key:  crt.sh · OTX · HackerTarget · RapidDNS · AnubisDB           │
+│             urlscan.io · Wayback · Columbus · Digitorus                  │
+│    Keyed:   Shodan · VirusTotal · CertSpotter · SecurityTrails          │
+│             Censys · Chaos · LeakIX · FullHunt · BinaryEdge · Netlas     │
+│                                                                          │
+│    Per source: queried | skipped (no key / disabled) | failed            │
+│    None of the three aborts the run.                                     │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 2. ACTIVE DNS                                 services/external/         │
+│                                               active_dns.rs              │
+│    ┌──────────────────────────────────────────────────────────────┐     │
+│    │ 0. WILDCARD DETECTION  ← gates everything below              │     │
+│    │    Resolve 3 random labels per zone, at EVERY level.          │     │
+│    │    Stable answer  → wildcard IP set recorded                  │     │
+│    │    Varying answer → zone marked "rotating", nothing trusted   │     │
+│    │    A host answering with the wildcard IP *plus one of its     │     │
+│    │    own* is real and is KEPT.                                  │     │
+│    └──────────────────────────────────────────────────────────────┘     │
+│    a. NSEC zone walk   — free, complete, no guessing (RFC 4034 §4)      │
+│                          reads the AUTHORITY section via dns_wire        │
+│    b. SRV probe        — 61 _service._proto labels                       │
+│    c. Brute force      — curated hit-rate-ordered wordlist               │
+│    d. Permutation      — mutate everything found above                   │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 3. DNS RESOLUTION → 4. TLS CERTIFICATE (SAN pivot, org pivot)           │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│    For each resolved IP:  ASN ATTRIBUTION       services/external/asn.rs │
+│                                                                          │
+│    Team Cymru (DNS TXT)  → origin AS + BGP prefix                        │
+│    RIPEstat  (HTTPS)     → every prefix that AS announces                │
+│    Cloud/CDN AS?         → recorded, NOT expanded                        │
+│    Otherwise             → reverse-DNS sweep the covering prefix,        │
+│                            bounded per-prefix and once per run           │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 5. SAAS TENANCY   apex TXT verification tokens → vendor inventory        │
+│                   + implied hostnames (autodiscover. / support. /        │
+│                     status.), each resolved before it is kept            │
+│ 6. CNAME CHAIN    every hop recorded — the takeover surface              │
+│ 7. LATERAL PIVOTS favicon · JARM · analytics IDs · SPF · DMARC · MX      │
+│                   Sibling infrastructure, NOT subdomains.                │
+│                   Never recursed into; analyst triages in the UI.        │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### What each layer reaches that the others cannot
+
+| Layer | Finds | Misses |
+| --- | --- | --- |
+| Passive | anything already recorded by somebody | names never certificated, crawled or resolved |
+| Active DNS | live names nobody indexed | names that do not resolve at all |
+| Attribution | hosts with no forward DNS at all | address space announced by a shared provider |
 
 ---
 
@@ -662,38 +740,104 @@ discover_from_keyword(keyword)
 
 ## 🔐 Confidence Scoring
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Asset Confidence Levels                       │
-├──────────────────────────┬──────────────┬───────────────────────┤
-│ Discovery Method         │ Confidence   │ Reasoning             │
-├──────────────────────────┼──────────────┼───────────────────────┤
-│ CIDR Expansion           │ 0.8 (High)   │ Direct ownership      │
-│ DNS Resolution           │ 0.8 (High)   │ Active DNS record     │
-│ Shodan IP (ASN)          │ 0.8 (High)   │ Confirmed ASN member  │
-│ Shodan IP (Domain)       │ 0.8 (High)   │ Active host           │
-├──────────────────────────┼──────────────┼───────────────────────┤
-│ Certificate (with org)   │ 0.7 (Good)   │ Verified cert         │
-│ Shodan Domain (ASN)      │ 0.7 (Good)   │ Confirmed hostname    │
-│ Shodan Cert              │ 0.7 (Good)   │ Active certificate    │
-│ Shodan IP (Org)          │ 0.7 (Good)   │ Org match             │
-├──────────────────────────┼──────────────┼───────────────────────┤
-│ Multi-source Domain      │ 0.6-0.9      │ Based on source count │
-│ Shodan Domain (Org)      │ 0.6 (Medium) │ Org association       │
-│ crt.sh Organization      │ 0.6 (Medium) │ CT log entry          │
-├──────────────────────────┼──────────────┼───────────────────────┤
-│ Keyword Search (any)     │ 0.5 (Medium) │ Fuzzy match           │
-│ Keyword Search (cert)    │ 0.5 (Medium) │ Indirect association  │
-├──────────────────────────┼──────────────┼───────────────────────┤
-│ Certificate (no org)     │ 0.3 (Low)    │ Limited validation    │
-└──────────────────────────┴──────────────┴───────────────────────┘
+Confidence answers one question: **how sure are we that this is a real asset
+belonging to this company?** It is not a measure of how many sources replied.
 
-Multi-source Boost Algorithm:
-  base_confidence = 0.5
-  + (source_count - 1) * 0.1
-  + 0.2 if direct subdomain
-  + 0.1 if from crt.sh
-  = Final confidence (max 1.0)
+### Why source counting broke
+
+With four sources, `base + 0.1 per extra source` was defensible. With nineteen
+it is not. crt.sh, CertSpotter, Censys and Digitorus all read the same
+certificate transparency logs — four hits there is **one fact observed four
+times**, not four independent facts. Under the old formula a single CT entry,
+seen by four aggregators, reached the confidence cap on its own.
+
+### Evidence classes
+
+Every source is assigned an evidence class. Corroboration only counts *between*
+classes.
+
+```
+┌────────────────────────────┬────────────────────────────────────────────────┐
+│ Evidence class             │ Sources                                        │
+├────────────────────────────┼────────────────────────────────────────────────┤
+│ Declared                   │ seed, user_input                               │
+│ CertificateTransparency    │ crt.sh, CertSpotter, Censys, Digitorus, live   │
+│                            │ TLS certificate                                │
+│ PassiveDns                 │ OTX, VirusTotal, SecurityTrails, HackerTarget, │
+│                            │ RapidDNS, AnubisDB, Columbus, Chaos            │
+│ InternetScan               │ Shodan, BinaryEdge, Netlas, FullHunt, LeakIX   │
+│ WebArchive                 │ urlscan.io, Wayback Machine                    │
+│ ActiveDns                  │ resolution, reverse DNS, brute force,          │
+│                            │ permutation, NSEC walk, SRV, CNAME chain,      │
+│                            │ TXT verification                               │
+│ ActiveProbe                │ HTTP probe, port scan                          │
+│ Registry                   │ CIDR expansion, ASN netblock, RDAP             │
+│ SharedAttribute            │ favicon, JARM, analytics ID, SPF, DMARC, MX    │
+└────────────────────────────┴────────────────────────────────────────────────┘
+```
+
+### The score
+
+```
+confidence = strongest_source_weight
+           + 0.06 × (independent_evidence_classes − 1)
+           capped at 0.95
+```
+
+Only a seed or an analyst reaches 1.0.
+
+### Per-source weights
+
+```
+┌──────────────────────────────────────┬──────────────┬────────────────────────┐
+│ Source                               │ Weight       │ What it proves         │
+├──────────────────────────────────────┼──────────────┼────────────────────────┤
+│ seed, user_input                     │ 1.00         │ The analyst said so    │
+├──────────────────────────────────────┼──────────────┼────────────────────────┤
+│ DNS resolution                       │ 0.90         │ It answers, now        │
+│ NSEC walk                            │ 0.90         │ The zone listed it     │
+│ DNS brute force, SRV, CNAME chain    │ 0.85         │ Confirmed by lookup    │
+│ crt.sh, CertSpotter                  │ 0.85         │ A CA logged it         │
+├──────────────────────────────────────┼──────────────┼────────────────────────┤
+│ Censys, Digitorus, live certificate  │ 0.80         │ CT / live cert         │
+│ Shodan, VirusTotal, SecurityTrails,  │ 0.75         │ A third party saw it   │
+│ Chaos                                │              │                        │
+│ BinaryEdge, Netlas, FullHunt, OTX,   │ 0.70         │ A third party saw it   │
+│ LeakIX, HackerTarget, reverse DNS,   │              │                        │
+│ permutation                          │              │                        │
+│ RapidDNS, AnubisDB, Columbus,        │ 0.65         │ Aggregated report      │
+│ urlscan.io                           │              │                        │
+│ HTTP probe, port scan                │ 0.60         │ Something listened     │
+│ Wayback Machine                      │ 0.55         │ It existed *once*      │
+├──────────────────────────────────────┼──────────────┼────────────────────────┤
+│ CIDR expansion, ASN netblock, RDAP   │ 0.50         │ Registry association   │
+│ TXT verification                     │ 0.45         │ Tenancy, not hostname  │
+│ favicon / JARM / analytics / SPF /   │ 0.30         │ A *shared attribute*,  │
+│ DMARC / MX pivots                    │              │ ownership unproven     │
+└──────────────────────────────────────┴──────────────┴────────────────────────┘
+```
+
+Lateral pivots start low on purpose: sharing a favicon, a JARM fingerprint or a
+mail relay with a known asset is something unrelated SaaS tenants do constantly.
+They are surfaced for analyst triage, never treated as owned.
+
+### Worked examples
+
+```
+www.example.com  seen by crt.sh + CertSpotter + Censys + Digitorus
+  → strongest 0.85, one class (CT)              → 0.85
+
+www.example.com  seen by crt.sh + OTX
+  → strongest 0.85, two classes (CT, passive)   → 0.91
+
+old.example.com  seen only by the Wayback Machine
+  → strongest 0.55, one class (archive)         → 0.55
+
+dev-api.example.com  found by permutation, resolves
+  → strongest 0.70, one class (active DNS)      → 0.70
+
+unrelated.saas.com  matched only on favicon hash
+  → strongest 0.30, one class (shared attr.)    → 0.30
 ```
 
 ---
@@ -758,19 +902,55 @@ Multi-source Boost Algorithm:
 
 ## 🎛️ Configuration Options
 
-```toml
-# Discovery Settings
-max_concurrent_scans = 10           # Parallel seed processing
-subdomain_enum_timeout = 24.0       # Hours per seed (24 = 1 day)
-max_cidr_hosts = 1024               # Max IPs from CIDR expansion
+See `example.env` for the full list with defaults. The settings that shape
+discovery itself:
 
-# Confidence Thresholds
-related_asset_confidence_default = 0.5  # Base confidence for related assets
+```bash
+# Discovery
+MAX_DISCOVERY_DEPTH=3                  # Recursion depth for subdomain branches
+MAX_CIDR_HOSTS=4096                    # Max IPs from a CIDR seed
+MAX_ASSETS_PER_DISCOVERY=5000          # Hard cap per run
 
-# API Keys (set in environment)
-SHODAN_API_KEY = "your_key"         # Enable Shodan (REQUIRED for best results)
-VIRUSTOTAL_API_KEY = "your_key"     # Optional: Additional subdomain source
-CERTSPOTTER_API_TOKEN = "your_key"  # Optional: Additional CT log source
+# Passive fan-out — sources are queried concurrently, so enumeration costs the
+# slowest source rather than the sum of all of them.
+OSINT_SOURCE_CONCURRENCY=12
+OSINT_SOURCE_TIMEOUT_SECONDS=25.0
+OSINT_MAX_RESULTS_PER_SOURCE=5000
+
+# Active DNS — wildcard detection runs first and gates all of it.
+ENABLE_DNS_BRUTEFORCE=true
+ENABLE_DNS_PERMUTATIONS=true
+ENABLE_NSEC_WALK=true
+ENABLE_SRV_PROBE=true
+DNS_BRUTEFORCE_MAX_WORDS=2000
+DNS_PERMUTATION_MAX_CANDIDATES=5000
+DNS_PERMUTATION_MAX_SEEDS=50
+ACTIVE_DNS_CONCURRENCY=50
+# DNS_BRUTEFORCE_WORDLIST_PATH=/opt/wordlists/subdomains.txt
+
+# Infrastructure attribution — Team Cymru and RIPEstat, neither needs a key.
+ENABLE_ASN_DISCOVERY=true
+ENABLE_RDAP_LOOKUP=true
+ENABLE_SAAS_TENANT_DISCOVERY=true
+ENABLE_CNAME_CHAIN_ANALYSIS=true
+ASN_MAX_PREFIXES=64
+REVERSE_DNS_SWEEP_MAX_HOSTS=256        # 0 disables the sweep
+```
+
+### API keys
+
+Eight passive corpora need **no key at all**: crt.sh, AlienVault OTX,
+HackerTarget, RapidDNS, AnubisDB, urlscan.io, the Wayback Machine, Columbus and
+Digitorus. Discovery is useful with an empty configuration; a source whose key
+is missing reports `skipped` and the run continues.
+
+```bash
+SHODAN_API_KEY=          VIRUSTOTAL_API_KEY=      CERTSPOTTER_API_TOKEN=
+SECURITYTRAILS_API_KEY=  CENSYS_API_KEY=          CENSYS_ORG_ID=
+CHAOS_API_KEY=           LEAKIX_API_KEY=          FULLHUNT_API_KEY=
+BINARYEDGE_API_KEY=      NETLAS_API_KEY=
+# Optional — these two sources answer anonymously, a key only raises the limit:
+URLSCAN_API_KEY=         OTX_API_KEY=
 ```
 
 ---

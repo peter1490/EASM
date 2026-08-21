@@ -215,6 +215,35 @@ pub enum SourceType {
     SpfPivot,
     DmarcPivot,
     MxPivot,
+    // Passive OSINT aggregators. Each is an independent corpus: certificate
+    // transparency, passive DNS, internet-wide scan data or web archives. A
+    // hostname corroborated by several of them is far more likely to be real
+    // than one seen by a single crawler.
+    Otx,
+    HackerTarget,
+    RapidDns,
+    AnubisDb,
+    UrlScan,
+    Wayback,
+    Columbus,
+    Digitorus,
+    SecurityTrails,
+    Censys,
+    Chaos,
+    LeakIx,
+    FullHunt,
+    BinaryEdge,
+    Netlas,
+    // Active DNS discovery — names that no passive corpus has ever recorded.
+    DnsBruteforce,
+    DnsPermutation,
+    NsecWalk,
+    SrvRecord,
+    CnameChain,
+    // Infrastructure attribution.
+    AsnNetblock,
+    Rdap,
+    TxtVerification,
 }
 
 impl std::fmt::Display for SourceType {
@@ -238,6 +267,29 @@ impl std::fmt::Display for SourceType {
             SourceType::SpfPivot => write!(f, "spf_pivot"),
             SourceType::DmarcPivot => write!(f, "dmarc_pivot"),
             SourceType::MxPivot => write!(f, "mx_pivot"),
+            SourceType::Otx => write!(f, "otx"),
+            SourceType::HackerTarget => write!(f, "hackertarget"),
+            SourceType::RapidDns => write!(f, "rapiddns"),
+            SourceType::AnubisDb => write!(f, "anubisdb"),
+            SourceType::UrlScan => write!(f, "urlscan"),
+            SourceType::Wayback => write!(f, "wayback"),
+            SourceType::Columbus => write!(f, "columbus"),
+            SourceType::Digitorus => write!(f, "digitorus"),
+            SourceType::SecurityTrails => write!(f, "securitytrails"),
+            SourceType::Censys => write!(f, "censys"),
+            SourceType::Chaos => write!(f, "chaos"),
+            SourceType::LeakIx => write!(f, "leakix"),
+            SourceType::FullHunt => write!(f, "fullhunt"),
+            SourceType::BinaryEdge => write!(f, "binaryedge"),
+            SourceType::Netlas => write!(f, "netlas"),
+            SourceType::DnsBruteforce => write!(f, "dns_bruteforce"),
+            SourceType::DnsPermutation => write!(f, "dns_permutation"),
+            SourceType::NsecWalk => write!(f, "nsec_walk"),
+            SourceType::SrvRecord => write!(f, "srv_record"),
+            SourceType::CnameChain => write!(f, "cname_chain"),
+            SourceType::AsnNetblock => write!(f, "asn_netblock"),
+            SourceType::Rdap => write!(f, "rdap"),
+            SourceType::TxtVerification => write!(f, "txt_verification"),
         }
     }
 }
@@ -262,6 +314,29 @@ impl From<&str> for SourceType {
             "spf_pivot" => SourceType::SpfPivot,
             "dmarc_pivot" => SourceType::DmarcPivot,
             "mx_pivot" => SourceType::MxPivot,
+            "otx" | "alienvault" => SourceType::Otx,
+            "hackertarget" => SourceType::HackerTarget,
+            "rapiddns" => SourceType::RapidDns,
+            "anubisdb" | "anubis" => SourceType::AnubisDb,
+            "urlscan" => SourceType::UrlScan,
+            "wayback" | "waybackarchive" => SourceType::Wayback,
+            "columbus" => SourceType::Columbus,
+            "digitorus" => SourceType::Digitorus,
+            "securitytrails" => SourceType::SecurityTrails,
+            "censys" => SourceType::Censys,
+            "chaos" => SourceType::Chaos,
+            "leakix" => SourceType::LeakIx,
+            "fullhunt" => SourceType::FullHunt,
+            "binaryedge" => SourceType::BinaryEdge,
+            "netlas" => SourceType::Netlas,
+            "dns_bruteforce" | "bruteforce" => SourceType::DnsBruteforce,
+            "dns_permutation" | "permutation" => SourceType::DnsPermutation,
+            "nsec_walk" | "nsec" => SourceType::NsecWalk,
+            "srv_record" | "srv" => SourceType::SrvRecord,
+            "cname_chain" | "cname" => SourceType::CnameChain,
+            "asn_netblock" => SourceType::AsnNetblock,
+            "rdap" => SourceType::Rdap,
+            "txt_verification" => SourceType::TxtVerification,
             _ => SourceType::UserInput,
         }
     }
@@ -269,20 +344,60 @@ impl From<&str> for SourceType {
 
 impl SourceType {
     /// Default confidence weight for an asset discovered solely via this source.
-    /// Lateral pivots (favicon/JARM/HTML/SPF/DMARC/MX) deliberately start low —
-    /// they can match unrelated SaaS tenants and need analyst review.
+    ///
+    /// The scale is deliberately tiered by *what the source actually observed*:
+    ///
+    /// - **1.0** — the analyst said so (seed / user input).
+    /// - **0.85–0.95** — the name was resolved or actively answered right now.
+    ///   Nothing beats a live DNS answer.
+    /// - **0.75–0.85** — a certificate authority logged the name to a public,
+    ///   append-only CT log. Names in CT were provably requested by whoever
+    ///   controlled the domain at issuance time.
+    /// - **0.6–0.75** — a third party observed the name in passive DNS, scan
+    ///   data or a web archive. Real, but possibly stale or third-party-owned.
+    /// - **0.3–0.5** — a *pivot*: this asset merely shares an attribute
+    ///   (favicon, JARM, analytics ID, mail relay, netblock) with a known asset.
+    ///   Shared attributes are shared by unrelated SaaS tenants all the time,
+    ///   so these need analyst review before they are treated as owned.
     pub fn confidence_weight(&self) -> f64 {
         match self {
-            SourceType::Seed => 1.0,
-            SourceType::UserInput => 1.0,
-            SourceType::Shodan
-            | SourceType::Virustotal
-            | SourceType::Crtsh
-            | SourceType::Certspotter => 0.8,
-            SourceType::TlsCertificate => 0.7,
-            SourceType::DnsResolution | SourceType::ReverseDns => 0.7,
-            SourceType::CidrExpansion => 0.5,
+            SourceType::Seed | SourceType::UserInput => 1.0,
+
+            // Observed live, by us.
+            SourceType::DnsResolution => 0.9,
+            SourceType::DnsBruteforce | SourceType::SrvRecord | SourceType::CnameChain => 0.85,
+            // A signed zone hands over its own contents; there is no guesswork.
+            SourceType::NsecWalk => 0.9,
+            SourceType::ReverseDns => 0.7,
             SourceType::HttpProbe | SourceType::PortScan => 0.6,
+            // Permutations are generated, then confirmed by resolution. The name
+            // resolves, but a wildcard-adjacent catch-all can still inflate this.
+            SourceType::DnsPermutation => 0.7,
+
+            // Certificate transparency and live certificates.
+            SourceType::Crtsh | SourceType::Certspotter => 0.85,
+            SourceType::Censys | SourceType::Digitorus => 0.8,
+            SourceType::TlsCertificate => 0.8,
+
+            // Passive DNS / internet-wide scan corpora.
+            SourceType::Shodan | SourceType::Virustotal => 0.75,
+            SourceType::SecurityTrails | SourceType::Chaos => 0.75,
+            SourceType::BinaryEdge | SourceType::Netlas | SourceType::FullHunt => 0.7,
+            SourceType::Otx | SourceType::LeakIx | SourceType::HackerTarget => 0.7,
+            SourceType::RapidDns | SourceType::AnubisDb | SourceType::Columbus => 0.65,
+            // Archives record what *was* live, which is not the same as what is.
+            SourceType::UrlScan => 0.65,
+            SourceType::Wayback => 0.55,
+
+            // Infrastructure attribution.
+            SourceType::CidrExpansion => 0.5,
+            SourceType::AsnNetblock => 0.5,
+            SourceType::Rdap => 0.5,
+            // A verification token proves the org *proved ownership* to a SaaS
+            // vendor — strong signal about tenancy, weak about the hostname.
+            SourceType::TxtVerification => 0.45,
+
+            // Lateral pivots: shared attribute, unproven ownership.
             SourceType::FaviconPivot
             | SourceType::JarmPivot
             | SourceType::AnalyticsIdPivot
@@ -291,6 +406,112 @@ impl SourceType {
             | SourceType::MxPivot => 0.3,
         }
     }
+
+    /// Whether this source is an independent third-party corpus.
+    ///
+    /// Corroboration only means something between *independent* observers.
+    /// Two CT aggregators reading the same logs are one observation, not two,
+    /// so they are grouped into a single evidence class by
+    /// [`SourceType::evidence_class`].
+    pub fn is_passive_corpus(&self) -> bool {
+        matches!(
+            self,
+            SourceType::Shodan
+                | SourceType::Virustotal
+                | SourceType::Crtsh
+                | SourceType::Certspotter
+                | SourceType::Otx
+                | SourceType::HackerTarget
+                | SourceType::RapidDns
+                | SourceType::AnubisDb
+                | SourceType::UrlScan
+                | SourceType::Wayback
+                | SourceType::Columbus
+                | SourceType::Digitorus
+                | SourceType::SecurityTrails
+                | SourceType::Censys
+                | SourceType::Chaos
+                | SourceType::LeakIx
+                | SourceType::FullHunt
+                | SourceType::BinaryEdge
+                | SourceType::Netlas
+        )
+    }
+
+    /// The class of evidence this source represents.
+    ///
+    /// Counting raw sources overstates confidence: crt.sh, CertSpotter, Censys
+    /// and Digitorus all read the same certificate transparency logs, so four
+    /// hits there is still one independent fact. Confidence scoring counts
+    /// distinct classes instead.
+    pub fn evidence_class(&self) -> EvidenceClass {
+        match self {
+            SourceType::Crtsh
+            | SourceType::Certspotter
+            | SourceType::Censys
+            | SourceType::Digitorus
+            | SourceType::TlsCertificate => EvidenceClass::CertificateTransparency,
+
+            SourceType::Otx
+            | SourceType::Virustotal
+            | SourceType::SecurityTrails
+            | SourceType::HackerTarget
+            | SourceType::RapidDns
+            | SourceType::AnubisDb
+            | SourceType::Columbus
+            | SourceType::Chaos => EvidenceClass::PassiveDns,
+
+            SourceType::Shodan
+            | SourceType::BinaryEdge
+            | SourceType::Netlas
+            | SourceType::FullHunt
+            | SourceType::LeakIx => EvidenceClass::InternetScan,
+
+            SourceType::UrlScan | SourceType::Wayback => EvidenceClass::WebArchive,
+
+            SourceType::DnsResolution
+            | SourceType::ReverseDns
+            | SourceType::DnsBruteforce
+            | SourceType::DnsPermutation
+            | SourceType::NsecWalk
+            | SourceType::SrvRecord
+            | SourceType::CnameChain
+            | SourceType::TxtVerification => EvidenceClass::ActiveDns,
+
+            SourceType::HttpProbe | SourceType::PortScan => EvidenceClass::ActiveProbe,
+
+            SourceType::CidrExpansion | SourceType::AsnNetblock | SourceType::Rdap => {
+                EvidenceClass::Registry
+            }
+
+            SourceType::FaviconPivot
+            | SourceType::JarmPivot
+            | SourceType::AnalyticsIdPivot
+            | SourceType::SpfPivot
+            | SourceType::DmarcPivot
+            | SourceType::MxPivot => EvidenceClass::SharedAttribute,
+
+            SourceType::Seed | SourceType::UserInput => EvidenceClass::Declared,
+        }
+    }
+}
+
+/// Independent classes of evidence for an asset's existence and ownership.
+///
+/// Two sources in the same class are not independent corroboration — see
+/// [`SourceType::evidence_class`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceClass {
+    Declared,
+    CertificateTransparency,
+    PassiveDns,
+    InternetScan,
+    WebArchive,
+    ActiveDns,
+    ActiveProbe,
+    Registry,
+    SharedAttribute,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

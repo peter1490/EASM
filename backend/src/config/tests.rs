@@ -69,6 +69,35 @@ mod tests {
             "MAX_ACTIVE_SCANS_PER_USER",
             "MAX_ACTIVE_DISCOVERY_PER_USER",
             "REINDEX_MIN_INTERVAL_SECONDS",
+            // Passive OSINT fan-out
+            "SECURITYTRAILS_API_KEY",
+            "CENSYS_API_KEY",
+            "CENSYS_ORG_ID",
+            "CHAOS_API_KEY",
+            "LEAKIX_API_KEY",
+            "FULLHUNT_API_KEY",
+            "BINARYEDGE_API_KEY",
+            "NETLAS_API_KEY",
+            "OSINT_SOURCE_CONCURRENCY",
+            "OSINT_SOURCE_TIMEOUT_SECONDS",
+            "OSINT_MAX_RESULTS_PER_SOURCE",
+            // Active DNS discovery
+            "ENABLE_DNS_BRUTEFORCE",
+            "ENABLE_DNS_PERMUTATIONS",
+            "ENABLE_NSEC_WALK",
+            "ENABLE_SRV_PROBE",
+            "DNS_BRUTEFORCE_WORDLIST_PATH",
+            "DNS_BRUTEFORCE_MAX_WORDS",
+            "DNS_PERMUTATION_MAX_CANDIDATES",
+            "DNS_PERMUTATION_MAX_SEEDS",
+            "ACTIVE_DNS_CONCURRENCY",
+            // Infrastructure attribution
+            "ENABLE_ASN_DISCOVERY",
+            "ENABLE_RDAP_LOOKUP",
+            "ENABLE_SAAS_TENANT_DISCOVERY",
+            "ENABLE_CNAME_CHAIN_ANALYSIS",
+            "ASN_MAX_PREFIXES",
+            "REVERSE_DNS_SWEEP_MAX_HOSTS",
         ];
 
         // Store original values for all config variables
@@ -156,8 +185,34 @@ mod tests {
         assert_eq!(settings.max_discovery_depth, 3);
         assert_eq!(settings.subdomain_enum_timeout, 60.0);
         assert!(settings.enable_wayback);
-        assert!(!settings.enable_urlscan);
+        // urlscan.io and OTX are key-free corpora and default on.
+        assert!(settings.enable_urlscan);
+        assert!(settings.enable_otx);
         assert_eq!(settings.related_asset_confidence_default, 0.3);
+
+        // Passive OSINT fan-out
+        assert_eq!(settings.osint_source_concurrency, 12);
+        assert_eq!(settings.osint_source_timeout_seconds, 25.0);
+        assert_eq!(settings.osint_max_results_per_source, 5000);
+
+        // Active DNS discovery is on by default; wildcard detection gates it.
+        assert!(settings.enable_dns_bruteforce);
+        assert!(settings.enable_dns_permutations);
+        assert!(settings.enable_nsec_walk);
+        assert!(settings.enable_srv_probe);
+        assert_eq!(settings.dns_bruteforce_max_words, 2000);
+        assert_eq!(settings.dns_permutation_max_candidates, 5000);
+        assert_eq!(settings.dns_permutation_max_seeds, 50);
+        assert_eq!(settings.active_dns_concurrency, 50);
+        assert!(settings.dns_bruteforce_wordlist_path.is_none());
+
+        // Infrastructure attribution
+        assert!(settings.enable_asn_discovery);
+        assert!(settings.enable_rdap_lookup);
+        assert!(settings.enable_saas_tenant_discovery);
+        assert!(settings.enable_cname_chain_analysis);
+        assert_eq!(settings.asn_max_prefixes, 64);
+        assert_eq!(settings.reverse_dns_sweep_max_hosts, 256);
 
         // Test rate limiting defaults
         assert!(settings.rate_limit_enabled);
@@ -380,6 +435,77 @@ mod tests {
             let result = Settings::new();
             assert!(result.is_err());
         });
+
+        // OSINT fan-out: unbounded concurrency would hammer every aggregator at
+        // once, and zero would stall discovery entirely.
+        for value in ["0", "128"] {
+            with_env_vars(vec![("OSINT_SOURCE_CONCURRENCY", value)], || {
+                assert!(
+                    Settings::new().is_err(),
+                    "concurrency {value} must be rejected"
+                );
+            });
+        }
+
+        with_env_vars(vec![("OSINT_SOURCE_TIMEOUT_SECONDS", "0")], || {
+            assert!(Settings::new().is_err());
+        });
+
+        with_env_vars(vec![("OSINT_MAX_RESULTS_PER_SOURCE", "0")], || {
+            assert!(Settings::new().is_err());
+        });
+
+        // Active DNS: the caps exist so a brute force cannot become a denial of
+        // service against the target's own resolvers.
+        with_env_vars(vec![("ACTIVE_DNS_CONCURRENCY", "0")], || {
+            assert!(Settings::new().is_err());
+        });
+
+        with_env_vars(vec![("DNS_BRUTEFORCE_MAX_WORDS", "2000000")], || {
+            assert!(Settings::new().is_err());
+        });
+
+        with_env_vars(vec![("DNS_PERMUTATION_MAX_CANDIDATES", "500000")], || {
+            assert!(Settings::new().is_err());
+        });
+    }
+
+    #[test]
+    fn test_osint_discovery_env_overrides() {
+        with_env_vars(
+            vec![
+                ("OSINT_SOURCE_CONCURRENCY", "20"),
+                ("OSINT_SOURCE_TIMEOUT_SECONDS", "45.5"),
+                ("ENABLE_DNS_BRUTEFORCE", "false"),
+                ("ENABLE_NSEC_WALK", "0"),
+                ("ENABLE_ASN_DISCOVERY", "false"),
+                ("REVERSE_DNS_SWEEP_MAX_HOSTS", "0"),
+                ("SECURITYTRAILS_API_KEY", "st-key"),
+                ("CENSYS_API_KEY", "censys-pat"),
+                ("DNS_BRUTEFORCE_WORDLIST_PATH", "/opt/wordlists/subs.txt"),
+            ],
+            || {
+                let settings = Settings::new().expect("Failed to create settings");
+
+                assert_eq!(settings.osint_source_concurrency, 20);
+                assert_eq!(settings.osint_source_timeout_seconds, 45.5);
+                assert!(!settings.enable_dns_bruteforce);
+                assert!(!settings.enable_nsec_walk);
+                assert!(!settings.enable_asn_discovery);
+                // 0 is a meaningful value here: it disables the sweep.
+                assert_eq!(settings.reverse_dns_sweep_max_hosts, 0);
+                assert_eq!(settings.securitytrails_api_key.as_deref(), Some("st-key"));
+                assert_eq!(settings.censys_api_key.as_deref(), Some("censys-pat"));
+                assert_eq!(
+                    settings.dns_bruteforce_wordlist_path.as_deref(),
+                    Some("/opt/wordlists/subs.txt")
+                );
+
+                // Untouched toggles keep their defaults.
+                assert!(settings.enable_dns_permutations);
+                assert!(settings.enable_srv_probe);
+            },
+        );
     }
 
     #[test]

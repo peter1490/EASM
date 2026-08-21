@@ -14,6 +14,10 @@ pub enum SecurityScanType {
     PortScan,
     TlsAnalysis,
     HttpProbe,
+    /// DNS, email authentication and zone hygiene, with no active probing of the
+    /// host itself. Cheap and safe enough to run on a schedule against every
+    /// domain, which is what makes it worth having apart from `Full`.
+    DnsAudit,
     ThreatIntel,
     Full,
 }
@@ -30,6 +34,7 @@ impl std::fmt::Display for SecurityScanType {
             SecurityScanType::PortScan => write!(f, "port_scan"),
             SecurityScanType::TlsAnalysis => write!(f, "tls_analysis"),
             SecurityScanType::HttpProbe => write!(f, "http_probe"),
+            SecurityScanType::DnsAudit => write!(f, "dns_audit"),
             SecurityScanType::ThreatIntel => write!(f, "threat_intel"),
             SecurityScanType::Full => write!(f, "full"),
         }
@@ -42,6 +47,7 @@ impl From<&str> for SecurityScanType {
             "port_scan" | "ports" => SecurityScanType::PortScan,
             "tls_analysis" | "tls" | "ssl" => SecurityScanType::TlsAnalysis,
             "http_probe" | "http" | "web" => SecurityScanType::HttpProbe,
+            "dns_audit" | "dns" => SecurityScanType::DnsAudit,
             "threat_intel" | "threat" | "intel" => SecurityScanType::ThreatIntel,
             _ => SecurityScanType::Full,
         }
@@ -154,7 +160,7 @@ pub struct SecurityScanDetailResponse {
 // Security Finding - Issues found during scans
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FindingSeverity {
     Critical,
@@ -310,10 +316,23 @@ pub enum FindingType {
     CertificateRevoked,
     CertificateNotYetValid,
     CertificateMissingSan,
+    CertificateUntrusted,
+    CertificateLifetimeExcessive,
+    CertificateTransparencyMissing,
     WeakSignatureAlgorithm,
     WeakKeyStrength,
+    NoForwardSecrecy,
+    TlsVulnerability,
+    TlsMisconfiguration,
+    MissingOcspStapling,
     // HTTP security findings
     MissingSecurityHeader,
+    WeakSecurityHeader,
+    CorsMisconfiguration,
+    DangerousHttpMethod,
+    MixedContent,
+    MissingSri,
+    SecurityTxtMissing,
     InsecureCookies,
     HttpsNotEnforced,
     SensitiveDataExposed,
@@ -339,7 +358,17 @@ pub enum FindingType {
     MissingDmarc,
     WeakDmarcPolicy,
     MissingDnssec,
+    DnssecMisconfigured,
     MissingCaa,
+    CaaIncomplete,
+    WeakSpfPolicy,
+    SpfLookupLimitExceeded,
+    MultipleSpfRecords,
+    MissingMtaSts,
+    MtaStsMisconfigured,
+    MissingTlsRpt,
+    NameserverMisconfigured,
+    SoaMisconfigured,
     DnsResolutionFailed,
     // Vulnerability findings
     KnownCve,
@@ -376,10 +405,23 @@ impl std::fmt::Display for FindingType {
             FindingType::CertificateChainIncomplete => "certificate_chain_incomplete",
             FindingType::CertificateNotYetValid => "certificate_not_yet_valid",
             FindingType::CertificateMissingSan => "certificate_missing_san",
+            FindingType::CertificateUntrusted => "certificate_untrusted",
+            FindingType::CertificateLifetimeExcessive => "certificate_lifetime_excessive",
+            FindingType::CertificateTransparencyMissing => "certificate_transparency_missing",
             FindingType::WeakSignatureAlgorithm => "weak_signature_algorithm",
             FindingType::WeakKeyStrength => "weak_key_strength",
+            FindingType::NoForwardSecrecy => "no_forward_secrecy",
+            FindingType::TlsVulnerability => "tls_vulnerability",
+            FindingType::TlsMisconfiguration => "tls_misconfiguration",
+            FindingType::MissingOcspStapling => "missing_ocsp_stapling",
             FindingType::CertificateRevoked => "certificate_revoked",
             FindingType::MissingSecurityHeader => "missing_security_header",
+            FindingType::WeakSecurityHeader => "weak_security_header",
+            FindingType::CorsMisconfiguration => "cors_misconfiguration",
+            FindingType::DangerousHttpMethod => "dangerous_http_method",
+            FindingType::MixedContent => "mixed_content",
+            FindingType::MissingSri => "missing_sri",
+            FindingType::SecurityTxtMissing => "security_txt_missing",
             FindingType::InsecureCookies => "insecure_cookies",
             FindingType::HttpsNotEnforced => "https_not_enforced",
             FindingType::SensitiveDataExposed => "sensitive_data_exposed",
@@ -402,7 +444,17 @@ impl std::fmt::Display for FindingType {
             FindingType::MissingDmarc => "missing_dmarc",
             FindingType::WeakDmarcPolicy => "weak_dmarc_policy",
             FindingType::MissingDnssec => "missing_dnssec",
+            FindingType::DnssecMisconfigured => "dnssec_misconfigured",
             FindingType::MissingCaa => "missing_caa",
+            FindingType::CaaIncomplete => "caa_incomplete",
+            FindingType::WeakSpfPolicy => "weak_spf_policy",
+            FindingType::SpfLookupLimitExceeded => "spf_lookup_limit_exceeded",
+            FindingType::MultipleSpfRecords => "multiple_spf_records",
+            FindingType::MissingMtaSts => "missing_mta_sts",
+            FindingType::MtaStsMisconfigured => "mta_sts_misconfigured",
+            FindingType::MissingTlsRpt => "missing_tls_rpt",
+            FindingType::NameserverMisconfigured => "nameserver_misconfigured",
+            FindingType::SoaMisconfigured => "soa_misconfigured",
             FindingType::DnsResolutionFailed => "dns_resolution_failed",
             FindingType::KnownCve => "known_cve",
             FindingType::ExploitableVulnerability => "exploitable_vulnerability",
@@ -539,6 +591,12 @@ pub struct ScanConfig {
     pub timeout_seconds: Option<f64>,
     /// Whether to do deep TLS analysis
     pub deep_tls_analysis: Option<bool>,
+    /// Run the exhaustive form of each scanner: full cipher-suite enumeration,
+    /// AXFR against every nameserver, the whole DKIM selector list, and the
+    /// sensitive-path probe set. Defaults to on — it is the point of the scan —
+    /// but costs a few hundred extra connections, so it can be turned off for a
+    /// fast sweep.
+    pub deep: Option<bool>,
     /// Whether to check threat intelligence
     pub check_threat_intel: Option<bool>,
     /// HTTP paths to probe
@@ -565,6 +623,14 @@ pub struct ScanResultSummary {
     pub proxy_detection: Option<ProxyDetectionResult>,
     pub technology_stack: Option<Vec<String>>,
     pub risk_factors: Option<Vec<RiskFactor>>,
+    // The deep scanner results. These supersede the flattened fields above,
+    // which are kept so nothing that already reads the summary breaks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<crate::services::scanners::tls_scan::TlsScanResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dns: Option<crate::services::scanners::dns_scan::DnsScanResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http: Option<crate::services::scanners::http_scan::HttpScanResult>,
 }
 
 /// Detected service on an open port

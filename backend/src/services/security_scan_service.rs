@@ -23,7 +23,7 @@ use crate::{
     error::ApiError,
     models::{
         Asset, AssetType, DetectedService, DnsIssue, DnsSecurityResult, FindingSeverity,
-        MissingSecurityHeader, ProxyDetectionResult, RiskFactor, ScanResultSummary,
+        MissingSecurityHeader, ProxyDetectionResult, RiskFactor, ScanConfig, ScanResultSummary,
         SecurityFinding, SecurityFindingCreate, SecurityHeadersResult, SecurityScan,
         SecurityScanCreate, SecurityScanType, TlsCertificateDetails, TlsCertificateInfo,
         VulnerabilityResult,
@@ -36,6 +36,7 @@ use crate::{
             TlsAnalyzer,
         },
         risk_service::RiskService,
+        scanners::{dns_scan, http_scan, tls_scan, ScanFinding},
         task_manager::{TaskContext, TaskManager, TaskType},
     },
     utils::{
@@ -49,6 +50,21 @@ use crate::{
 };
 
 const DEFAULT_IP_HTTP_FALLBACK_PORTS: [u16; 4] = [443, 8443, 80, 8080];
+
+/// Finding types that only a deep scan can produce, because the probe that finds
+/// them — sensitive-path fetching, HTTP method probing, the AXFR attempt — is
+/// skipped when `ScanConfig.deep` is false.
+///
+/// They are excluded from auto-resolution on a shallow scan. Without that, a
+/// quick sweep would close an existing critical `.env` exposure or an open zone
+/// transfer purely by not having looked for it.
+const DEEP_ONLY_FINDING_TYPES: &[&str] = &[
+    "sensitive_data_exposed",
+    "debug_endpoint_exposed",
+    "security_txt_missing",
+    "dangerous_http_method",
+    "zone_transfer_allowed",
+];
 
 /// Cap on how many referenced JS/CSS assets we fetch per page when recovering
 /// version banners for versionless technology detections.
@@ -124,6 +140,8 @@ struct HttpSecurityAnalysisOutcome {
     proxy_detection: ProxyDetectionResult,
     vulnerabilities: Vec<VulnerabilityResult>,
     technology_stack: Vec<String>,
+    /// The deep HTTP assessment. `None` when the endpoint did not answer.
+    http: Option<http_scan::HttpScanResult>,
 }
 
 pub struct SecurityScanService {
@@ -451,10 +469,13 @@ impl SecurityScanService {
             .ok_or_else(|| ApiError::NotFound("Scan not found".to_string()))?;
 
         let scan_type = SecurityScanType::from(scan.scan_type.as_str());
+        // A malformed config must not fail the scan; the defaults are the ones a
+        // caller who sent nothing would get.
+        let config: ScanConfig = serde_json::from_value(scan.config.clone()).unwrap_or_default();
 
         // Execute appropriate scan based on asset type and scan type
         let result = self
-            .execute_scan_internal(&ctx, scan_id, &asset, &scan_type, company_id)
+            .execute_scan_internal(&ctx, scan_id, &asset, &scan_type, &config, company_id)
             .await;
 
         // Finalize scan
@@ -465,6 +486,7 @@ impl SecurityScanService {
                         scan_id,
                         asset.id,
                         &scan_type,
+                        config.deep.unwrap_or(true),
                         scan_started_at,
                         company_id,
                     )
@@ -508,12 +530,14 @@ impl SecurityScanService {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_scan_internal(
         &self,
         ctx: &TaskContext,
         scan_id: Uuid,
         asset: &Asset,
         scan_type: &SecurityScanType,
+        config: &ScanConfig,
         company_id: Uuid,
     ) -> Result<ScanResultSummary, ApiError> {
         let mut summary = ScanResultSummary::default();
@@ -526,7 +550,8 @@ impl SecurityScanService {
                     ctx,
                     scan_id,
                     asset,
-                    &scan_type,
+                    scan_type,
+                    config,
                     &mut summary,
                     &mut risk_factors,
                     company_id,
@@ -538,7 +563,8 @@ impl SecurityScanService {
                     ctx,
                     scan_id,
                     asset,
-                    &scan_type,
+                    scan_type,
+                    config,
                     &mut summary,
                     &mut risk_factors,
                     company_id,
@@ -584,28 +610,37 @@ impl SecurityScanService {
     // DOMAIN SCANNING
     // ========================================================================
 
+    #[allow(clippy::too_many_arguments)]
     async fn scan_domain(
         &self,
         ctx: &TaskContext,
         scan_id: Uuid,
         asset: &Asset,
         scan_type: &SecurityScanType,
+        config: &ScanConfig,
         summary: &mut ScanResultSummary,
         risk_factors: &mut Vec<RiskFactor>,
         company_id: Uuid,
     ) -> Result<(), ApiError> {
         let domain = &asset.identifier;
         let settings = self.current_settings();
+        // Exhaustive by default: a scan that skips cipher enumeration and the
+        // zone-transfer attempt is not the scan this is for.
+        let deep_scan = config.deep.unwrap_or(true);
         let mut internal_only = false;
 
         // Step 1: DNS security checks
         ctx.update_progress(0.1, Some("Checking DNS security".to_string()))
             .await?;
-        if matches!(scan_type, SecurityScanType::Full) {
-            let dns_result = self
-                .check_dns_security(scan_id, asset, domain, company_id)
+        if matches!(
+            scan_type,
+            SecurityScanType::Full | SecurityScanType::DnsAudit
+        ) {
+            let (legacy, deep) = self
+                .check_dns_security(scan_id, asset, domain, deep_scan, company_id)
                 .await?;
-            summary.dns_security = Some(dns_result);
+            summary.dns_security = Some(legacy);
+            summary.dns = Some(deep);
         }
 
         // Step 2: Resolve to IP and scan ports with service detection
@@ -660,12 +695,14 @@ impl SecurityScanService {
                         ctx.update_progress(0.5, Some("Analyzing HTTP security".to_string()))
                             .await?;
                         let http_outcome = self
-                            .analyze_http_security(scan_id, asset, domain, risk_factors, company_id)
+                            .analyze_http_security(
+                                scan_id, asset, domain, deep_scan, risk_factors, company_id,
+                            )
                             .await?;
                         summary.security_headers = Some(http_outcome.security_headers);
                         summary.proxy_detection = Some(http_outcome.proxy_detection);
-                        summary.http_status =
-                            summary.security_headers.as_ref().and_then(|_| Some(200));
+                        summary.http_status = http_outcome.http.as_ref().map(|h| h.status as i32);
+                        summary.http = http_outcome.http;
                         summary.vulnerabilities_found = Self::merge_vulnerability_results(
                             summary.vulnerabilities_found.take(),
                             http_outcome.vulnerabilities,
@@ -713,18 +750,23 @@ impl SecurityScanService {
             } else {
                 ctx.update_progress(0.7, Some("Analyzing TLS".to_string()))
                     .await?;
-                if let Some(tls_details) = self
+                if let Some((tls_details, deep)) = self
                     .analyze_tls_with_findings(
                         scan_id,
                         asset,
                         domain,
                         443,
+                        deep_scan,
                         risk_factors,
                         company_id,
                     )
                     .await?
                 {
                     summary.tls_certificates = Some(vec![tls_details]);
+                    if let Some(deep) = deep {
+                        summary.tls_version = deep.highest_protocol.clone();
+                        summary.tls = Some(deep);
+                    }
                 }
             }
         }
@@ -750,12 +792,14 @@ impl SecurityScanService {
     // IP SCANNING
     // ========================================================================
 
+    #[allow(clippy::too_many_arguments)]
     async fn scan_ip(
         &self,
         ctx: &TaskContext,
         scan_id: Uuid,
         asset: &Asset,
         scan_type: &SecurityScanType,
+        config: &ScanConfig,
         summary: &mut ScanResultSummary,
         risk_factors: &mut Vec<RiskFactor>,
         company_id: Uuid,
@@ -765,6 +809,7 @@ impl SecurityScanService {
             .parse()
             .map_err(|e| ApiError::Validation(format!("Invalid IP: {}", e)))?;
         let settings = self.current_settings();
+        let deep_scan = config.deep.unwrap_or(true);
 
         if !self.is_ip_allowed(&settings, ip) {
             tracing::info!(
@@ -810,11 +855,14 @@ impl SecurityScanService {
                 .await
             {
                 let http_outcome = self
-                    .analyze_http_security(scan_id, asset, &target, risk_factors, company_id)
+                    .analyze_http_security(
+                        scan_id, asset, &target, deep_scan, risk_factors, company_id,
+                    )
                     .await?;
                 summary.security_headers = Some(http_outcome.security_headers);
                 summary.proxy_detection = Some(http_outcome.proxy_detection);
-                summary.http_status = summary.security_headers.as_ref().map(|_| 200);
+                summary.http_status = http_outcome.http.as_ref().map(|h| h.status as i32);
+                summary.http = http_outcome.http;
                 summary.vulnerabilities_found = Self::merge_vulnerability_results(
                     summary.vulnerabilities_found.take(),
                     http_outcome.vulnerabilities,
@@ -838,18 +886,23 @@ impl SecurityScanService {
             let ports = summary.open_ports.as_ref().cloned().unwrap_or_default();
             for port in &ports {
                 if matches!(port, 443 | 8443) {
-                    if let Some(tls_details) = self
+                    if let Some((tls_details, deep)) = self
                         .analyze_tls_with_findings(
                             scan_id,
                             asset,
                             &ip.to_string(),
                             *port,
+                            deep_scan,
                             risk_factors,
                             company_id,
                         )
                         .await?
                     {
                         summary.tls_certificates = Some(vec![tls_details]);
+                        if let Some(deep) = deep {
+                            summary.tls_version = deep.highest_protocol.clone();
+                            summary.tls = Some(deep);
+                        }
                     }
                     break;
                 }
@@ -1005,9 +1058,24 @@ impl SecurityScanService {
             }
 
             if let Some(host) = host_candidates.first() {
-                tls_details = self
-                    .analyze_tls_with_findings(scan_id, asset, host, 443, risk_factors, company_id)
-                    .await?;
+                if let Some((details, deep)) = self
+                    .analyze_tls_with_findings(
+                        scan_id,
+                        asset,
+                        host,
+                        443,
+                        true,
+                        risk_factors,
+                        company_id,
+                    )
+                    .await?
+                {
+                    tls_details = Some(details);
+                    if let Some(deep) = deep {
+                        summary.tls_version = deep.highest_protocol.clone();
+                        summary.tls = Some(deep);
+                    }
+                }
             }
         }
 
@@ -1424,11 +1492,13 @@ impl SecurityScanService {
     // HTTP SECURITY ANALYSIS
     // ========================================================================
 
+    #[allow(clippy::too_many_arguments)]
     async fn analyze_http_security(
         &self,
         scan_id: Uuid,
         asset: &Asset,
         target: &str,
+        deep: bool,
         risk_factors: &mut Vec<RiskFactor>,
         company_id: Uuid,
     ) -> Result<HttpSecurityAnalysisOutcome, ApiError> {
@@ -1490,6 +1560,7 @@ impl SecurityScanService {
                     proxy_detection: proxy_result,
                     vulnerabilities,
                     technology_stack,
+                    http: None,
                 });
             }
         };
@@ -1727,7 +1798,12 @@ impl SecurityScanService {
             .await?;
         }
 
-        // Check for security headers
+        // Security-header inventory for the summary panel.
+        //
+        // The *findings* for these now come from `http_scan`, which grades a
+        // header's value rather than its presence — the difference between "CSP
+        // present" and "CSP that permits 'unsafe-inline' and so stops nothing".
+        // This loop only fills in the summary shape the UI already renders.
         let mut missing_headers = Vec::new();
         let mut present_headers = Vec::new();
         let mut score: u8 = 100;
@@ -1774,31 +1850,6 @@ impl SecurityScanService {
                     description: desc.to_string(),
                     recommendation: rec.to_string(),
                 });
-
-                // Create finding for missing security header.
-                //
-                // Straight through from the table. This used to cap at High and floor
-                // at Low — a fudge for grades that ran too hot, which also meant an
-                // "info" grade could never produce an info finding. `SECURITY_HEADERS`
-                // is now graded so that its own values are the ones we want.
-                let finding_severity = FindingSeverity::from(*severity);
-
-                self.create_finding(
-                    scan_id,
-                    asset.id,
-                    "missing_security_header",
-                    finding_severity,
-                    &format!("Missing Security Header: {}", header),
-                    Some(desc),
-                    json!({
-                        "header": header,
-                        "severity": severity,
-                        "recommendation": rec,
-                        "url": url,
-                    }),
-                    company_id,
-                )
-                .await?;
             }
         }
 
@@ -1806,31 +1857,12 @@ impl SecurityScanService {
         security_result.headers_missing = missing_headers;
         security_result.score = score;
 
-        // Check for server version disclosure
+        // Server banner, for the summary. The `server_version_exposed` finding
+        // itself comes from `http_scan`, which only raises it when the header
+        // actually carries a version rather than a bare product name.
         if let Some(server) = headers_map.get("server") {
             security_result.server_info = Some(server.clone());
-
-            // Check if version is disclosed
-            if server.contains('/') || regex::Regex::new(r"\d+\.\d+").unwrap().is_match(server) {
-                self.create_finding(
-                    scan_id,
-                    asset.id,
-                    "server_version_exposed",
-                    FindingSeverity::Low,
-                    "Server Version Disclosed",
-                    Some(&format!(
-                        "Server header reveals version information: {}",
-                        server
-                    )),
-                    json!({
-                        "header": "Server",
-                        "value": server,
-                        "url": url,
-                    }),
-                    company_id,
-                )
-                .await?;
-
+            if server.contains('/') && server.chars().any(|c| c.is_ascii_digit()) {
                 risk_factors.push(RiskFactor {
                     factor_type: "information_disclosure".to_string(),
                     name: "Server version exposed".to_string(),
@@ -1840,6 +1872,56 @@ impl SecurityScanService {
                     data: json!({ "server": server }),
                 });
             }
+        }
+
+        // ------------------------------------------------------------------
+        // Deep HTTP assessment.
+        //
+        // The fingerprinting above answers "what software is this"; the scanner
+        // below answers "how is it configured", which is a different question and
+        // was previously reduced to a seven-entry presence check over header
+        // names. Its findings are written directly, and its structured result
+        // rides along in the summary.
+        // ------------------------------------------------------------------
+        let plain_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .danger_accept_invalid_certs(true)
+            .user_agent(BROWSER_USER_AGENT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(ApiError::HttpClient)?;
+
+        // The original target, not `page.final_url`: the fingerprinting fetch above
+        // has its own scheme fallback, so handing over its result would mean the
+        // HTTP scanner never attempts HTTPS itself — and could not tell a site
+        // that has no HTTPS from one whose HTTPS this scanner failed to reach.
+        let http_outcome =
+            http_scan::scan(&client, &plain_client, target, Duration::from_secs(10), deep).await;
+        self.record_scan_findings(scan_id, asset.id, http_outcome.findings, company_id)
+            .await?;
+        let deep_http = http_outcome.result;
+
+        // The header grade drives risk the way a reader would weight it.
+        if deep_http.observatory.score < 50 {
+            risk_factors.push(RiskFactor {
+                factor_type: "http".to_string(),
+                name: format!("HTTP security headers graded {}", deep_http.observatory.grade),
+                severity: if deep_http.observatory.score < 25 {
+                    "medium"
+                } else {
+                    "low"
+                }
+                .to_string(),
+                description: format!(
+                    "Mozilla Observatory score {} ({})",
+                    deep_http.observatory.score, deep_http.observatory.grade
+                ),
+                impact_score: if deep_http.observatory.score < 25 { 0.35 } else { 0.2 },
+                data: json!({
+                    "score": deep_http.observatory.score,
+                    "grade": deep_http.observatory.grade,
+                }),
+            });
         }
 
         // Check for proxy/WAF/CDN
@@ -1878,23 +1960,10 @@ impl SecurityScanService {
             }
         }
 
-        // HTTPS enforcement check
+        // HTTPS enforcement: the finding is `http_scan`'s, which can tell a
+        // server that only speaks HTTP from one the scanner could not reach over
+        // HTTPS. The risk factor stays here.
         if !security_result.is_https {
-            self.create_finding(
-                scan_id,
-                asset.id,
-                "https_not_enforced",
-                FindingSeverity::Medium,
-                "HTTPS Not Enforced",
-                Some("The asset is accessible over unencrypted HTTP"),
-                json!({
-                    "url": url,
-                    "recommendation": "Enforce HTTPS and implement HSTS",
-                }),
-                company_id,
-            )
-            .await?;
-
             risk_factors.push(RiskFactor {
                 factor_type: "encryption".to_string(),
                 name: "Unencrypted connection".to_string(),
@@ -1914,11 +1983,45 @@ impl SecurityScanService {
             });
         }
 
+        // Prefer the scanner's own view of what was present and missing: it looks
+        // at more headers, and at their values.
+        if deep_http.status != 0 {
+            security_result.headers_present = deep_http.headers_present.clone();
+            security_result.headers_missing = deep_http
+                .headers_missing
+                .iter()
+                .map(|name| MissingSecurityHeader {
+                    name: name.clone(),
+                    severity: "low".to_string(),
+                    description: format!("{} is not sent", name),
+                    recommendation: "Add the header with a restrictive value.".to_string(),
+                })
+                .collect();
+            // One number, from the published Observatory modifiers, instead of the
+            // ad-hoc subtraction this used to do.
+            security_result.score = deep_http.observatory.score.clamp(0, 100) as u8;
+            security_result.hsts_enabled = deep_http.hsts.present;
+            security_result.hsts_max_age = deep_http.hsts.max_age;
+            security_result.csp_present = deep_http.csp.present;
+            security_result.cookies_analyzed = deep_http
+                .cookies
+                .iter()
+                .map(|cookie| crate::models::CookieSecurityIssue {
+                    cookie_name: cookie.name.clone(),
+                    issues: cookie.issues.clone(),
+                    secure_flag: cookie.secure,
+                    http_only_flag: cookie.http_only,
+                    same_site: cookie.same_site.clone(),
+                })
+                .collect();
+        }
+
         Ok(HttpSecurityAnalysisOutcome {
             security_headers: security_result,
             proxy_detection: proxy_result,
             vulnerabilities: Self::dedupe_vulnerability_results(vulnerabilities),
             technology_stack,
+            http: (deep_http.status != 0).then_some(deep_http),
         })
     }
 
@@ -2551,512 +2654,286 @@ impl SecurityScanService {
     // DNS SECURITY CHECKS
     // ========================================================================
 
+    /// Deep DNS assessment, delegated to `scanners::dns_scan`.
+    ///
+    /// What this replaced asked five questions — is there an SPF record, a DMARC
+    /// record, a CAA record, any MX, any NS — and answered them with substring
+    /// matches. It could not tell `+all` from `-all`, could not count the RFC 7208
+    /// lookups that decide whether a policy works at all, never attempted a zone
+    /// transfer, and read CAA records through `format!("{:?}")` of the raw record.
     async fn check_dns_security(
         &self,
         scan_id: Uuid,
         asset: &Asset,
         domain: &str,
+        deep: bool,
         company_id: Uuid,
-    ) -> Result<DnsSecurityResult, ApiError> {
-        let mut result = DnsSecurityResult {
-            domain: domain.to_string(),
-            ..Default::default()
-        };
+    ) -> Result<(DnsSecurityResult, dns_scan::DnsScanResult), ApiError> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .user_agent(BROWSER_USER_AGENT)
+            .build()
+            .map_err(ApiError::HttpClient)?;
 
-        // Check MX records first to determine if domain handles email
-        // This affects the severity of missing SPF/DMARC findings
-        match self.dns_resolver.lookup_mx(domain).await {
-            Ok(mx_records) => {
-                result.has_mx = !mx_records.is_empty();
-                result.mx_records = mx_records
-                    .iter()
-                    .map(|(priority, exchange)| format!("{} {}", priority, exchange))
-                    .collect();
-            }
-            Err(_) => {
-                result.has_mx = false;
-            }
-        }
+        let outcome = dns_scan::scan(
+            &self.dns_resolver,
+            &client,
+            domain,
+            Duration::from_secs(6),
+            deep,
+        )
+        .await;
 
-        // Check SPF record
-        match self.dns_resolver.lookup_txt(&format!("{}.", domain)).await {
-            Ok(records) => {
-                for record in &records {
-                    if record.starts_with("v=spf1") {
-                        result.has_spf = true;
-                        result.spf_record = Some(record.clone());
-                        result.spf_valid = !record.contains("+all"); // +all is too permissive
-
-                        if record.contains("+all") {
-                            result.spf_issues.push(
-                                "SPF record contains +all which allows any IP to send mail"
-                                    .to_string(),
-                            );
-                        }
-                        if record.contains("~all") {
-                            result.spf_issues.push(
-                                "SPF record uses soft fail (~all), consider using hard fail (-all)"
-                                    .to_string(),
-                            );
-                        }
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-
-        // Only flag missing SPF if domain has MX records (handles email)
-        if !result.has_spf && result.has_mx {
-            self.create_finding(
-                scan_id,
-                asset.id,
-                "missing_spf",
-                FindingSeverity::Medium,
-                "Missing SPF Record",
-                Some("No SPF record found. This allows anyone to send email pretending to be from this domain."),
-                json!({
-                    "domain": domain,
-                    "recommendation": "Add an SPF record to specify authorized mail servers",
-                }),
-                company_id,
-            )
+        self.record_scan_findings(scan_id, asset.id, outcome.findings, company_id)
             .await?;
 
-            result.issues.push(DnsIssue {
-                issue_type: "missing_spf".to_string(),
-                severity: "medium".to_string(),
-                title: "Missing SPF Record".to_string(),
-                description: "No SPF record found for domain with active mail servers".to_string(),
-                remediation: "Add an SPF record: v=spf1 include:_spf.google.com -all".to_string(),
-            });
+        Ok((Self::legacy_dns_summary(&outcome.result), outcome.result))
+    }
+
+    /// Project the deep result onto the `DnsSecurityResult` shape the scan
+    /// summary has always carried, so existing consumers keep working while the
+    /// richer `dns` field carries everything new.
+    fn legacy_dns_summary(result: &dns_scan::DnsScanResult) -> DnsSecurityResult {
+        DnsSecurityResult {
+            domain: result.domain.clone(),
+            has_mx: result.email.has_mx,
+            mx_records: result.records.mx.clone(),
+            has_spf: result.email.spf.present,
+            spf_record: result.email.spf.record.clone(),
+            spf_valid: result.email.spf.valid,
+            spf_issues: result.email.spf.issues.clone(),
+            has_dkim: !result.email.dkim_selectors_found.is_empty(),
+            dkim_selectors_found: result.email.dkim_selectors_found.clone(),
+            has_dmarc: result.email.dmarc.present,
+            dmarc_record: result.email.dmarc.record.clone(),
+            dmarc_policy: result.email.dmarc.policy.clone(),
+            dmarc_issues: result.email.dmarc.issues.clone(),
+            has_dnssec: result.dnssec.zone_signed,
+            dnssec_valid: result
+                .dnssec
+                .checked
+                .then_some(result.dnssec.zone_signed && result.dnssec.delegation_signed),
+            has_caa: result.caa_present,
+            caa_records: result
+                .records
+                .caa
+                .iter()
+                .map(|caa| format!("{} {}", caa.tag, caa.value))
+                .collect(),
+            zone_transfer_possible: result.zone_transfer_possible,
+            nameservers: result
+                .nameservers
+                .nameservers
+                .iter()
+                .map(|ns| ns.hostname.clone())
+                .collect(),
+            issues: result
+                .nameservers
+                .issues
+                .iter()
+                .map(|issue| DnsIssue {
+                    issue_type: "nameserver_misconfigured".to_string(),
+                    severity: issue.severity.clone(),
+                    title: "Nameserver configuration".to_string(),
+                    description: issue.message.clone(),
+                    remediation: "Delegate at least two nameservers on separate networks."
+                        .to_string(),
+                })
+                .collect(),
         }
-
-        // Check DMARC record
-        match self
-            .dns_resolver
-            .lookup_txt(&format!("_dmarc.{}.", domain))
-            .await
-        {
-            Ok(records) => {
-                for record in &records {
-                    if record.starts_with("v=DMARC1") {
-                        result.has_dmarc = true;
-                        result.dmarc_record = Some(record.clone());
-
-                        // Parse policy
-                        if let Some(policy_match) = regex::Regex::new(r"p=(\w+)")
-                            .ok()
-                            .and_then(|re| re.captures(record))
-                        {
-                            result.dmarc_policy = Some(policy_match[1].to_string());
-
-                            if &policy_match[1] == "none" {
-                                result.dmarc_issues.push(
-                                    "DMARC policy is 'none' - emails are not rejected".to_string(),
-                                );
-
-                                self.create_finding(
-                                    scan_id,
-                                    asset.id,
-                                    "weak_dmarc_policy",
-                                    FindingSeverity::Low,
-                                    "Weak DMARC Policy",
-                                    Some("DMARC policy is set to 'none', providing monitoring only"),
-                                    json!({
-                                        "domain": domain,
-                                        "policy": "none",
-                                        "recommendation": "Consider upgrading to p=quarantine or p=reject",
-                                    }),
-                                    company_id,
-                                )
-                                .await?;
-                            }
-                        }
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-
-        // Only flag missing DMARC if domain has MX records (handles email)
-        if !result.has_dmarc && result.has_mx {
-            self.create_finding(
-                scan_id,
-                asset.id,
-                "missing_dmarc",
-                FindingSeverity::Medium,
-                "Missing DMARC Record",
-                Some("No DMARC record found. Email authentication policies are not enforced."),
-                json!({
-                    "domain": domain,
-                    "recommendation": "Add a DMARC record at _dmarc.{domain}",
-                }),
-                company_id,
-            )
-            .await?;
-
-            result.issues.push(DnsIssue {
-                issue_type: "missing_dmarc".to_string(),
-                severity: "medium".to_string(),
-                title: "Missing DMARC Record".to_string(),
-                description: "No DMARC record found for domain with active mail servers"
-                    .to_string(),
-                remediation: "Add a DMARC record: v=DMARC1; p=reject; rua=mailto:dmarc@example.com"
-                    .to_string(),
-            });
-        }
-
-        // Check CAA records
-        match self.dns_resolver.lookup_caa(domain).await {
-            Ok(records) => {
-                result.has_caa = !records.is_empty();
-                result.caa_records = records;
-            }
-            Err(_) => {}
-        }
-
-        if !result.has_caa {
-            self.create_finding(
-                scan_id,
-                asset.id,
-                "missing_caa",
-                FindingSeverity::Low,
-                "Missing CAA Records",
-                Some("No CAA records found. Any CA can issue certificates for this domain."),
-                json!({
-                    "domain": domain,
-                    "recommendation": "Add CAA records to specify authorized Certificate Authorities",
-                }),
-                company_id,
-            )
-            .await?;
-        }
-
-        // Get nameservers
-        match self.dns_resolver.lookup_ns(domain).await {
-            Ok(ns) => {
-                result.nameservers = ns;
-            }
-            Err(_) => {}
-        }
-
-        Ok(result)
     }
 
     // ========================================================================
     // TLS ANALYSIS
     // ========================================================================
 
+    /// Deep TLS/SSL assessment, delegated to `scanners::tls_scan`.
+    ///
+    /// What this replaced fetched one certificate through `rustls` and checked its
+    /// dates, its issuer string and its key size. It could not report a single
+    /// protocol version or cipher suite, because `rustls` refuses to negotiate the
+    /// deprecated ones this is meant to find; it accepted any certificate rather
+    /// than validating the chain, so "untrusted" was unreachable; and the finding
+    /// types `weak_tls_version` and `weak_cipher_suite` existed in the taxonomy
+    /// with nothing able to emit them.
+    ///
+    /// The legacy `TlsCertificateDetails` is still produced so the scan summary
+    /// keeps its existing shape; the deep result rides alongside it.
+    #[allow(clippy::too_many_arguments)]
     async fn analyze_tls_with_findings(
         &self,
         scan_id: Uuid,
         asset: &Asset,
         host: &str,
         port: u16,
+        deep: bool,
         risk_factors: &mut Vec<RiskFactor>,
         company_id: Uuid,
-    ) -> Result<Option<TlsCertificateDetails>, ApiError> {
-        let mut tls_details = self.build_tls_details_from_analyzer(host, port).await;
-        if tls_details.is_none() {
-            tls_details = self.build_tls_details_from_fallback(host, port).await;
-        }
+    ) -> Result<Option<(TlsCertificateDetails, Option<tls_scan::TlsScanResult>)>, ApiError> {
+        let normalized = host.trim().trim_end_matches('.');
+        let addr = match tokio::net::lookup_host((normalized, port)).await {
+            Ok(mut addrs) => addrs.next(),
+            Err(e) => {
+                tracing::debug!("Could not resolve {}:{} for TLS analysis: {}", host, port, e);
+                None
+            }
+        };
 
-        if tls_details.is_none() {
+        let Some(addr) = addr else {
+            // Without an address there is nothing to hand the prober; fall back to
+            // the certificate-only path so a scan still reports what it can.
+            return Ok(self
+                .certificate_only_analysis(scan_id, asset, host, port, company_id)
+                .await);
+        };
+
+        // Enforce the same target policy the rest of the scan does: a hostname
+        // that resolves inside the perimeter must not be probed just because the
+        // TLS path reached it by a different route.
+        let settings = self.current_settings();
+        if !self.is_ip_allowed(&settings, addr.ip()) {
+            tracing::info!(
+                "Skipping TLS analysis for {}:{}: {} is not permitted by scan policy",
+                host,
+                port,
+                addr.ip()
+            );
             return Ok(None);
         }
 
-        let details = tls_details.as_mut().unwrap();
+        let result = tls_scan::scan(normalized, addr, port, Duration::from_secs(8), deep).await;
 
-        // Build SSL Labs URL for certificate analysis (only for domains, not IPs)
-        let ssl_labs_url = if host.parse::<IpAddr>().is_err() {
-            Some(format!(
-                "https://www.ssllabs.com/ssltest/analyze.html?d={}",
-                host
-            ))
-        } else {
-            None
+        if !result.reachable() {
+            // The hand-built ClientHello was not answered. That is usually
+            // "this port speaks no TLS" — but it is also what a middlebox that
+            // rejects an unfamiliar hello looks like, and `rustls` may still
+            // complete a handshake where the raw prober could not.
+            //
+            // Returning here unconditionally would be a regression: the endpoint
+            // would get a populated certificate chain and *no* certificate
+            // findings, and because every certificate type is in the
+            // auto-resolution set, an already-open `expired_certificate` would be
+            // closed as fixed. So the fallback chain, when there is one, still
+            // goes through the certificate analysis.
+            return Ok(self
+                .certificate_only_analysis(scan_id, asset, host, port, company_id)
+                .await);
+        }
+
+        self.record_scan_findings(
+            scan_id,
+            asset.id,
+            tls_scan::build_findings(&result),
+            company_id,
+        )
+        .await?;
+
+        // The grade drives the asset's risk the way a human reader would weight
+        // it: an F is a live exposure, an A is nothing to do.
+        let impact = match result.grade.grade.as_str() {
+            "F" | "T" | "M" => 0.9,
+            "E" => 0.7,
+            "D" => 0.55,
+            "C" => 0.4,
+            "B" => 0.25,
+            _ => 0.0,
         };
-
-        if let Some(cert_info) = details.certificate_chain.first() {
-            // Check certificate validity window
-            if let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(&cert_info.not_after) {
-                let now = Utc::now();
-                let expiry_utc = expiry.with_timezone(&Utc);
-                let days_until_expiry = (expiry_utc - now).num_days();
-
-                if days_until_expiry < 0 {
-                    let mut data =
-                        json!({ "expiry_date": cert_info.not_after, "host": host, "port": port });
-                    if let Some(url) = &ssl_labs_url {
-                        data["source_url"] = json!(url);
-                        data["source_name"] = json!("SSL Labs");
-                    }
-                    self.create_finding(
-                        scan_id,
-                        asset.id,
-                        "expired_certificate",
-                        FindingSeverity::Critical,
-                        "Expired SSL/TLS Certificate",
-                        Some(&format!(
-                            "The SSL/TLS certificate expired {} days ago",
-                            -days_until_expiry
-                        )),
-                        data,
-                        company_id,
-                    )
-                    .await?;
-
-                    risk_factors.push(RiskFactor {
-                        factor_type: "certificate".to_string(),
-                        name: "Expired certificate".to_string(),
-                        severity: "critical".to_string(),
-                        description: format!("Certificate expired {} days ago", -days_until_expiry),
-                        impact_score: 0.95,
-                        data: json!({ "days_expired": -days_until_expiry }),
-                    });
-                } else if days_until_expiry < 30 {
-                    let mut data =
-                        json!({ "expiry_date": cert_info.not_after, "host": host, "port": port });
-                    if let Some(url) = &ssl_labs_url {
-                        data["source_url"] = json!(url);
-                        data["source_name"] = json!("SSL Labs");
-                    }
-                    self.create_finding(
-                        scan_id,
-                        asset.id,
-                        "certificate_expiring_soon",
-                        FindingSeverity::High,
-                        "Certificate Expiring Soon",
-                        Some(&format!(
-                            "Certificate expires in {} days",
-                            days_until_expiry
-                        )),
-                        data,
-                        company_id,
-                    )
-                    .await?;
-
-                    risk_factors.push(RiskFactor {
-                        factor_type: "certificate".to_string(),
-                        name: "Certificate expiring soon".to_string(),
-                        severity: "high".to_string(),
-                        description: format!("Certificate expires in {} days", days_until_expiry),
-                        impact_score: 0.6,
-                        data: json!({ "days_remaining": days_until_expiry }),
-                    });
-                } else if days_until_expiry < 90 {
-                    let mut data =
-                        json!({ "expiry_date": cert_info.not_after, "host": host, "port": port });
-                    if let Some(url) = &ssl_labs_url {
-                        data["source_url"] = json!(url);
-                        data["source_name"] = json!("SSL Labs");
-                    }
-                    self.create_finding(
-                        scan_id,
-                        asset.id,
-                        "certificate_expiring_soon",
-                        FindingSeverity::Medium,
-                        "Certificate Expiring Within 90 Days",
-                        Some(&format!(
-                            "Certificate expires in {} days",
-                            days_until_expiry
-                        )),
-                        data,
-                        company_id,
-                    )
-                    .await?;
+        if impact > 0.0 {
+            risk_factors.push(RiskFactor {
+                factor_type: "tls".to_string(),
+                name: format!("TLS configuration graded {}", result.grade.grade),
+                severity: match result.grade.grade.as_str() {
+                    "F" | "T" | "M" => "high",
+                    "E" | "D" => "medium",
+                    _ => "low",
                 }
-            }
-
-            if let Ok(not_before) = chrono::DateTime::parse_from_rfc3339(&cert_info.not_before) {
-                if not_before.with_timezone(&Utc) > Utc::now() {
-                    self.create_finding(
-                        scan_id,
-                        asset.id,
-                        "certificate_not_yet_valid",
-                        FindingSeverity::Medium,
-                        "Certificate Not Yet Valid",
-                        Some("Certificate validity period starts in the future"),
-                        json!({
-                            "not_before": cert_info.not_before,
-                            "host": host,
-                            "port": port,
-                        }),
-                        company_id,
-                    )
-                    .await?;
-                }
-            }
-
-            // Check for self-signed certificate
-            if cert_info.subject == cert_info.issuer {
-                let mut data = json!({ "subject": cert_info.subject, "issuer": cert_info.issuer, "host": host, "port": port });
-                if let Some(url) = &ssl_labs_url {
-                    data["source_url"] = json!(url);
-                    data["source_name"] = json!("SSL Labs");
-                }
-                self.create_finding(
-                    scan_id,
-                    asset.id,
-                    "self_signed_certificate",
-                    FindingSeverity::Medium,
-                    "Self-Signed Certificate",
-                    Some("Certificate is self-signed and may not be trusted by browsers"),
-                    data,
-                    company_id,
-                )
-                .await?;
-
-                risk_factors.push(RiskFactor {
-                    factor_type: "certificate".to_string(),
-                    name: "Self-signed certificate".to_string(),
-                    severity: "medium".to_string(),
-                    description: "Certificate is self-signed".to_string(),
-                    impact_score: 0.4,
-                    data: json!({}),
-                });
-            }
-
-            // Missing SAN (modern browsers require SAN)
-            if cert_info.san_domains.is_empty() {
-                self.create_finding(
-                    scan_id,
-                    asset.id,
-                    "certificate_missing_san",
-                    FindingSeverity::Low,
-                    "Certificate Missing SAN",
-                    Some("Certificate does not include Subject Alternative Names"),
-                    json!({
-                        "host": host,
-                        "port": port,
-                    }),
-                    company_id,
-                )
-                .await?;
-            }
-
-            // Hostname mismatch (only for domain names)
-            if host.parse::<IpAddr>().is_err()
-                && !self.hostname_matches_certificate(host, cert_info)
-            {
-                self.create_finding(
-                    scan_id,
-                    asset.id,
-                    "certificate_hostname_mismatch",
-                    FindingSeverity::High,
-                    "Certificate Hostname Mismatch",
-                    Some("Certificate does not match the requested hostname"),
-                    json!({
-                        "host": host,
-                        "port": port,
-                        "common_name": cert_info.common_name,
-                        "san_domains": cert_info.san_domains,
-                    }),
-                    company_id,
-                )
-                .await?;
-            }
-
-            // Weak signature algorithms
-            let signature = cert_info.signature_algorithm.to_lowercase();
-            if signature.contains("sha1") || signature.contains("md5") {
-                self.create_finding(
-                    scan_id,
-                    asset.id,
-                    "weak_signature_algorithm",
-                    FindingSeverity::High,
-                    "Weak Certificate Signature Algorithm",
-                    Some("Certificate uses a weak or deprecated signature algorithm"),
-                    json!({
-                        "signature_algorithm": cert_info.signature_algorithm,
-                        "host": host,
-                        "port": port,
-                    }),
-                    company_id,
-                )
-                .await?;
-            }
-
-            // Weak key strength
-            if let Some(bits) = cert_info.public_key_bits {
-                let weak_key = match cert_info.public_key_type.as_deref() {
-                    Some("rsa") => bits < 2048,
-                    Some("ecdsa") => bits < 256,
-                    _ => bits < 2048,
-                };
-
-                if weak_key {
-                    self.create_finding(
-                        scan_id,
-                        asset.id,
-                        "weak_key_strength",
-                        FindingSeverity::High,
-                        "Weak Certificate Key Strength",
-                        Some("Certificate uses a weak public key length"),
-                        json!({
-                            "key_bits": bits,
-                            "key_type": cert_info.public_key_type,
-                            "host": host,
-                            "port": port,
-                        }),
-                        company_id,
-                    )
-                    .await?;
-                }
-            }
+                .to_string(),
+                description: if result.grade.caps.is_empty() {
+                    format!("TLS endpoint {}:{} graded {}", host, port, result.grade.grade)
+                } else {
+                    result.grade.caps.join("; ")
+                },
+                impact_score: impact,
+                data: json!({
+                    "grade": result.grade.grade,
+                    "score": result.grade.score,
+                    "caps": result.grade.caps,
+                    "warnings": result.grade.warnings,
+                }),
+            });
         }
 
-        if details.certificate_chain.len() <= 1 {
-            if let Some(cert_info) = details.certificate_chain.first() {
-                if cert_info.subject != cert_info.issuer {
-                    self.create_finding(
-                        scan_id,
-                        asset.id,
-                        "certificate_chain_incomplete",
-                        FindingSeverity::Medium,
-                        "Incomplete Certificate Chain",
-                        Some("Certificate chain is incomplete or missing intermediates"),
-                        json!({
-                            "host": host,
-                            "port": port,
-                        }),
-                        company_id,
-                    )
-                    .await?;
-                }
-            }
-        }
-
-        Ok(tls_details)
-    }
-
-    async fn build_tls_details_from_analyzer(
-        &self,
-        host: &str,
-        port: u16,
-    ) -> Option<TlsCertificateDetails> {
-        let result = self
-            .tls_analyzer
-            .get_tls_certificate_info(host, port)
-            .await
-            .ok()?;
-
-        let chain: Vec<TlsCertificateInfo> = result
-            .certificate_chain
-            .iter()
-            .map(Self::map_tls_info)
-            .collect();
-
-        if chain.is_empty() {
-            return None;
-        }
-
-        Some(TlsCertificateDetails {
+        let details = TlsCertificateDetails {
             host: host.to_string(),
             port,
-            certificate_chain: chain,
-            error: result.error,
-        })
+            certificate_chain: result
+                .chain
+                .chain
+                .iter()
+                .map(Self::map_parsed_certificate)
+                .collect(),
+            error: result.errors.first().cloned(),
+        };
+
+        Ok(Some((details, Some(result))))
+    }
+
+    /// Analyse whatever certificate `rustls` can retrieve, when the raw prober
+    /// could not complete a handshake.
+    ///
+    /// Produces certificate findings but no protocol, cipher or grade — those
+    /// genuinely were not measured, and inventing them would be worse than
+    /// omitting them.
+    async fn certificate_only_analysis(
+        &self,
+        scan_id: Uuid,
+        asset: &Asset,
+        host: &str,
+        port: u16,
+        company_id: Uuid,
+    ) -> Option<(TlsCertificateDetails, Option<tls_scan::TlsScanResult>)> {
+        let details = self.build_tls_details_from_fallback(host, port).await?;
+        if details.certificate_chain.is_empty() {
+            return Some((details, None));
+        }
+
+        let chain_der = match crate::utils::crypto::get_tls_certificate_chain_der(host, port).await {
+            Ok(chain) if !chain.is_empty() => chain,
+            _ => return Some((details, None)),
+        };
+
+        let result = tls_scan::certificate_only_result(host, port, &chain_der);
+        if let Err(e) = self
+            .record_scan_findings(
+                scan_id,
+                asset.id,
+                tls_scan::build_findings(&result),
+                company_id,
+            )
+            .await
+        {
+            tracing::warn!("Failed to record certificate findings for {}: {}", host, e);
+        }
+        Some((details, Some(result)))
+    }
+
+    /// Project a deeply-parsed certificate onto the summary shape the UI reads.
+    fn map_parsed_certificate(
+        cert: &crate::services::scanners::cert_analysis::ParsedCertificate,
+    ) -> TlsCertificateInfo {
+        TlsCertificateInfo {
+            subject: cert.subject.clone(),
+            issuer: cert.issuer.clone(),
+            organization: cert.organization.clone(),
+            common_name: cert.common_name.clone(),
+            san_domains: cert.san_domains.clone(),
+            not_before: cert.not_before.clone(),
+            not_after: cert.not_after.clone(),
+            serial_number: cert.serial_number.clone(),
+            signature_algorithm: cert.signature_algorithm.clone(),
+            public_key_type: cert.public_key_type.clone(),
+            public_key_bits: cert.public_key_bits,
+        }
     }
 
     async fn build_tls_details_from_fallback(
@@ -3080,22 +2957,6 @@ impl SecurityScanService {
         }
     }
 
-    fn map_tls_info(info: &crate::services::external::TlsInfo) -> TlsCertificateInfo {
-        TlsCertificateInfo {
-            subject: info.subject.clone(),
-            issuer: info.issuer.clone(),
-            organization: info.organization.clone(),
-            common_name: info.common_name.clone(),
-            san_domains: info.san_domains.clone(),
-            not_before: info.not_before.clone(),
-            not_after: info.not_after.clone(),
-            serial_number: info.serial_number.clone(),
-            signature_algorithm: info.signature_algorithm.clone(),
-            public_key_type: info.public_key_type.clone(),
-            public_key_bits: info.public_key_bits,
-        }
-    }
-
     fn map_raw_tls_info(info: crate::utils::crypto::TlsCertificateInfo) -> TlsCertificateInfo {
         TlsCertificateInfo {
             subject: info.subject,
@@ -3110,33 +2971,6 @@ impl SecurityScanService {
             public_key_type: info.public_key_type,
             public_key_bits: info.public_key_bits,
         }
-    }
-
-    fn hostname_matches_certificate(&self, host: &str, cert: &TlsCertificateInfo) -> bool {
-        let normalized_host = host.trim_end_matches('.').to_lowercase();
-        let mut names = Vec::new();
-        names.extend(cert.san_domains.iter().cloned());
-        if let Some(cn) = &cert.common_name {
-            names.push(cn.clone());
-        }
-
-        for name in names {
-            if Self::hostname_matches_pattern(&normalized_host, &name) {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn hostname_matches_pattern(host: &str, pattern: &str) -> bool {
-        let pattern = pattern.trim_end_matches('.').to_lowercase();
-        if pattern.starts_with("*.") {
-            let suffix = &pattern[2..];
-            return host.ends_with(suffix) && host.split('.').count() > suffix.split('.').count();
-        }
-
-        host == pattern
     }
 
     // ========================================================================
@@ -3497,11 +3331,13 @@ impl SecurityScanService {
     // FINDING CREATION
     // ========================================================================
 
+    #[allow(clippy::too_many_arguments)]
     async fn resolve_stale_findings(
         &self,
         scan_id: Uuid,
         asset_id: Uuid,
         scan_type: &SecurityScanType,
+        deep: bool,
         scan_started_at: chrono::DateTime<Utc>,
         company_id: Uuid,
     ) -> Result<u64, ApiError> {
@@ -3510,7 +3346,16 @@ impl SecurityScanService {
             return Ok(0);
         }
 
-        let type_set: HashSet<&str> = types_checked.into_iter().collect();
+        let mut type_set: HashSet<&str> = types_checked.into_iter().collect();
+        if !deep {
+            // A shallow scan skips path probing, method probing and the zone
+            // transfer attempt entirely. Leaving those types in scope would let a
+            // scan that never looked mark a critical exposure as fixed simply by
+            // not re-reporting it.
+            for finding_type in DEEP_ONLY_FINDING_TYPES {
+                type_set.remove(finding_type);
+            }
+        }
 
         let current_findings = self.finding_repo.list_by_scan(&scan_id, company_id).await?;
         let mut seen_keys: HashSet<(String, String)> = HashSet::new();
@@ -3576,6 +3421,12 @@ impl SecurityScanService {
         }
     }
 
+    /// The finding types a given scan is authoritative for.
+    ///
+    /// This drives auto-resolution: a type listed here that a fresh scan did *not*
+    /// re-report is treated as fixed and closed. A type the scanners emit but that
+    /// is missing from this list therefore stays open forever, long after it was
+    /// remediated — so these lists have to track the scanners exactly.
     fn finding_types_for_scan(scan_type: &SecurityScanType) -> Vec<&'static str> {
         const PORT_TYPES: [&str; 6] = [
             "open_port",
@@ -3585,14 +3436,26 @@ impl SecurityScanService {
             "known_cve",
             "dns_resolution_failed",
         ];
-        const HTTP_TYPES: [&str; 5] = [
+        const HTTP_TYPES: [&str; 14] = [
             "missing_security_header",
+            "weak_security_header",
             "https_not_enforced",
             "server_version_exposed",
             "no_waf_detected",
             "technology_detected",
+            "insecure_cookies",
+            "cors_misconfiguration",
+            "dangerous_http_method",
+            "directory_listing",
+            "mixed_content",
+            "missing_sri",
+            "security_txt_missing",
+            "sensitive_data_exposed",
         ];
-        const TLS_TYPES: [&str; 9] = [
+        /// Emitted by the HTTP scanner but shared with other sources, so listed
+        /// separately to keep the per-scan-type sets honest.
+        const HTTP_SHARED_TYPES: [&str; 2] = ["debug_endpoint_exposed", "information_disclosure"];
+        const TLS_TYPES: [&str; 18] = [
             "expired_certificate",
             "certificate_expiring_soon",
             "self_signed_certificate",
@@ -3602,12 +3465,36 @@ impl SecurityScanService {
             "certificate_missing_san",
             "certificate_hostname_mismatch",
             "certificate_chain_incomplete",
+            "certificate_untrusted",
+            "certificate_lifetime_excessive",
+            "certificate_transparency_missing",
+            "weak_tls_version",
+            "weak_cipher_suite",
+            "no_forward_secrecy",
+            "tls_vulnerability",
+            "tls_misconfiguration",
+            "missing_ocsp_stapling",
         ];
-        const DNS_TYPES: [&str; 4] = [
+        const DNS_TYPES: [&str; 19] = [
             "missing_spf",
+            "weak_spf_policy",
+            "spf_lookup_limit_exceeded",
+            "multiple_spf_records",
             "missing_dmarc",
             "weak_dmarc_policy",
+            "missing_dkim",
             "missing_caa",
+            "caa_incomplete",
+            "missing_dnssec",
+            "dnssec_misconfigured",
+            "zone_transfer_allowed",
+            "dangling_dns",
+            "nameserver_misconfigured",
+            "dns_misconfiguration",
+            "soa_misconfigured",
+            "missing_mta_sts",
+            "mta_sts_misconfigured",
+            "missing_tls_rpt",
         ];
         const THREAT_TYPES: [&str; 1] = ["reputation_issue"];
 
@@ -3616,6 +3503,7 @@ impl SecurityScanService {
             SecurityScanType::Full => {
                 types.extend_from_slice(&PORT_TYPES);
                 types.extend_from_slice(&HTTP_TYPES);
+                types.extend_from_slice(&HTTP_SHARED_TYPES);
                 types.extend_from_slice(&TLS_TYPES);
                 types.extend_from_slice(&DNS_TYPES);
                 types.extend_from_slice(&THREAT_TYPES);
@@ -3625,6 +3513,7 @@ impl SecurityScanService {
             }
             SecurityScanType::HttpProbe => {
                 types.extend_from_slice(&HTTP_TYPES);
+                types.extend_from_slice(&HTTP_SHARED_TYPES);
                 types.push("known_cve");
                 types.push("dns_resolution_failed");
             }
@@ -3632,12 +3521,63 @@ impl SecurityScanService {
                 types.extend_from_slice(&TLS_TYPES);
                 types.push("dns_resolution_failed");
             }
+            SecurityScanType::DnsAudit => {
+                types.extend_from_slice(&DNS_TYPES);
+            }
             SecurityScanType::ThreatIntel => {
                 types.extend_from_slice(&THREAT_TYPES);
             }
         }
 
         types
+    }
+
+    /// Persist the findings a scanner produced.
+    ///
+    /// The deep scanners return `ScanFinding` values rather than writing rows
+    /// themselves, so company scoping, deduplication and the remediation text all
+    /// stay in one place — and so a scanner's entire output can be asserted in a
+    /// unit test without a database.
+    async fn record_scan_findings(
+        &self,
+        scan_id: Uuid,
+        asset_id: Uuid,
+        findings: Vec<ScanFinding>,
+        company_id: Uuid,
+    ) -> Result<usize, ApiError> {
+        let mut recorded = 0usize;
+        for finding in findings {
+            let create = SecurityFindingCreate {
+                security_scan_id: Some(scan_id),
+                asset_id,
+                finding_type: finding.finding_type.clone(),
+                severity: finding.severity,
+                title: finding.title,
+                description: Some(finding.description),
+                // The scanner writes remediation specific to what it found, which
+                // is always better than the per-type fallback; the fallback still
+                // covers a scanner that leaves it empty.
+                remediation: if finding.remediation.is_empty() {
+                    get_remediation(&finding.finding_type)
+                } else {
+                    Some(finding.remediation)
+                },
+                data: finding.data,
+                cvss_score: None,
+                cve_ids: None,
+                tags: None,
+            };
+            match self.finding_repo.create_or_update(&create, company_id).await {
+                Ok(_) => recorded += 1,
+                Err(e) => tracing::warn!(
+                    "Failed to record {} finding for asset {}: {}",
+                    create.finding_type,
+                    asset_id,
+                    e
+                ),
+            }
+        }
+        Ok(recorded)
     }
 
     async fn create_finding(
@@ -3777,6 +3717,43 @@ fn get_remediation(finding_type: &str) -> Option<String> {
         "missing_caa" => Some("Add CAA records to restrict which Certificate Authorities can issue certificates for your domain.".to_string()),
         "weak_dmarc_policy" => Some("Upgrade your DMARC policy from 'none' to 'quarantine' or 'reject' to actively block fraudulent emails.".to_string()),
         "known_cve" => Some("Update the affected software to the latest version to patch the known vulnerability.".to_string()),
+        // The deep scanners write remediation specific to what they found, which
+        // is always better than a per-type default. These cover the case where a
+        // finding of one of these types arrives from somewhere else.
+        "weak_cipher_suite" => Some("Restrict the cipher list to AEAD suites with forward secrecy (ECDHE with AES-GCM or ChaCha20-Poly1305).".to_string()),
+        "no_forward_secrecy" => Some("Offer only ECDHE or DHE key exchange and remove static RSA cipher suites.".to_string()),
+        "tls_vulnerability" => Some("Apply the vendor patch for the affected TLS stack, then remove the protocol or cipher the attack depends on.".to_string()),
+        "tls_misconfiguration" => Some("Review the TLS server configuration against the Mozilla SSL Configuration Generator.".to_string()),
+        "certificate_untrusted" => Some("Install the complete certificate chain from a publicly trusted CA, including every intermediate.".to_string()),
+        "certificate_lifetime_excessive" => Some("Reissue with a lifetime of 398 days or less and automate renewal.".to_string()),
+        "certificate_transparency_missing" => Some("Use a CA that submits to Certificate Transparency logs, and monitor crt.sh for unexpected issuance.".to_string()),
+        "missing_ocsp_stapling" => Some("Enable OCSP stapling (ssl_stapling on in nginx, SSLUseStapling on in Apache).".to_string()),
+        "weak_security_header" => Some("Tighten the header's value; its presence alone does not provide the protection it implies.".to_string()),
+        "insecure_cookies" => Some("Set Secure and SameSite on every cookie and HttpOnly on every session cookie.".to_string()),
+        "cors_misconfiguration" => Some("Validate the Origin header against an allowlist; never combine a reflected or wildcard origin with Allow-Credentials.".to_string()),
+        "dangerous_http_method" => Some("Disable TRACE and restrict write methods to authenticated routes.".to_string()),
+        "mixed_content" => Some("Serve every subresource over HTTPS and add upgrade-insecure-requests to the CSP.".to_string()),
+        "missing_sri" => Some("Add integrity and crossorigin attributes to every externally hosted script.".to_string()),
+        "security_txt_missing" => Some("Publish /.well-known/security.txt with Contact: and Expires: fields (RFC 9116).".to_string()),
+        "sensitive_data_exposed" => Some("Remove the file from the web root and rotate every credential it disclosed.".to_string()),
+        "debug_endpoint_exposed" => Some("Disable the endpoint in production, or restrict it to localhost behind authentication.".to_string()),
+        "directory_listing" => Some("Disable automatic directory indexing (Options -Indexes in Apache, autoindex off in nginx).".to_string()),
+        "weak_spf_policy" => Some("End the SPF record in -all once every legitimate sender is listed.".to_string()),
+        "spf_lookup_limit_exceeded" => Some("Flatten or consolidate include: chains so the policy stays within ten DNS lookups (RFC 7208 §4.6.4).".to_string()),
+        "multiple_spf_records" => Some("Merge the SPF records into a single TXT record at the apex.".to_string()),
+        "missing_dkim" => Some("Confirm the selector in use from a signed message's DKIM-Signature s= tag, and enable DKIM signing if none is set.".to_string()),
+        "missing_mta_sts" => Some("Publish an _mta-sts TXT record and serve a policy in enforce mode at https://mta-sts.<domain>/.well-known/mta-sts.txt.".to_string()),
+        "mta_sts_misconfigured" => Some("Set mode: enforce in the MTA-STS policy and max_age to at least 604800.".to_string()),
+        "missing_tls_rpt" => Some("Publish v=TLSRPTv1; rua=mailto:tlsrpt@<domain> at _smtp._tls.<domain>.".to_string()),
+        "missing_dnssec" => Some("Enable DNSSEC at the DNS provider and publish the DS record through the registrar.".to_string()),
+        "dnssec_misconfigured" => Some("Complete the chain of trust: publish the DS record at the registrar, or remove it if the zone is no longer signed.".to_string()),
+        "caa_incomplete" => Some("Add issuewild and iodef records to complete the CAA policy.".to_string()),
+        "zone_transfer_allowed" => Some("Restrict AXFR to the secondary nameservers' IP addresses, and prefer TSIG authentication.".to_string()),
+        "dangling_dns" => Some("Remove the DNS record, or reclaim the resource at the provider before someone else does.".to_string()),
+        "nameserver_misconfigured" => Some("Delegate at least two nameservers on separate networks, each answering authoritatively for the zone.".to_string()),
+        "soa_misconfigured" => Some("Adjust the SOA refresh, retry, expire and minimum values to the ranges in RFC 1912 §2.2.".to_string()),
+        "dns_misconfiguration" => Some("Correct the DNS record so it conforms to the relevant RFC.".to_string()),
+        "information_disclosure" => Some("Stop publishing the information, or restrict it to an authenticated context.".to_string()),
         _ => None,
     }
 }
@@ -3861,6 +3838,55 @@ mod tests {
         assert_eq!(deduped[0].cve_id, "CVE-2023-9999");
         assert_eq!(deduped[1].cve_id, "CVE-2024-1234");
     }
+
+    #[test]
+    fn every_scanner_finding_type_can_be_auto_resolved() {
+        // A finding type a scanner emits but this list omits stays open forever
+        // after it is remediated, because nothing ever closes it. The scanners
+        // declare what they emit; this proves the scopes cover all of it.
+        use crate::services::scanners::{dns_scan, http_scan, tls_scan};
+
+        let full: HashSet<&str> = scope_for(&SecurityScanType::Full);
+        for finding_type in dns_scan::EMITTED_FINDING_TYPES
+            .iter()
+            .chain(tls_scan::EMITTED_FINDING_TYPES)
+            .chain(http_scan::EMITTED_FINDING_TYPES)
+        {
+            assert!(
+                full.contains(finding_type),
+                "{} is emitted by a scanner but a full scan cannot resolve it",
+                finding_type
+            );
+        }
+
+        // And each focused scan type must cover its own scanner.
+        let dns: HashSet<&str> = scope_for(&SecurityScanType::DnsAudit);
+        for finding_type in dns_scan::EMITTED_FINDING_TYPES {
+            // `information_disclosure` is shared with the HTTP scanner, so a
+            // DNS-only scan deliberately does not claim authority over it.
+            if *finding_type == "information_disclosure" {
+                continue;
+            }
+            assert!(dns.contains(finding_type), "DNS audit cannot resolve {}", finding_type);
+        }
+
+        let tls: HashSet<&str> = scope_for(&SecurityScanType::TlsAnalysis);
+        for finding_type in tls_scan::EMITTED_FINDING_TYPES {
+            assert!(tls.contains(finding_type), "TLS scan cannot resolve {}", finding_type);
+        }
+
+        let http: HashSet<&str> = scope_for(&SecurityScanType::HttpProbe);
+        for finding_type in http_scan::EMITTED_FINDING_TYPES {
+            assert!(http.contains(finding_type), "HTTP probe cannot resolve {}", finding_type);
+        }
+    }
+
+    fn scope_for(scan_type: &SecurityScanType) -> HashSet<&'static str> {
+        SecurityScanService::finding_types_for_scan(scan_type)
+            .into_iter()
+            .collect()
+    }
+
 
     #[test]
     fn known_cve_scope_filtering_is_source_aware() {

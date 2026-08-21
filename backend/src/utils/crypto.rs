@@ -111,10 +111,17 @@ fn format_x509_name(name: &X509Name) -> String {
     parts.join(", ")
 }
 
-pub async fn get_tls_certificate_info(
+/// Complete a TLS handshake and return the certificate chain the server sent, in
+/// DER, leaf first.
+///
+/// Split out of `get_tls_certificate_info` because a scanner needs the whole
+/// chain — to validate it against a trust store, to look for embedded SCTs, to
+/// see whether the intermediates are present at all — and that function only ever
+/// returned fields parsed from the leaf.
+pub async fn get_tls_certificate_chain_der(
     hostname: &str,
     port: u16,
-) -> Result<TlsCertificateInfo, ApiError> {
+) -> Result<Vec<Vec<u8>>, ApiError> {
     let normalized_hostname = hostname.trim().trim_end_matches('.');
     if normalized_hostname.is_empty() {
         return Err(ApiError::Validation("Invalid hostname".to_string()));
@@ -232,12 +239,23 @@ pub async fn get_tls_certificate_info(
         .map_err(|e| ApiError::ExternalService(format!("TLS handshake failed: {}", e)))?;
 
     // Extract the captured certificate
-    let captured_certs = cert_capture.captured_certs.lock().unwrap();
-    if captured_certs.is_empty() {
+    let chain: Vec<Vec<u8>> = {
+        let captured_certs = cert_capture.captured_certs.lock().unwrap();
+        captured_certs.iter().map(|der| der.to_vec()).collect()
+    };
+    if chain.is_empty() {
         return Err(ApiError::ExternalService(
             "No certificate received during TLS handshake".to_string(),
         ));
     }
+    Ok(chain)
+}
+
+pub async fn get_tls_certificate_info(
+    hostname: &str,
+    port: u16,
+) -> Result<TlsCertificateInfo, ApiError> {
+    let captured_certs = get_tls_certificate_chain_der(hostname, port).await?;
 
     // Parse the first certificate (end entity certificate)
     let cert_der = &captured_certs[0];

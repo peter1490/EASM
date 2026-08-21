@@ -213,14 +213,23 @@ export const asBool = (v: unknown): boolean => v === true;
 export const asObject = (v: unknown): Data | null =>
   v && typeof v === "object" && !Array.isArray(v) ? (v as Data) : null;
 
+/** Distinct strings from a scan-data array.
+ *
+ *  Deduplicated because every list this feeds is a set — references, SAN domains,
+ *  hostnames, detected technologies — and the values are rendered as React keys.
+ *  Scanners merge these from several sources without a distinct pass, so an NVD CVE
+ *  reporting the same advisory URL twice crashed the evidence panel with a duplicate
+ *  key. Nothing downstream counts repeats; showing one twice was never wanted either. */
 export function asStrings(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
-  return v.filter((x): x is string => typeof x === "string");
+  return [...new Set(v.filter((x): x is string => typeof x === "string"))];
 }
 
+/** Distinct numbers from a scan-data array. Deduplicated for the reasons in
+ *  {@link asStrings} — open-port lists are its main caller and are keyed by value. */
 export function asNumbers(v: unknown): number[] {
   if (!Array.isArray(v)) return [];
-  return v.filter((x): x is number => typeof x === "number");
+  return [...new Set(v.filter((x): x is number => typeof x === "number"))];
 }
 
 export function asObjects(v: unknown): Data[] {

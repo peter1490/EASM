@@ -21,6 +21,7 @@ import {
 } from "@/app/api";
 import { Button, Chip, Dot, ErrorState, Icon, SeverityChip, type IconName } from "@/components/kit";
 import { cn } from "@/lib/cn";
+import { uniq } from "@/lib/list";
 import { absolute, ago, dateTime, score } from "@/lib/format";
 import { findingStatus, severityFromCvss, severityTone } from "@/lib/severity";
 import { FindingEvidence, findingTypeIcon, findingTypeLabel } from "./FindingEvidence";
@@ -210,8 +211,8 @@ export function FindingDetail({
   const sourceUrl = typeof finding.data?.source_url === "string" ? finding.data.source_url : null;
   const sourceName =
     typeof finding.data?.source_name === "string" ? finding.data.source_name : "external source";
-  const cves = finding.cve_ids ?? [];
-  const tags = finding.tags ?? [];
+  const cves = uniq(finding.cve_ids ?? []);
+  const tags = uniq(finding.tags ?? []);
   const dataKeys = Object.keys(finding.data ?? {});
 
   return (

@@ -48,6 +48,7 @@ import {
   type SegmentOption,
 } from "@/components/kit";
 import { cn } from "@/lib/cn";
+import { uniq } from "@/lib/list";
 import { ago, dateTime, humanise, num, pct, score as fmtScore } from "@/lib/format";
 import {
   SEVERITY_ORDER,
@@ -470,7 +471,7 @@ export function AssetDetail({
           {asset.sources.length === 0 ? (
             <span className="text-[12.5px] text-ink-3">None recorded</span>
           ) : (
-            asset.sources.map((source) => <Chip key={source}>{source}</Chip>)
+            uniq(asset.sources).map((source) => <Chip key={source}>{source}</Chip>)
           )}
         </div>
       </div>

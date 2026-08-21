@@ -776,13 +776,21 @@ impl NvdClient {
             })
             .unwrap_or_default();
 
-        // Reference URLs.
+        // Reference URLs, distinct and in NVD's order.
+        //
+        // NVD lists one entry per URL *per tag*, so an advisory tagged both "Patch" and
+        // "Vendor Advisory" arrives twice. We drop the tags, which turned the duplicate
+        // into two identical strings — stored, sent to the client, and rendered as two
+        // list items under the same React key.
         let references = cve
             .get("references")
             .and_then(|v| v.as_array())
             .map(|arr| {
+                let mut seen = std::collections::HashSet::new();
                 arr.iter()
-                    .filter_map(|r| r.get("url").and_then(|u| u.as_str()).map(String::from))
+                    .filter_map(|r| r.get("url").and_then(|u| u.as_str()))
+                    .filter(|url| seen.insert(url.to_string()))
+                    .map(String::from)
                     .collect()
             })
             .unwrap_or_default();
@@ -1380,6 +1388,32 @@ mod tests {
             vulns.iter().any(|v| v.id == "CVE-2021-23017"),
             "expected CVE-2021-23017 in results, got: {:?}",
             vulns.iter().map(|v| &v.id).collect::<Vec<_>>()
+        );
+    }
+
+    /// NVD repeats a URL once per tag it carries, and the tags are dropped on parse.
+    /// The duplicates reached the client and collided as React keys in the evidence
+    /// panel; the real-world case was an OpenSSH advisory tagged twice.
+    #[test]
+    fn reference_urls_are_deduplicated() {
+        let json = serde_json::json!({
+            "id": "CVE-2023-38408",
+            "references": [
+                { "url": "https://example.com/advisory", "tags": ["Patch"] },
+                { "url": "https://example.com/other" },
+                { "url": "https://example.com/advisory", "tags": ["Vendor Advisory"] },
+            ],
+        });
+
+        let vuln = NvdClient::parse_cve(&json);
+
+        assert_eq!(
+            vuln.references,
+            vec![
+                "https://example.com/advisory".to_string(),
+                "https://example.com/other".to_string(),
+            ],
+            "first occurrence wins and NVD's ordering is preserved"
         );
     }
 }

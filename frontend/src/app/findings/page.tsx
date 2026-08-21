@@ -51,6 +51,7 @@ import {
 } from "@/components/kit";
 import { useAuth } from "@/context/AuthContext";
 import { cn } from "@/lib/cn";
+import { uniq } from "@/lib/list";
 import { ago, num, score } from "@/lib/format";
 import {
   FINDING_STATUSES,
@@ -774,7 +775,7 @@ function FindingsScreen() {
                   {visibleRows.map((finding) => {
                     const tone = severityTone(effectiveSeverity(finding));
                     const status = findingStatus(finding.status);
-                    const cves = finding.cve_ids ?? [];
+                    const cves = uniq(finding.cve_ids ?? []);
                     return (
                       <TR
                         key={finding.id}

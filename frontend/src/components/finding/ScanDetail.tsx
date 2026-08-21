@@ -324,7 +324,9 @@ function VulnerabilitiesSection({ summary }: { summary: Record<string, unknown> 
           const tone = severityTone(severity);
           const references = asStrings(vuln.references);
           return (
-            <div key={cve ?? i} className="rounded-lg border border-rule p-3">
+            // Keyed by position as well as CVE: one scan can match the same CVE to
+            // two detected services, so the id alone is not unique here.
+            <div key={`${cve ?? "cve"}-${i}`} className="rounded-lg border border-rule p-3">
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-1.5 mb-1">
@@ -462,7 +464,7 @@ function HeadersSection({ summary }: { summary: Record<string, unknown> }) {
           {missing.length > 0 ? (
             <div className="space-y-2.5">
               {missing.map((header, i) => (
-                <div key={asString(header.name) ?? i} className="border-l-2 border-crit pl-2.5">
+                <div key={`${asString(header.name) ?? "header"}-${i}`} className="border-l-2 border-crit pl-2.5">
                   <div className="flex items-center gap-2">
                     <Mono className="font-medium">{asString(header.name) ?? "—"}</Mono>
                     <SeverityChip severity={asString(header.severity)} short />
@@ -686,7 +688,9 @@ function TlsSection({ summary }: { summary: Record<string, unknown> }) {
                   const keyBits = asNumber(cert.public_key_bits);
                   return (
                     <div
-                      key={`${asString(cert.serial_number) ?? certIdx}`}
+                      // Serial numbers repeat across a chain more often than they should
+                      // (self-signed and misissued certificates both do it).
+                      key={`${asString(cert.serial_number) ?? "cert"}-${certIdx}`}
                       className="rounded-md border border-rule bg-surface-2 p-3"
                     >
                       <div className="flex items-center justify-between gap-3 mb-2">

@@ -58,6 +58,10 @@ pub trait DiscoveryRunRepository: Send + Sync {
         id: &Uuid,
         error: &str,
     ) -> Result<DiscoveryRun, ApiError>;
+    /// Close out runs left mid-flight by a process that died (crash, SIGTERM, hot reload).
+    /// A run's owning task lives only in memory, so nothing will ever finish these.
+    /// Returns the ids that were reconciled.
+    async fn reconcile_orphaned_runs(&self, reason: &str) -> Result<Vec<Uuid>, ApiError>;
 }
 
 pub struct SqlxDiscoveryRunRepository {
@@ -271,6 +275,34 @@ impl DiscoveryRunRepository for SqlxDiscoveryRunRepository {
         .await?;
 
         Ok(row)
+    }
+
+    async fn reconcile_orphaned_runs(&self, reason: &str) -> Result<Vec<Uuid>, ApiError> {
+        let now = Utc::now();
+
+        let ids = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            UPDATE discovery_runs
+            SET status = 'failed', completed_at = $1, error_message = $2, updated_at = $1
+            WHERE status IN ('pending', 'running')
+            RETURNING id
+            "#,
+        )
+        .bind(now)
+        .bind(reason)
+        .fetch_all(&self.pool)
+        .await?;
+
+        if !ids.is_empty() {
+            // Their queue items are equally orphaned: nothing will dequeue them again, and
+            // leaving them behind would let a later run inherit stale 'processing' rows.
+            sqlx::query("DELETE FROM discovery_queue WHERE discovery_run_id = ANY($1)")
+                .bind(&ids)
+                .execute(&self.pool)
+                .await?;
+        }
+
+        Ok(ids)
     }
 }
 

@@ -20,6 +20,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Starting Rust EASM Backend v{}", env!("CARGO_PKG_VERSION"));
 
+    // A discovery run is owned by an in-memory task, so any run still marked pending or
+    // running at boot was orphaned when the previous process died. Close them out before
+    // serving, or they linger forever and their queue items leak into the next run.
+    match app_state
+        .discovery_run_repository
+        .reconcile_orphaned_runs("Interrupted by a backend restart")
+        .await
+    {
+        Ok(ids) if ids.is_empty() => {}
+        Ok(ids) => tracing::warn!(
+            "Reconciled {} orphaned discovery run(s) left by a previous process: {:?}",
+            ids.len(),
+            ids
+        ),
+        Err(e) => tracing::error!("Failed to reconcile orphaned discovery runs: {}", e),
+    }
+
     // Start discovery schedule runner
     app_state.discovery_schedule_service.clone().start();
 

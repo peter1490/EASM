@@ -1053,7 +1053,12 @@ impl DiscoveryService {
         }
 
         let settings = self.current_settings();
-        if settings.skip_unresolved_domains {
+        // Seeds are enqueued at depth 0; everything else is queued at parent depth + 1.
+        // Never skip a seed on DNS resolution: an apex with no A/AAAA record (mail-only or
+        // parked domains) still has subdomains worth enumerating, and dropping it here would
+        // abandon the whole branch. The gate stays in place for discovered hostnames below.
+        let is_seed = depth == 0;
+        if settings.skip_unresolved_domains && !is_seed {
             let resolves = match self.dns_resolver.resolve_hostname(&canonical_domain).await {
                 Ok(ips) => ips.iter().any(|ip| !ip.is_loopback()),
                 Err(_) => false,

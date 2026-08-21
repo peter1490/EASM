@@ -7,6 +7,9 @@ const SHODAN_PAGE_SIZE: usize = 100;
 /// Each page past the 1st costs 1 Shodan query credit, so keep this small by default.
 const MAX_SHODAN_PAGES: u32 = 10;
 const MAX_SHODAN_DNS_PAGES: u32 = 50;
+/// RFC 1035 limits: 253 characters and 127 labels for a fully qualified name.
+const MAX_HOSTNAME_LEN: usize = 253;
+const MAX_HOSTNAME_LABELS: usize = 127;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShodanResult {
@@ -63,6 +66,12 @@ pub struct ShodanHostInfo {
 
 #[derive(Debug, Deserialize)]
 struct ShodanDnsDomainResponse {
+    /// The zone Shodan actually answered for. The /dns/domain endpoint is an apex
+    /// endpoint: query any sub-hostname and it still answers for the registrable
+    /// domain, echoing it here. Bare labels in `subdomains`/`data` are relative to
+    /// THIS, not to whatever we asked for.
+    #[serde(default)]
+    pub domain: Option<String>,
     #[serde(default)]
     pub subdomains: Vec<String>,
     #[serde(default)]
@@ -357,8 +366,29 @@ impl ShodanClient {
 
             pages_fetched += 1;
 
+            // Compose relative labels against the zone Shodan answered for, never against
+            // the hostname we queried. Querying a sub-hostname (as deeper discovery does)
+            // still returns the apex's labels, so suffixing them onto the query would
+            // manufacture "audio.audio.example.com" and compound at every depth.
+            let base_domain = dns_response
+                .domain
+                .as_deref()
+                .map(|d| d.trim().trim_end_matches('.').to_lowercase())
+                .filter(|d| !d.is_empty())
+                .unwrap_or_else(|| canonical_domain.clone());
+
+            if base_domain != canonical_domain {
+                tracing::debug!(
+                    "Shodan DNS domain endpoint answered for {} when queried for {}; \
+                     composing subdomains against {}",
+                    base_domain,
+                    canonical_domain,
+                    base_domain
+                );
+            }
+
             for subdomain in &dns_response.subdomains {
-                if let Some(hostname) = Self::compose_dns_hostname(&canonical_domain, subdomain) {
+                if let Some(hostname) = Self::compose_dns_hostname(&base_domain, subdomain) {
                     hostnames.insert(hostname);
                 }
             }
@@ -366,8 +396,7 @@ impl ShodanClient {
                 if !Self::is_hostname_dns_type(&record.record_type) {
                     continue;
                 }
-                if let Some(hostname) =
-                    Self::compose_dns_hostname(&canonical_domain, &record.subdomain)
+                if let Some(hostname) = Self::compose_dns_hostname(&base_domain, &record.subdomain)
                 {
                     hostnames.insert(hostname);
                 }
@@ -784,6 +813,10 @@ impl ShodanClient {
         format!("{}:{}:{}", result.ip_str, result.port, ts)
     }
 
+    /// Turn a Shodan DNS label into an absolute hostname.
+    ///
+    /// `base_domain` must be the zone the response was for (`ShodanDnsDomainResponse::domain`),
+    /// not the hostname that was queried — see the call site for why.
     fn compose_dns_hostname(base_domain: &str, subdomain: &str) -> Option<String> {
         let canonical_base = base_domain.trim().trim_end_matches('.').to_lowercase();
         if canonical_base.is_empty() {
@@ -805,7 +838,15 @@ impl ShodanClient {
             return Some(normalized);
         }
 
-        Some(format!("{}.{}", normalized, canonical_base))
+        let composed = format!("{}.{}", normalized, canonical_base);
+        // Structural backstop against runaway suffixing: a name past the DNS limits is
+        // never a real host, so drop it rather than persist it and recurse into it.
+        if composed.len() > MAX_HOSTNAME_LEN || composed.split('.').count() > MAX_HOSTNAME_LABELS {
+            tracing::debug!("Discarding over-long composed Shodan hostname: {}", composed);
+            return None;
+        }
+
+        Some(composed)
     }
 }
 
@@ -918,6 +959,50 @@ mod tests {
         assert_eq!(
             ShodanClient::stable_result_key(&result),
             "203.0.113.10:443:2024-01-01T00:00:00".to_string()
+        );
+    }
+
+    #[test]
+    fn test_compose_dns_hostname_uses_response_zone_not_query() {
+        // Shodan's /dns/domain endpoint answers for the apex whatever you ask it, so the
+        // labels it returns must be composed against the apex. Composing them against the
+        // queried sub-hostname is what produced "audio.audio.balivet.pro" and compounded
+        // a fresh cross-product at every discovery depth.
+        let response: ShodanDnsDomainResponse = serde_json::from_str(
+            r#"{"domain":"example.com","subdomains":["audio","media"],"data":[],"more":false}"#,
+        )
+        .expect("response should parse");
+
+        let base = response.domain.as_deref().expect("domain echoed by Shodan");
+        let composed: Vec<String> = response
+            .subdomains
+            .iter()
+            .filter_map(|s| ShodanClient::compose_dns_hostname(base, s))
+            .collect();
+
+        assert_eq!(
+            composed,
+            vec!["audio.example.com".to_string(), "media.example.com".to_string()]
+        );
+
+        // The queried hostname is irrelevant to composition: even three levels deep the
+        // result is the same flat set, so recursion converges instead of exploding.
+        assert_eq!(
+            ShodanClient::compose_dns_hostname(base, "audio"),
+            Some("audio.example.com".to_string()),
+            "composing against the apex must not re-suffix an existing label"
+        );
+    }
+
+    #[test]
+    fn test_compose_dns_hostname_rejects_over_long_names() {
+        let deep = vec!["a"; 130].join(".");
+        assert_eq!(ShodanClient::compose_dns_hostname("example.com", &deep), None);
+
+        let long_label = "b".repeat(250);
+        assert_eq!(
+            ShodanClient::compose_dns_hostname("example.com", &long_label),
+            None
         );
     }
 

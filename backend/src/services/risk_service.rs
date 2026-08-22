@@ -398,7 +398,7 @@ impl RiskService {
                 id, asset_type, identifier, confidence, sources, metadata, comment, created_at, updated_at, seed_id, parent_id, company_id,
                 first_seen_at, last_seen_at, last_discovery_run_id, status, discovery_method,
                 importance, risk_score, risk_level, last_risk_run,
-                last_scan_id, last_scan_status, last_scanned_at,
+                last_scan_id, last_scan_status, last_scanned_at, last_cancelled_scan_at,
                 open_critical, open_high, open_medium, open_low, open_info, open_total
             FROM assets_enriched
             WHERE risk_score IS NOT NULL AND company_id = $1

@@ -1,10 +1,12 @@
 //! What Surface's LAST SCAN column reads once a scan has been cancelled.
 //!
 //! A cancelled scan looked at nothing, so it cannot be the asset's last scan.
-//! The column has to fall back to the newest scan that did look, and read
-//! "Never" when there is none — whether the cancellation came from the stop
-//! button on the scan's row in Ops, from stopping the discovery run that queued
-//! it, or from blacklisting the target while it was being scanned.
+//! The column falls back to the newest scan that did look; failing that it says
+//! "Cancelled", because an operator who has just stopped a scan is the last
+//! person who should be told the host was never scanned. Only an asset nothing
+//! has ever been queued against reads "Never". The three cancellation paths —
+//! the stop button on the scan's row in Ops, stopping the discovery run that
+//! queued it, and blacklisting the target mid-scan — all land in the same place.
 //!
 //! The rule lives in the `assets_enriched` view, one join below every read path,
 //! so these go through the repository search the Surface page actually calls
@@ -145,8 +147,30 @@ fn last_scan(asset: &Asset) -> (Option<String>, Option<String>, Option<DateTime<
     )
 }
 
+/// What the column actually renders, so the assertions read as the three states
+/// an operator can see rather than as a nullability puzzle.
+#[derive(Debug, PartialEq, Eq)]
+enum Column {
+    Scan(String),
+    Cancelled,
+    Never,
+}
+
+fn column(asset: &Asset) -> Column {
+    match (asset.last_scanned_at, asset.last_cancelled_scan_at) {
+        (Some(_), _) => Column::Scan(
+            asset
+                .last_scan_status
+                .clone()
+                .expect("a scan time comes with its status"),
+        ),
+        (None, Some(_)) => Column::Cancelled,
+        (None, None) => Column::Never,
+    }
+}
+
 #[tokio::test]
-async fn cancelling_an_assets_only_scan_leaves_surface_reading_never() {
+async fn cancelling_an_assets_only_scan_reads_cancelled_not_never() {
     let Some(_) = database_url() else {
         eprintln!("DATABASE_URL not set — skipping");
         return;
@@ -162,13 +186,34 @@ async fn cancelling_an_assets_only_scan_leaves_surface_reading_never() {
         .await
         .expect("cancel scan");
 
-    let (id, status, at) = last_scan(&from_surface(&state, company_id, &identifier).await);
-    // Nothing looked at this host, so the column is the same "Never" it showed
-    // before the scan was ever queued -- not a fresh timestamp from the moment
-    // the operator stopped it.
+    let asset = from_surface(&state, company_id, &identifier).await;
+    let (id, status, at) = last_scan(&asset);
+    // Nothing looked at this host, so no scan time is reported -- not the fresh
+    // one from the moment the operator stopped it.
     assert_eq!(id, None, "a cancelled scan is not the last scan");
     assert_eq!(status, None);
     assert_eq!(at, None, "no scan time is reported for a cancelled scan");
+    // But the column still has to account for the attempt. "Never" would tell
+    // the operator who just stopped the scan that it never existed.
+    assert_eq!(column(&asset), Column::Cancelled);
+    assert!(asset.last_cancelled_scan_at.is_some());
+}
+
+#[tokio::test]
+async fn an_asset_that_was_never_scanned_still_reads_never() {
+    let Some(_) = database_url() else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    let state = app_state().await;
+    let company_id = company(&state).await;
+    let (_, identifier) = asset(&state, company_id).await;
+
+    // The boundary "Cancelled" has to keep: an asset nothing was ever queued
+    // against is a different state, and it is the one that reads "Never".
+    let asset = from_surface(&state, company_id, &identifier).await;
+    assert_eq!(column(&asset), Column::Never);
+    assert_eq!(asset.last_cancelled_scan_at, None);
 }
 
 #[tokio::test]
@@ -196,11 +241,18 @@ async fn cancelling_a_scan_falls_back_to_the_last_completed_one() {
         .await
         .expect("cancel scan");
 
-    let (id, status, at) = last_scan(&from_surface(&state, company_id, &identifier).await);
+    let asset = from_surface(&state, company_id, &identifier).await;
+    let (id, status, at) = last_scan(&asset);
     // What the asset actually knows about itself is three hours old, and that is
-    // what the column has to say.
+    // what the column has to say -- a real scan outranks the cancellation, which
+    // stays on the record without taking the column over.
     assert_eq!(id, Some(completed.to_string()), "the surviving scan wins");
     assert_eq!(status.as_deref(), Some("completed"));
+    assert_eq!(column(&asset), Column::Scan("completed".to_string()));
+    assert!(
+        asset.last_cancelled_scan_at.is_some(),
+        "the cancellation is still recorded, it just does not win"
+    );
     assert!(
         at.expect("a scan time") < Utc::now() - Duration::hours(2),
         "the timestamp is the completed scan's, not the cancellation's"
@@ -232,12 +284,14 @@ async fn a_failed_scan_still_counts_as_the_last_scan() {
         .await
         .expect("cancel scan");
 
-    let (id, status, _) = last_scan(&from_surface(&state, company_id, &identifier).await);
+    let asset = from_surface(&state, company_id, &identifier).await;
+    let (id, status, _) = last_scan(&asset);
     // Only cancellation is excluded. A failed scan did reach the host and has a
     // result to show, so hiding it would lose the one signal that says the last
     // attempt went wrong.
     assert_eq!(id, Some(failed.to_string()));
     assert_eq!(status.as_deref(), Some("failed"));
+    assert_eq!(column(&asset), Column::Scan("failed".to_string()));
 }
 
 #[tokio::test]
@@ -257,17 +311,19 @@ async fn a_scan_in_flight_is_still_reported() {
         .await
         .expect("start scan");
 
-    let (id, status, at) = last_scan(&from_surface(&state, company_id, &identifier).await);
+    let asset = from_surface(&state, company_id, &identifier).await;
+    let (id, status, at) = last_scan(&asset);
     // The list renders `running` with its own marker; dropping unfinished scans
     // alongside cancelled ones would make a scan disappear from the column for
     // exactly as long as it was running.
     assert_eq!(id, Some(running.to_string()));
     assert_eq!(status.as_deref(), Some("running"));
     assert!(at.is_some());
+    assert_eq!(column(&asset), Column::Scan("running".to_string()));
 }
 
 #[tokio::test]
-async fn stopping_a_discovery_run_leaves_the_assets_it_queued_reading_never() {
+async fn stopping_a_discovery_run_leaves_the_assets_it_queued_reading_cancelled() {
     let Some(_) = database_url() else {
         eprintln!("DATABASE_URL not set — skipping");
         return;
@@ -310,21 +366,25 @@ async fn stopping_a_discovery_run_leaves_the_assets_it_queued_reading_never() {
 
     // Stopping a run cancels every scan it had outstanding at once, so this is
     // where a cancelled row masquerading as the last scan showed up in bulk.
-    let (id, _, at) = last_scan(&from_surface(&state, company_id, &never_scanned_id).await);
+    let stopped = from_surface(&state, company_id, &never_scanned_id).await;
+    let (id, _, at) = last_scan(&stopped);
     assert_eq!(id, None);
     assert_eq!(at, None);
+    assert_eq!(column(&stopped), Column::Cancelled);
 
-    let (id, status, _) = last_scan(&from_surface(&state, company_id, &scanned_before_id).await);
+    let kept = from_surface(&state, company_id, &scanned_before_id).await;
+    let (id, status, _) = last_scan(&kept);
     assert_eq!(
         id,
         Some(earlier.to_string()),
         "the pre-run scan still stands"
     );
     assert_eq!(status.as_deref(), Some("completed"));
+    assert_eq!(column(&kept), Column::Scan("completed".to_string()));
 }
 
 #[tokio::test]
-async fn blacklisting_an_asset_mid_scan_leaves_it_reading_never() {
+async fn blacklisting_an_asset_mid_scan_leaves_it_reading_cancelled() {
     let Some(_) = database_url() else {
         eprintln!("DATABASE_URL not set — skipping");
         return;
@@ -347,13 +407,15 @@ async fn blacklisting_an_asset_mid_scan_leaves_it_reading_never() {
         .expect("cancel scans for assets");
     assert_eq!(cancelled, 1);
 
-    let (id, status, at) = last_scan(&from_surface(&state, company_id, &identifier).await);
+    let asset = from_surface(&state, company_id, &identifier).await;
+    let (id, status, at) = last_scan(&asset);
     // A scan stopped part-way through a blacklisted host is the case where a
     // timestamp is most misleading: it reads as a completed look at a target we
     // have just undertaken not to touch.
     assert_eq!(id, None);
     assert_eq!(status, None);
     assert_eq!(at, None);
+    assert_eq!(column(&asset), Column::Cancelled);
 }
 
 #[tokio::test]

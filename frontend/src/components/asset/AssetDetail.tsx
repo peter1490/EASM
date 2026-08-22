@@ -845,7 +845,7 @@ export function AssetDetail({
 
       <div className="flex items-center justify-between gap-3 border-b border-rule">
         <Tabs options={tabs} value={tab} onChange={setTab} />
-        {asset.last_scan_status && (
+        {asset.last_scan_status ? (
           <span className="inline-flex items-center gap-1.5 text-[11.5px] text-ink-3 pb-1.5">
             <Dot color={lastScanTone} />
             {asset.last_scan_id ? (
@@ -858,6 +858,15 @@ export function AssetDetail({
               </>
             )}
           </span>
+        ) : (
+          // No scan of this asset survives to be reported. If one was stopped,
+          // say so -- saying nothing reads as an asset nobody has tried to scan.
+          asset.last_cancelled_scan_at && (
+            <span className="inline-flex items-center gap-1.5 text-[11.5px] text-ink-3 pb-1.5">
+              <Dot color="var(--nil)" />
+              Last scan cancelled {ago(asset.last_cancelled_scan_at)}
+            </span>
+          )
         )}
       </div>
 

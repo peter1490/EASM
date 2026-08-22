@@ -207,6 +207,9 @@ export type Asset = {
   last_scan_id?: string | null;
   last_scan_status?: string | null;
   last_scanned_at?: string | null;
+  /** Newest cancelled scan. The last-scan column falls back to it, so a stopped
+   *  scan reads "Cancelled" instead of as a host nobody ever looked at. */
+  last_cancelled_scan_at?: string | null;
   created_at: string;
   updated_at: string;
 };

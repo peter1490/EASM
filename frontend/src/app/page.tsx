@@ -24,7 +24,16 @@ import {
 } from "@/components/kit";
 import { TrendChart, TrendLegend } from "@/components/charts/TrendChart";
 import { useDiscovery, runProgress } from "@/hooks/useDiscovery";
-import { OPEN_STATUSES, riskFraction, riskTone, severityTone, SEVERITY_ORDER, RISK_ORDER } from "@/lib/severity";
+import {
+  OPEN_STATUSES,
+  RISK_ORDER,
+  SEVERITY_ORDER,
+  formatRiskScore,
+  riskAccent,
+  riskFraction,
+  riskTone,
+  severityTone,
+} from "@/lib/severity";
 import { ago, elapsed, num, pct, plural, score } from "@/lib/format";
 import { useAuth } from "@/context/AuthContext";
 
@@ -166,8 +175,8 @@ export default function OverviewPage() {
           />
           <ExposureStat
             label="Portfolio risk"
-            value={score(overview?.average_risk_score)}
-            tone={riskToneColour(overview?.average_risk_score)}
+            value={formatRiskScore(overview?.average_risk_score)}
+            tone={riskAccent(overview?.average_risk_score)}
             note={
               <span className="text-ink-3">
                 <span className="mono">{num(overview?.assets_pending_calculation ?? 0)}</span> awaiting calculation
@@ -205,7 +214,7 @@ export default function OverviewPage() {
 
             <Breakdown
               label="By risk level"
-              total={`avg ${score(overview?.average_risk_score)}`}
+              total={`avg ${formatRiskScore(overview?.average_risk_score)}`}
               segments={RISK_ORDER.filter((l) => (byLevel[l] ?? 0) > 0).map((l) => ({
                 value: byLevel[l] ?? 0,
                 color: riskTone(l).dot,
@@ -346,14 +355,6 @@ export default function OverviewPage() {
       </div>
     </div>
   );
-}
-
-function riskToneColour(value: number | null | undefined): string | undefined {
-  if (value == null) return undefined;
-  if (value >= 85) return "var(--crit)";
-  if (value >= 65) return "var(--high)";
-  if (value >= 40) return "var(--med)";
-  return undefined;
 }
 
 function scanTone(status: string): string {
@@ -517,8 +518,11 @@ function AssetQueue({ assets }: { assets: Asset[] }) {
               <TD className="text-[12px] text-ink-2 capitalize">{asset.asset_type}</TD>
               <TD>
                 <div className="flex items-center gap-2">
-                  <span className="mono font-medium w-[34px]" style={{ color: tone.dot }}>
-                    {score(asset.risk_score)}
+                  <span
+                    className="mono font-medium w-[34px] text-right tabular-nums"
+                    style={{ color: tone.dot }}
+                  >
+                    {formatRiskScore(asset.risk_score)}
                   </span>
                   <Bar value={riskFraction(asset.risk_score)} color={tone.dot} className="w-[56px]" />
                   <RiskChip level={asset.risk_level} />

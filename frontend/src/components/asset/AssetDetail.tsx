@@ -51,11 +51,13 @@ import {
 } from "@/components/kit";
 import { cn } from "@/lib/cn";
 import { uniq } from "@/lib/list";
-import { ago, dateTime, humanise, num, pct, score as fmtScore } from "@/lib/format";
+import { ago, dateTime, humanise, num, pct } from "@/lib/format";
 import {
   SEVERITY_ORDER,
   findingStatus,
   isOpen,
+  RISK_SCORE_MAX,
+  formatRiskScore,
   riskFraction,
   riskLevelFromScore,
   riskTone,
@@ -517,8 +519,9 @@ export function AssetDetail({
         </div>
         <div className="flex items-baseline gap-2 mt-1">
           <span className="fig text-[30px] leading-none" style={{ color: tone.dot }}>
-            {fmtScore(asset.risk_score)}
+            {formatRiskScore(asset.risk_score)}
           </span>
+          <span className="mono text-[12px] text-ink-3">/ {RISK_SCORE_MAX}</span>
           {level && <RiskChip level={level} />}
         </div>
         <Bar value={riskFraction(asset.risk_score)} color={tone.dot} className="mt-2.5" />

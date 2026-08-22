@@ -2,8 +2,7 @@
 
 import { useId, useMemo, useState } from "react";
 import { cn } from "@/lib/cn";
-import { score as fmtScore } from "@/lib/format";
-import { RISK_SCORE_MAX } from "@/lib/severity";
+import { RISK_SCORE_MAX, formatRiskScore } from "@/lib/severity";
 
 export interface TrendPoint {
   timestamp: string;
@@ -163,7 +162,7 @@ export function TrendChart({
           </span>
           <span className="flex items-center gap-1.5">
             <span className="w-2.5 h-0.5 bg-accent rounded-sm" />
-            risk <span className="mono font-medium">{fmtScore(active.risk_score)}</span>
+            risk <span className="mono font-medium">{formatRiskScore(active.risk_score)}</span>
           </span>
           <span className="flex items-center gap-1.5">
             <span className="w-2.5 border-t-2 border-dashed border-ink-3" />

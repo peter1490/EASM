@@ -84,6 +84,39 @@ export function riskFraction(score: number | null | undefined): number {
   return Math.min(Math.max(score, 0), RISK_SCORE_MAX) / RISK_SCORE_MAX;
 }
 
+/**
+ * A risk score as it should be displayed: a whole number.
+ *
+ * The generic `score()` formatter carries a decimal, which reads as precision the
+ * model does not claim — on a 0–1000 scale the tenth of a point is noise, and "166.4"
+ * next to "1000" is just harder to scan. Every risk score in the UI goes through here
+ * so the scale is stated once.
+ */
+export function formatRiskScore(score: number | null | undefined): string {
+  if (score == null || Number.isNaN(score)) return "—";
+  return Math.round(score).toString();
+}
+
+/** A signed risk-score change, for history entries. */
+export function formatRiskDelta(delta: number): string {
+  const rounded = Math.round(delta);
+  return rounded > 0 ? `+${rounded}` : rounded.toString();
+}
+
+/**
+ * The colour a bare risk score should be shown in, or `undefined` when the score is
+ * unremarkable and should stay in the default ink.
+ *
+ * Derived from the bands rather than restating them. The dashboard used to carry its
+ * own 85 / 65 / 40 cut-offs, which after the move to a 0–1000 scale painted a portfolio
+ * average of 166 — an informational score — in critical red.
+ */
+export function riskAccent(score: number | null | undefined): string | undefined {
+  const level = riskLevelFromScore(score);
+  if (level === "critical" || level === "high" || level === "medium") return riskTone(level).dot;
+  return undefined;
+}
+
 export const FINDING_STATUSES: Array<{ value: FindingStatus; label: string; dot: string }> = [
   { value: "open", label: "Open", dot: "var(--ink-3)" },
   { value: "acknowledged", label: "Acknowledged", dot: "var(--low)" },

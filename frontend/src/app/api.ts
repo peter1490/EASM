@@ -1748,6 +1748,25 @@ export type ExclusionStats = {
 // EXCLUSION API
 // ============================================================================
 
+/**
+ * The readable half of an API error body.
+ *
+ * Errors come back as `{"error": {"message": …, "code": …}}`, and throwing the
+ * raw text put that whole JSON blob in front of the user — bearable in a
+ * single-asset panel, unreadable in a bulk failure list. Falls back to the text
+ * as given, which is what a proxy or a gateway in front of the API sends.
+ */
+function apiErrorText(body: string, fallback: string): string {
+  try {
+    const parsed = JSON.parse(body) as { error?: { message?: unknown } };
+    const message = parsed?.error?.message;
+    if (typeof message === "string" && message.trim()) return message.trim();
+  } catch {
+    // Not JSON. The raw text is the best we have.
+  }
+  return body.trim() || fallback;
+}
+
 export async function listExclusions(
   limit = 50,
   offset = 0,
@@ -1776,8 +1795,7 @@ export async function createExclusion(entry: ExclusionCreate): Promise<Exclusion
     credentials: "include",
   });
   if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(errorText || `Failed to create exclusion: ${res.status}`);
+    throw new Error(apiErrorText(await res.text(), `Failed to create exclusion: ${res.status}`));
   }
   return res.json();
 }
@@ -1807,8 +1825,7 @@ export async function updateExclusion(
     credentials: "include",
   });
   if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(errorText || `Failed to update exclusion: ${res.status}`);
+    throw new Error(apiErrorText(await res.text(), `Failed to update exclusion: ${res.status}`));
   }
   return res.json();
 }
@@ -1850,8 +1867,7 @@ export async function excludeAsset(
     credentials: "include",
   });
   if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(errorText || `Failed to exclude asset: ${res.status}`);
+    throw new Error(apiErrorText(await res.text(), `Failed to exclude asset: ${res.status}`));
   }
   return res.json();
 }

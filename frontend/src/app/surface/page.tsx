@@ -46,6 +46,7 @@ import {
   type FacetGroup,
 } from "@/components/kit";
 import { AssetDetail } from "@/components/asset/AssetDetail";
+import { BulkExcludeDrawer, type BulkExcludeSummary } from "@/components/asset/BulkExcludeDrawer";
 import { Notice, confidenceColor, useCanWrite } from "@/components/asset/shared";
 import { ago, dateTime, humanise, num, pct } from "@/lib/format";
 import {
@@ -219,6 +220,7 @@ function Surface() {
   const [busy, setBusy] = useState<string | null>(null);
   const [scanningIds, setScanningIds] = useState<Set<string>>(new Set());
   const [importanceMode, setImportanceMode] = useState(false);
+  const [excluding, setExcluding] = useState(false);
 
   const hasLoadedRef = useRef(false);
   const textRef = useRef(text);
@@ -889,6 +891,33 @@ function Surface() {
         )}
       </Drawer>
 
+      <BulkExcludeDrawer
+        assets={selectedAssets}
+        open={excluding}
+        onClose={() => setExcluding(false)}
+        onDone={(summary: BulkExcludeSummary) => {
+          void fetchPage();
+          // A partial run keeps the selection, so the rows that failed are
+          // still in hand to retry. A clean one has nothing left to act on.
+          if (summary.failures.length === 0) setSelected(new Set());
+          setNotice(
+            summary.failures.length === 0
+              ? {
+                  tone: "ok",
+                  text: `${summary.entries} ${summary.blacklisted ? "blacklist" : "exclusion"} entr${
+                    summary.entries === 1 ? "y" : "ies"
+                  } added.`,
+                }
+              : {
+                  tone: "warn",
+                  text: `${summary.entries} of ${summary.entries + summary.failures.length} ${
+                    summary.blacklisted ? "blacklist" : "exclusion"
+                  } entries added.`,
+                },
+          );
+        }}
+      />
+
       <BulkBar count={selected.size} onClear={() => setSelected(new Set())}>
         {importanceMode ? (
           <>
@@ -919,6 +948,9 @@ function Surface() {
             </BulkAction>
             <BulkAction disabled={!canWrite || busy != null} onClick={() => setImportanceMode(true)}>
               Set importance
+            </BulkAction>
+            <BulkAction disabled={!canWrite || busy != null} onClick={() => setExcluding(true)}>
+              Exclude
             </BulkAction>
             <BulkAction onClick={() => exportRecords(selectedAssets, "csv", "surface-selected")}>
               Export CSV

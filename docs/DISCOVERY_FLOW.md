@@ -1036,6 +1036,17 @@ object reaches no score, no scan and no list.
 The distinction is what each does to an asset that already exists. Neither lets
 discovery find *more*.
 
+Either strength can be written as a **pattern**: a `*` in a domain, organization
+or certificate value stands for any run of characters, dots included, so
+`*.cdn.example.com` covers `a.cdn.example.com` and `a.b.cdn.example.com` and not
+the apex `cdn.example.com`. Address kinds refuse a pattern — a CIDR entry is
+already the notation for a range — and a pattern with too little literal text to
+name anything is refused on the way in, because as a blacklist it would delete
+the estate. Matching runs in two directions and each has its own mechanism: one
+value against many entries walks the company's pattern rows in memory, while one
+entry against many rows binds the value as a SQL `LIKE` pattern with `%` and `_`
+escaped, so a literal underscore in a name never becomes a wildcard of its own.
+
 The list is applied at three points, because a run in progress cannot be trusted
 to notice a change on its own:
 

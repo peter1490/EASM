@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     error::ApiError,
+    models::exclusion::{accepts_pattern, is_pattern, like_pattern, pattern_matches},
     models::{ExclusionCreate, ExclusionEntry, ExclusionObjectType, ExclusionUpdate},
 };
 
@@ -99,32 +100,39 @@ pub trait ExclusionRepository: Send + Sync {
     /// Delete an exclusion entry
     async fn delete(&self, company_id: Uuid, id: &Uuid) -> Result<(), ApiError>;
 
-    /// Delete all descendant assets that were discovered from an excluded object
-    /// Returns the count of deleted assets
-    async fn delete_descendant_assets(
+    /// The assets an entry *names*, before any descendant of theirs is
+    /// considered.
+    ///
+    /// Deliberately narrow, and it means something different for each kind of
+    /// entry: a literal names the one asset carrying that value, a CIDR names
+    /// every address inside it, and a pattern names everything it matches. A
+    /// sibling that merely falls under the same rule — another subdomain of an
+    /// excluded domain, reached by some other path and never a descendant of it
+    /// — is not named by any of them.
+    ///
+    /// One notion, because every caller wants the same set: the cascade deletes
+    /// their descendants, the purge deletes them too.
+    async fn matched_asset_ids(
         &self,
         company_id: Uuid,
-        asset_id: &Uuid,
-    ) -> Result<i64, ApiError>;
+        object_type: &ExclusionObjectType,
+        object_value: &str,
+    ) -> Result<Vec<Uuid>, ApiError>;
 
-    /// Delete descendants for every IP asset that falls inside the given CIDR.
-    /// Returns the count of deleted assets (root IP assets are preserved).
-    async fn delete_descendant_assets_for_cidr(
+    /// Delete everything discovered *through* the given assets, keeping the
+    /// assets themselves. Returns the count deleted.
+    async fn delete_descendants_of(
         &self,
         company_id: Uuid,
-        cidr: &str,
+        asset_ids: &[Uuid],
     ) -> Result<i64, ApiError>;
 
     /// Delete the assets a blacklist entry names, and everything discovered
     /// through them. Returns the count of deleted assets.
     ///
-    /// "Names" is deliberately narrow: the asset carrying the entry's own
-    /// value, and for a CIDR every address inside it. A sibling that merely
-    /// matches the rule — another subdomain of the blacklisted domain, reached
-    /// by some other path and never a descendant of it — is left where it is.
-    /// The rule still keeps discovery from writing it again, so it disappears
-    /// when it is next matched rather than being deleted out from under an
-    /// operator who pointed at one asset.
+    /// The rule still keeps discovery from writing an unnamed sibling again, so
+    /// it disappears when it is next matched rather than being deleted out from
+    /// under an operator who pointed at one asset.
     ///
     /// Findings, scans, sources and relationships go with the assets: every one
     /// of those tables cascades from `assets.id`. That is what takes a
@@ -135,14 +143,6 @@ pub trait ExclusionRepository: Send + Sync {
         object_type: &ExclusionObjectType,
         object_value: &str,
     ) -> Result<i64, ApiError>;
-
-    /// Find asset ID by type and identifier
-    async fn find_asset_id(
-        &self,
-        object_type: &ExclusionObjectType,
-        object_value: &str,
-        company_id: Uuid,
-    ) -> Result<Option<Uuid>, ApiError>;
 
     /// Search exclusion entries
     async fn search(
@@ -201,6 +201,49 @@ impl SqlxExclusionRepository {
             })
             .map(|(id, _)| id)
             .collect())
+    }
+
+    /// The company's pattern entries of one kind.
+    ///
+    /// Checking a value against many entries is the opposite direction from
+    /// applying one entry to many rows: the wildcards are in the table, not in
+    /// the probe, so SQL cannot do the matching without rewriting each stored
+    /// value into a `LIKE` pattern mid-query. Patterns are the minority, so
+    /// they are read and walked instead.
+    async fn pattern_entries(
+        &self,
+        object_type: &ExclusionObjectType,
+        company_id: Uuid,
+    ) -> Result<Vec<ExclusionEntry>, ApiError> {
+        if !accepts_pattern(object_type) {
+            return Ok(Vec::new());
+        }
+
+        let rows = sqlx::query_as::<_, ExclusionEntry>(
+            "SELECT * FROM exclusions
+             WHERE company_id = $2 AND object_type = $1 AND object_value LIKE '%*%'
+             ORDER BY created_at DESC",
+        )
+        .bind(object_type.to_string())
+        .bind(company_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    /// The first pattern entry of this kind that covers `value`.
+    async fn matching_pattern_entry(
+        &self,
+        object_type: &ExclusionObjectType,
+        value: &str,
+        company_id: Uuid,
+    ) -> Result<Option<ExclusionEntry>, ApiError> {
+        Ok(self
+            .pattern_entries(object_type, company_id)
+            .await?
+            .into_iter()
+            .find(|entry| pattern_matches(&entry.object_value, value)))
     }
 }
 
@@ -302,7 +345,14 @@ impl ExclusionRepository for SqlxExclusionRepository {
         .fetch_one(&self.pool)
         .await?;
 
-        Ok(exists)
+        if exists {
+            return Ok(true);
+        }
+
+        Ok(self
+            .matching_pattern_entry(object_type, &value, company_id)
+            .await?
+            .is_some())
     }
 
     async fn is_domain_or_parent_excluded(
@@ -344,7 +394,11 @@ impl ExclusionRepository for SqlxExclusionRepository {
             }
         }
 
-        Ok(None)
+        // Patterns last: an exact entry and a parent entry both name the domain
+        // more precisely than a wildcard does, and the entry that comes back is
+        // the one the UI shows as the reason this asset is excluded.
+        self.matching_pattern_entry(&ExclusionObjectType::Domain, &domain, company_id)
+            .await
     }
 
     async fn is_ip_excluded(
@@ -501,59 +555,65 @@ impl ExclusionRepository for SqlxExclusionRepository {
         Ok(())
     }
 
-    async fn delete_descendant_assets(
+    async fn matched_asset_ids(
         &self,
         company_id: Uuid,
-        asset_id: &Uuid,
-    ) -> Result<i64, ApiError> {
-        // Use a recursive CTE to find all descendants and delete them
-        // This preserves the root asset but deletes all children
-        let result = sqlx::query_scalar::<_, i64>(
-            r#"
-            WITH RECURSIVE descendants AS (
-                -- Start with direct children of the excluded asset
-                SELECT id, parent_id, 1 as depth
-                FROM assets
-                WHERE parent_id = $1 AND company_id = $2
-                
-                UNION ALL
-                
-                -- Recursively get children of children
-                SELECT a.id, a.parent_id, d.depth + 1
-                FROM assets a
-                INNER JOIN descendants d ON a.parent_id = d.id
-                WHERE d.depth < 100 AND a.company_id = $2 -- Prevent infinite loops
-            ),
-            deleted AS (
-                DELETE FROM assets
-                WHERE id IN (SELECT id FROM descendants) AND company_id = $2
-                RETURNING id
-            )
-            SELECT COUNT(*) FROM deleted
-            "#,
-        )
-        .bind(asset_id)
-        .bind(company_id)
-        .fetch_one(&self.pool)
-        .await?;
+        object_type: &ExclusionObjectType,
+        object_value: &str,
+    ) -> Result<Vec<Uuid>, ApiError> {
+        let value = object_value.trim().to_lowercase();
+        if value.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        Ok(result)
+        // A CIDR is not an asset type at all, so the addresses inside it are
+        // what it names.
+        if matches!(object_type, ExclusionObjectType::Cidr) {
+            return self.ip_asset_ids_in_cidr(company_id, &value).await;
+        }
+
+        let type_str = object_type.to_string();
+
+        // A pattern names everything it matches; a literal names at most one.
+        // Both are one indexed query -- the pattern's is a prefix scan whenever
+        // it starts with literal text.
+        let ids = if is_pattern(&value) {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM assets
+                 WHERE company_id = $3 AND asset_type::text = $1 AND LOWER(identifier) LIKE $2",
+            )
+            .bind(&type_str)
+            .bind(like_pattern(&value))
+            .bind(company_id)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM assets
+                 WHERE company_id = $3 AND asset_type::text = $1 AND LOWER(identifier) = $2",
+            )
+            .bind(&type_str)
+            .bind(&value)
+            .bind(company_id)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        Ok(ids)
     }
 
-    async fn delete_descendant_assets_for_cidr(
+    async fn delete_descendants_of(
         &self,
         company_id: Uuid,
-        cidr: &str,
+        asset_ids: &[Uuid],
     ) -> Result<i64, ApiError> {
-        let root_ids = self.ip_asset_ids_in_cidr(company_id, cidr).await?;
-
-        if root_ids.is_empty() {
+        if asset_ids.is_empty() {
             return Ok(0);
         }
 
-        // Recursively delete descendants of matching root IP assets.
-        // Root IP assets are intentionally preserved.
-        let result = sqlx::query_scalar::<_, i64>(
+        // The roots are walked but never deleted: excluding keeps the object
+        // and drops what grew from it.
+        let deleted = sqlx::query_scalar::<_, i64>(
             r#"
             WITH RECURSIVE descendants AS (
                 SELECT id, parent_id, 1 as depth
@@ -566,6 +626,7 @@ impl ExclusionRepository for SqlxExclusionRepository {
                 SELECT a.id, a.parent_id, d.depth + 1
                 FROM assets a
                 INNER JOIN descendants d ON a.parent_id = d.id
+                -- Prevent infinite loops on a cycle in the lineage.
                 WHERE d.depth < 100 AND a.company_id = $2
             ),
             deleted AS (
@@ -576,12 +637,12 @@ impl ExclusionRepository for SqlxExclusionRepository {
             SELECT COUNT(*) FROM deleted
             "#,
         )
-        .bind(&root_ids)
+        .bind(asset_ids)
         .bind(company_id)
         .fetch_one(&self.pool)
         .await?;
 
-        Ok(result)
+        Ok(deleted)
     }
 
     async fn purge_entry_assets(
@@ -590,26 +651,17 @@ impl ExclusionRepository for SqlxExclusionRepository {
         object_type: &ExclusionObjectType,
         object_value: &str,
     ) -> Result<i64, ApiError> {
-        // A CIDR is not an asset, so the addresses inside it are the roots.
-        // Everything else names one asset, if it exists at all.
-        let root_ids = match object_type {
-            ExclusionObjectType::Cidr => {
-                self.ip_asset_ids_in_cidr(company_id, object_value).await?
-            }
-            _ => self
-                .find_asset_id(object_type, object_value, company_id)
-                .await?
-                .into_iter()
-                .collect(),
-        };
+        let root_ids = self
+            .matched_asset_ids(company_id, object_type, object_value)
+            .await?;
 
         if root_ids.is_empty() {
             return Ok(0);
         }
 
         // The roots go with their descendants, which is the whole difference
-        // between this and `delete_descendant_assets`: excluding keeps the
-        // object and drops what grew from it, blacklisting keeps neither.
+        // between this and `delete_descendants_of`: excluding keeps the object
+        // and drops what grew from it, blacklisting keeps neither.
         let deleted = sqlx::query_scalar::<_, i64>(
             r#"
             WITH RECURSIVE tree AS (
@@ -639,27 +691,6 @@ impl ExclusionRepository for SqlxExclusionRepository {
         .await?;
 
         Ok(deleted)
-    }
-
-    async fn find_asset_id(
-        &self,
-        object_type: &ExclusionObjectType,
-        object_value: &str,
-        company_id: Uuid,
-    ) -> Result<Option<Uuid>, ApiError> {
-        let type_str = object_type.to_string();
-        let value = object_value.trim().to_lowercase();
-
-        let id = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM assets WHERE asset_type::text = $1 AND LOWER(identifier) = $2 AND company_id = $3",
-        )
-        .bind(&type_str)
-        .bind(&value)
-        .bind(company_id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(id)
     }
 
     async fn search(

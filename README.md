@@ -338,6 +338,12 @@ Key variables:
 - `POST /api/exclusions/check` - Is this object excluded?
 - `GET /api/exclusions/stats` - Counts by type
 
+A domain, organization or certificate value can carry a `*`, which stands for
+anything, dots included. `*.cdn.example.com` covers every name under
+`cdn.example.com` at any depth and leaves the apex alone — a plain
+`cdn.example.com` entry already covers both, so the pattern is for when you want
+the parent kept. A pattern too broad to name anything (`*`, `*.com`) is refused.
+
 An **exclusion** stops discovery finding anything *new* through an object —
 a CDN, a shared host, a provider netblock — while keeping what it already found:
 those assets stay in the inventory, keep their findings, keep counting towards

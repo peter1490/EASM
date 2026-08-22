@@ -28,7 +28,7 @@ import {
   TR,
 } from "@/components/kit";
 import { ago, dateTime, num } from "@/lib/format";
-import { EXCLUSION_TYPES, exclusionType } from "./exclusionTypes";
+import { EXCLUSION_TYPES, exclusionType, isPattern } from "./exclusionTypes";
 import {
   ExclusionCreateDrawer,
   ExclusionDeleteDrawer,
@@ -214,7 +214,8 @@ export function ExclusionsSegment({ onCount }: { onCount?: (count: number) => vo
             </Select>
           </div>
           <span className="text-[11.5px] text-ink-3 ml-auto">
-            Subdomains of an excluded domain and IPs inside an excluded CIDR are covered too.
+            Subdomains of an excluded domain and IPs inside an excluded CIDR are covered too. A value can
+            carry a <span className="mono">*</span>.
           </span>
         </div>
 
@@ -280,8 +281,15 @@ export function ExclusionsSegment({ onCount }: { onCount?: (count: number) => vo
                           {type.label}
                         </Chip>
                       </TD>
-                      <TD className="mono text-[12.5px] max-w-[260px] truncate" title={entry.object_value}>
-                        {entry.object_value}
+                      <TD className="max-w-[260px]">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="mono text-[12.5px] truncate" title={entry.object_value}>
+                            {entry.object_value}
+                          </span>
+                          {isPattern(entry.object_value) && (
+                            <Chip title="A pattern: * stands for anything, dots included">Pattern</Chip>
+                          )}
+                        </div>
                       </TD>
                       <TD>
                         {entry.blacklisted ? (

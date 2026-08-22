@@ -554,6 +554,186 @@ async fn excluding_something_already_excluded_promotes_it_instead_of_failing() {
 }
 
 #[tokio::test]
+async fn a_wildcard_exclusion_reaches_the_queue_and_the_assets_it_matches() {
+    let Some(_) = database_url() else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    let state = app_state().await;
+    let company_id = company(&state).await;
+
+    let run = state
+        .discovery_run_repository
+        .create(&DiscoveryRunCreate::default(), company_id)
+        .await
+        .expect("create run");
+    state
+        .discovery_run_repository
+        .start(company_id, &run.id)
+        .await
+        .expect("start run");
+
+    enqueue(&state, run.id, QueueItemType::Domain, "a.cdn.wild.test").await;
+    enqueue(
+        &state,
+        run.id,
+        QueueItemType::Domain,
+        "deep.chain.cdn.wild.test",
+    )
+    .await;
+    // The apex the pattern deliberately does not cover, and an unrelated name.
+    enqueue(&state, run.id, QueueItemType::Domain, "cdn.wild.test").await;
+    enqueue(&state, run.id, QueueItemType::Domain, "keep.wild.test").await;
+
+    let shallow = asset(&state, company_id, "domain", "a.cdn.wild.test").await;
+    let deep = asset(&state, company_id, "domain", "deep.chain.cdn.wild.test").await;
+    let apex = asset(&state, company_id, "domain", "cdn.wild.test").await;
+    let unrelated = asset(&state, company_id, "domain", "keep.wild.test").await;
+
+    state
+        .exclusion_repository
+        .create(
+            &ExclusionCreate {
+                object_type: ExclusionObjectType::Domain,
+                object_value: "*.cdn.wild.test".to_string(),
+                reason: None,
+                delete_descendants: false,
+                blacklisted: false,
+            },
+            None,
+            company_id,
+        )
+        .await
+        .expect("create wildcard entry");
+
+    let (queue_removed, _) = state
+        .discovery_service
+        .apply_exclusion_entry(
+            company_id,
+            &ExclusionObjectType::Domain,
+            "*.cdn.wild.test",
+            false,
+        )
+        .await
+        .expect("apply wildcard entry");
+
+    assert_eq!(
+        queue_removed, 2,
+        "every depth under the pattern, and nothing else"
+    );
+    assert_eq!(
+        queue_status(&state, run.id, "a.cdn.wild.test")
+            .await
+            .as_deref(),
+        Some("skipped")
+    );
+    assert_eq!(
+        queue_status(&state, run.id, "deep.chain.cdn.wild.test")
+            .await
+            .as_deref(),
+        Some("skipped")
+    );
+    // Keeping the apex is the reason to write a pattern rather than a plain
+    // domain entry, which would cover both.
+    assert_eq!(
+        queue_status(&state, run.id, "cdn.wild.test")
+            .await
+            .as_deref(),
+        Some("pending")
+    );
+    assert_eq!(
+        queue_status(&state, run.id, "keep.wild.test")
+            .await
+            .as_deref(),
+        Some("pending")
+    );
+
+    // The same rule, applied to assets rather than queue items.
+    let matched = state
+        .exclusion_repository
+        .matched_asset_ids(company_id, &ExclusionObjectType::Domain, "*.cdn.wild.test")
+        .await
+        .expect("matched asset ids");
+
+    assert!(matched.contains(&shallow));
+    assert!(matched.contains(&deep));
+    assert!(!matched.contains(&apex));
+    assert!(!matched.contains(&unrelated));
+
+    // And to the scan-cancellation lookup, which walks its own query.
+    let covered = state
+        .asset_repository
+        .find_excluded_ids(company_id, &ExclusionObjectType::Domain, "*.cdn.wild.test")
+        .await
+        .expect("find excluded ids");
+
+    assert!(covered.contains(&shallow) && covered.contains(&deep));
+    assert!(!covered.contains(&apex) && !covered.contains(&unrelated));
+}
+
+#[tokio::test]
+async fn a_wildcard_blacklist_purges_every_match_and_its_descendants() {
+    let Some(_) = database_url() else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    let state = app_state().await;
+    let company_id = company(&state).await;
+
+    let matched_a = asset(&state, company_id, "domain", "one.junk.purge.test").await;
+    let matched_b = asset(&state, company_id, "domain", "two.junk.purge.test").await;
+    // Found through a matched name, so it goes with it even though its own
+    // identifier is an address the pattern could never match.
+    let child = child_asset(&state, company_id, "ip", "198.51.100.7", matched_a).await;
+    let apex = asset(&state, company_id, "domain", "junk.purge.test").await;
+    let unrelated = asset(&state, company_id, "domain", "one.junk.keep.test").await;
+
+    let deleted = state
+        .exclusion_repository
+        .purge_entry_assets(
+            company_id,
+            &ExclusionObjectType::Domain,
+            "*.junk.purge.test",
+        )
+        .await
+        .expect("purge wildcard entry");
+
+    assert_eq!(deleted, 3, "both matches and the child of one of them");
+    assert!(!asset_exists(&state, matched_a).await);
+    assert!(!asset_exists(&state, matched_b).await);
+    assert!(!asset_exists(&state, child).await);
+    assert!(asset_exists(&state, apex).await);
+    assert!(asset_exists(&state, unrelated).await);
+}
+
+#[tokio::test]
+async fn a_literal_underscore_in_a_value_is_not_a_sql_wildcard() {
+    let Some(_) = database_url() else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    let state = app_state().await;
+    let company_id = company(&state).await;
+
+    // `_` matches any single character in SQL LIKE. Escaping is what keeps a
+    // pattern from reaching a name the operator never wrote.
+    let literal = asset(&state, company_id, "domain", "a_b.under.test").await;
+    let decoy = asset(&state, company_id, "domain", "axb.under.test").await;
+
+    let matched = state
+        .exclusion_repository
+        .matched_asset_ids(company_id, &ExclusionObjectType::Domain, "a_b.*")
+        .await
+        .expect("matched asset ids");
+
+    assert!(matched.contains(&literal));
+    assert!(
+        !matched.contains(&decoy),
+        "an underscore is a character, not a wildcard"
+    );
+}
+
+#[tokio::test]
 async fn editing_a_reason_leaves_the_strength_alone() {
     let Some(_) = database_url() else {
         eprintln!("DATABASE_URL not set — skipping");

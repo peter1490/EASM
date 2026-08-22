@@ -10,7 +10,7 @@ import {
 } from "@/app/api";
 import { Button, Checkbox, Chip, Drawer, ErrorState, Icon, Input, Label, Select, Textarea } from "@/components/kit";
 import { num } from "@/lib/format";
-import { EXCLUSION_TYPES, exclusionType } from "./exclusionTypes";
+import { EXCLUSION_TYPES, exclusionType, isPattern, WILDCARD } from "./exclusionTypes";
 
 /**
  * Add an exclusion.
@@ -57,8 +57,18 @@ export function ExclusionCreateDrawer({
   }
 
   async function handleCreate() {
-    if (!value.trim()) {
+    const trimmed = value.trim();
+    if (!trimmed) {
       setError("A value is required.");
+      return;
+    }
+    // A fact about the type, so it is answered here rather than in a round
+    // trip. How *broad* a pattern may be is the server's call — it is the one
+    // that has to live with the entry.
+    if (isPattern(trimmed) && !type.wildcards) {
+      setError(
+        `Wildcards are not allowed on ${type.label} exclusions. Use a CIDR entry for a range of addresses.`,
+      );
       return;
     }
     setSaving(true);
@@ -66,7 +76,7 @@ export function ExclusionCreateDrawer({
     try {
       const created = await createExclusion({
         object_type: objectType,
-        object_value: value.trim(),
+        object_value: trimmed,
         reason: reason.trim() || undefined,
         delete_descendants: cascade,
         blacklisted: blacklist,
@@ -134,8 +144,9 @@ export function ExclusionCreateDrawer({
           <div className="flex items-start gap-3 p-3.5 rounded-lg border border-ok/40 bg-ok-wash">
             <Icon name="check" size={15} className="text-ok mt-px" strokeWidth={2.2} />
             <div className="min-w-0">
-              <div className="text-[12.5px] font-semibold text-ink">
+              <div className="text-[12.5px] font-semibold text-ink flex items-center gap-1.5">
                 {result.entry.blacklisted ? "Blacklisted" : "Excluded"}
+                {isPattern(result.entry.object_value) && <Chip>Pattern</Chip>}
               </div>
               <p className="mono text-[12px] text-ink-2 mt-0.5 break-all">
                 {result.entry.object_type} · {result.entry.object_value}
@@ -206,6 +217,7 @@ export function ExclusionCreateDrawer({
             <Select
               value={objectType}
               onChange={(event) => setObjectType(event.target.value as ExclusionObjectType)}
+              aria-label="Object type"
             >
               {EXCLUSION_TYPES.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -231,6 +243,14 @@ export function ExclusionCreateDrawer({
               className="mono"
               aria-label="Value to exclude"
             />
+            {type.wildcards && (
+              <p className="text-[12px] text-ink-2 mt-1.5">
+                <span className="mono text-ink">{WILDCARD}</span> stands for anything, dots included:{" "}
+                <span className="mono">*.cdn.example.com</span> covers every name under{" "}
+                <span className="mono">cdn.example.com</span> at any depth, and leaves the apex itself alone.
+                A plain domain entry already covers both.
+              </p>
+            )}
           </div>
 
           <div>

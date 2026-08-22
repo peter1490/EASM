@@ -558,6 +558,21 @@ impl AssetRepository for SqlxAssetRepository {
             return Ok(Vec::new());
         }
 
+        // A pattern covers whatever it matches, so it stands in for the
+        // per-type predicates below with the value bound as a LIKE pattern.
+        if crate::models::exclusion::is_pattern(&value) {
+            let ids = sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM assets
+                 WHERE company_id = $1 AND asset_type::text = $3 AND LOWER(identifier) LIKE $2",
+            )
+            .bind(company_id)
+            .bind(crate::models::exclusion::like_pattern(&value))
+            .bind(object_type.to_string())
+            .fetch_all(&self.pool)
+            .await?;
+            return Ok(ids);
+        }
+
         // A domain entry covers the name and everything under it; a CIDR covers
         // every address inside it. The rest are their own single asset.
         let sql = match object_type {

@@ -25,6 +25,7 @@ use uuid::Uuid;
 use crate::{
     config::{Settings, SharedSettings},
     error::ApiError,
+    models::exclusion::{is_pattern, pattern_matches},
     models::{
         Asset, AssetCreate, AssetRelationshipCreate, AssetSourceCreate, AssetType, DiscoveryConfig,
         DiscoveryQueueItemCreate, DiscoveryResult, DiscoveryRun, DiscoveryRunCreate,
@@ -208,10 +209,37 @@ struct ExclusionSets {
     organizations: HashSet<String>,
     asns: HashSet<String>,
     certificates: HashSet<String>,
+    /// Wildcard values, kept apart from the literals they sit beside.
+    ///
+    /// A pattern has to be walked; a literal is a hash lookup. Most entries are
+    /// literals and every asset discovery writes is checked, so mixing the two
+    /// would turn the common case into a scan of the whole list.
+    domain_patterns: Vec<String>,
+    organization_patterns: Vec<String>,
+    certificate_patterns: Vec<String>,
 }
 
 impl ExclusionSets {
     fn insert(&mut self, object_type: ExclusionObjectType, value: String) {
+        if is_pattern(&value) {
+            // Only the free-text kinds accept one, and the API refuses the
+            // rest on the way in; a stray `*` on an address is dropped rather
+            // than matched literally against something that can never contain
+            // one.
+            match object_type {
+                ExclusionObjectType::Domain => self.domain_patterns.push(value),
+                ExclusionObjectType::Organization => self.organization_patterns.push(value),
+                ExclusionObjectType::Certificate => self.certificate_patterns.push(value),
+                other => tracing::warn!(
+                    "Ignoring wildcard in {} exclusion '{}': only domain, organization and \
+                     certificate entries can carry one",
+                    other,
+                    value
+                ),
+            }
+            return;
+        }
+
         match object_type {
             ExclusionObjectType::Domain => {
                 self.domains.insert(value);
@@ -258,6 +286,16 @@ impl ExclusionSets {
             && self.organizations.is_empty()
             && self.asns.is_empty()
             && self.certificates.is_empty()
+            && self.domain_patterns.is_empty()
+            && self.organization_patterns.is_empty()
+            && self.certificate_patterns.is_empty()
+    }
+
+    /// Whether any pattern in `patterns` covers `value`.
+    fn any_pattern_matches(patterns: &[String], value: &str) -> bool {
+        patterns
+            .iter()
+            .any(|pattern| pattern_matches(pattern, value))
     }
 
     fn covers(&self, item_type: &str, item_value: &str) -> bool {
@@ -273,7 +311,7 @@ impl ExclusionSets {
     }
 
     fn covers_domain(&self, domain: &str) -> bool {
-        if self.domains.is_empty() {
+        if self.domains.is_empty() && self.domain_patterns.is_empty() {
             return false;
         }
         let domain = domain.trim().trim_end_matches('.').to_lowercase();
@@ -290,7 +328,7 @@ impl ExclusionSets {
                 }
             }
         }
-        false
+        Self::any_pattern_matches(&self.domain_patterns, &domain)
     }
 
     fn covers_ip(&self, ip: &str) -> bool {
@@ -308,7 +346,9 @@ impl ExclusionSets {
     }
 
     fn covers_organization(&self, org: &str) -> bool {
-        self.organizations.contains(&org.trim().to_lowercase())
+        let org = org.trim().to_lowercase();
+        self.organizations.contains(&org)
+            || Self::any_pattern_matches(&self.organization_patterns, &org)
     }
 
     fn covers_asn(&self, asn: &str) -> bool {
@@ -331,7 +371,9 @@ impl ExclusionSets {
     }
 
     fn covers_certificate(&self, subject: &str) -> bool {
-        self.certificates.contains(&subject.trim().to_lowercase())
+        let subject = subject.trim().to_lowercase();
+        self.certificates.contains(&subject)
+            || Self::any_pattern_matches(&self.certificate_patterns, &subject)
     }
 }
 
@@ -4899,6 +4941,75 @@ mod tests {
         assert!(!snapshot
             .level("certificate", "CN=other.example.com")
             .is_excluded());
+    }
+
+    #[test]
+    fn a_wildcard_entry_covers_what_it_matches_at_any_depth() {
+        let snapshot =
+            ExclusionSnapshot::from_entries(vec![excluded("domain", "*.cdn.example.com")]);
+        let covers = |name: &str| snapshot.level("domain", name).is_excluded();
+
+        assert!(covers("a.cdn.example.com"));
+        assert!(covers("a.b.c.cdn.example.com"));
+        // Casing and a trailing dot are normalisation, not different names.
+        assert!(covers("A.CDN.Example.com."));
+
+        // The apex is what a pattern leaves behind; a plain entry would take it.
+        assert!(!covers("cdn.example.com"));
+        assert!(!covers("cdn.example.com.evil.net"));
+    }
+
+    #[test]
+    fn a_wildcard_blacklist_is_still_the_stronger_answer() {
+        let snapshot = ExclusionSnapshot::from_entries(vec![
+            excluded("domain", "example.com"),
+            blacklisted("domain", "*.dead.example.com"),
+        ]);
+
+        assert_eq!(
+            snapshot.level("domain", "api.example.com"),
+            ExclusionLevel::Excluded
+        );
+        assert_eq!(
+            snapshot.level("domain", "one.dead.example.com"),
+            ExclusionLevel::Blacklisted
+        );
+        // Covered by the plain entry, not by the pattern, so it stays soft.
+        assert_eq!(
+            snapshot.level("domain", "dead.example.com"),
+            ExclusionLevel::Excluded
+        );
+    }
+
+    #[test]
+    fn free_text_patterns_reach_organizations_and_certificates() {
+        let snapshot = ExclusionSnapshot::from_entries(vec![
+            excluded("organization", "*hosting*"),
+            excluded("certificate", "cn=*.example.com"),
+        ]);
+
+        assert!(snapshot
+            .level("organization", "Acme Hosting Ltd")
+            .is_excluded());
+        assert!(!snapshot.level("organization", "Acme Ltd").is_excluded());
+
+        assert!(snapshot
+            .level("certificate", "CN=api.example.com")
+            .is_excluded());
+        assert!(!snapshot
+            .level("certificate", "CN=api.other.com")
+            .is_excluded());
+    }
+
+    #[test]
+    fn a_wildcard_on_an_address_kind_is_dropped_rather_than_matched() {
+        // The API refuses these on the way in; a row that reached the table by
+        // another route must not match an address literally containing a star,
+        // and must not match everything either.
+        let snapshot = ExclusionSnapshot::from_entries(vec![excluded("ip", "203.0.113.*")]);
+
+        assert!(snapshot.is_empty());
+        assert!(!snapshot.level("ip", "203.0.113.9").is_excluded());
     }
 
     #[test]

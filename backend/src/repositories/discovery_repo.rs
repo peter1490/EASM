@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     error::ApiError,
+    models::exclusion::{is_pattern, like_pattern},
     models::{
         AssetRelationship, AssetRelationshipCreate, AssetSource, AssetSourceCreate,
         DiscoveryQueueItem, DiscoveryQueueItemCreate, DiscoveryRun, DiscoveryRunCreate,
@@ -556,6 +557,22 @@ impl DiscoveryQueueRepository for SqlxDiscoveryQueueRepository {
             )
             SELECT COUNT(*) FROM skipped
             "#;
+
+        // A pattern covers whatever it matches, whatever kind it is on, so it
+        // short-circuits the per-type predicates below. The value is bound as
+        // a LIKE pattern rather than a literal in that case.
+        if is_pattern(&value) {
+            let item_type = object_type.to_string();
+            let sql = format!(
+                "{PREFIX}(q.item_type = '{item_type}' AND LOWER(q.item_value) LIKE $2){SUFFIX}"
+            );
+            let count = sqlx::query_scalar::<_, i64>(&sql)
+                .bind(company_id)
+                .bind(like_pattern(&value))
+                .fetch_one(&self.pool)
+                .await?;
+            return Ok(count);
+        }
 
         // A domain entry covers the name and everything under it; an IP entry
         // covers just that address; a CIDR covers every address inside it, plus

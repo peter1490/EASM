@@ -10,8 +10,8 @@ use crate::{
     auth::{context::UserContext, rbac::Role},
     error::ApiError,
     models::{
-        ExclusionCheckResult, ExclusionCreate, ExclusionEntry, ExclusionObjectType,
-        ExclusionResult, ExclusionUpdate,
+        exclusion::validate_value, ExclusionCheckResult, ExclusionCreate, ExclusionEntry,
+        ExclusionObjectType, ExclusionResult, ExclusionUpdate,
     },
     AppState,
 };
@@ -89,35 +89,23 @@ async fn apply_entry(
             assets_deleted
         );
     } else if delete_descendants {
-        descendants_deleted = match object_type {
-            // A CIDR is not an asset type, so cascade from every IP asset inside it.
-            ExclusionObjectType::Cidr => {
+        // The asset the caller already has in hand when one was named, and
+        // otherwise whatever the entry matches: a literal names at most one, a
+        // CIDR names the addresses inside it, a pattern names all it covers.
+        let roots = match known_asset_id {
+            Some(id) => vec![id],
+            None => {
                 app_state
                     .exclusion_repository
-                    .delete_descendant_assets_for_cidr(company_id, object_value)
+                    .matched_asset_ids(company_id, object_type, object_value)
                     .await?
             }
-            _ => {
-                let asset_id = match known_asset_id {
-                    Some(id) => Some(id),
-                    None => {
-                        app_state
-                            .exclusion_repository
-                            .find_asset_id(object_type, object_value, company_id)
-                            .await?
-                    }
-                };
-                match asset_id {
-                    Some(asset_id) => {
-                        app_state
-                            .exclusion_repository
-                            .delete_descendant_assets(company_id, &asset_id)
-                            .await?
-                    }
-                    None => 0,
-                }
-            }
         };
+
+        descendants_deleted = app_state
+            .exclusion_repository
+            .delete_descendants_of(company_id, &roots)
+            .await?;
 
         tracing::info!(
             "Excluded {} '{}' and deleted {} descendant assets",
@@ -153,11 +141,17 @@ pub async fn create_exclusion(
     require_analyst(&user)?;
 
     // Validate the object value
-    if payload.object_value.trim().is_empty() {
+    let object_value = payload.object_value.trim();
+    if object_value.is_empty() {
         return Err(ApiError::Validation(
             "Object value cannot be empty".to_string(),
         ));
     }
+    // A pattern that is too broad is refused here rather than stored: as a
+    // blacklist it would delete the estate, and nothing downstream is in a
+    // position to second-guess an entry that already exists.
+    validate_value(&payload.object_type, &object_value.to_lowercase())
+        .map_err(ApiError::Validation)?;
 
     let company_id = company_scope(&user)?;
 

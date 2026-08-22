@@ -708,17 +708,6 @@ export function AssetDetail({
       title="Findings"
       hint={`${openFindings.length} open of ${findings.length}`}
       className="overflow-hidden"
-      actions={
-        findings.length > 0 ? (
-          <Link
-            href={`/findings?asset=${asset.id}`}
-            className="inline-flex items-center gap-1.5 text-[12px] font-medium"
-          >
-            Open in Findings
-            <Icon name="arrowRight" size={12} />
-          </Link>
-        ) : undefined
-      }
     >
       {findings.length === 0 ? (
         <EmptyState
@@ -758,7 +747,10 @@ export function AssetDetail({
                   <TR
                     key={finding.id}
                     interactive
-                    onClick={() => router.push(`/findings?finding=${finding.id}`)}
+                    // Carries the asset through, so Findings opens scoped to
+                    // this asset rather than dropping the reader into the whole
+                    // company's queue. The asset pill there clears the scope.
+                    onClick={() => router.push(`/findings?asset=${asset.id}&finding=${finding.id}`)}
                   >
                     <TD>
                       <SeverityChip severity={severity} short />

@@ -1097,6 +1097,19 @@ function AssetRow({
               </span>
             )}
           </span>
+        ) : asset.last_cancelled_scan_at ? (
+          // Nothing has scanned this host, but something tried. "Never" claims
+          // no scan was ever queued against it, which the operator who just
+          // stopped one can see is not what happened.
+          <span className="flex items-center gap-1.5 min-w-0">
+            <Dot color="var(--nil)" />
+            <span
+              className="text-[12px] text-ink-3 truncate"
+              title={`Scan cancelled · ${dateTime(asset.last_cancelled_scan_at)}`}
+            >
+              Cancelled
+            </span>
+          </span>
         ) : (
           <span className="text-[12px] text-ink-3">Never</span>
         )}

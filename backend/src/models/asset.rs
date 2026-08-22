@@ -175,6 +175,11 @@ pub struct Asset {
     pub last_scan_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_scanned_at: Option<DateTime<Utc>>,
+    /// The newest scan that was cancelled, whatever the outcome of the others.
+    /// The list falls back to it when `last_scanned_at` is absent, so a stopped
+    /// scan reads "Cancelled" rather than as an asset nobody ever looked at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_cancelled_scan_at: Option<DateTime<Utc>>,
 
     /// Absent where the query does not compute it (`get_path`), so a client can
     /// distinguish "not loaded" from "no open findings".
@@ -226,6 +231,8 @@ pub struct AssetRow {
     pub last_scan_status: Option<String>,
     #[sqlx(default)]
     pub last_scanned_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    pub last_cancelled_scan_at: Option<DateTime<Utc>>,
     // Finding rollup (computed in the same CTE as the latest scan)
     #[sqlx(default)]
     pub open_critical: Option<i64>,
@@ -268,6 +275,7 @@ impl From<AssetRow> for Asset {
             last_scan_id: row.last_scan_id.map(|id| id.to_string()),
             last_scan_status: row.last_scan_status,
             last_scanned_at: row.last_scanned_at,
+            last_cancelled_scan_at: row.last_cancelled_scan_at,
             // Only queries that select the rollup produce `open_total`; the
             // rest leave the whole object off the wire.
             open_findings: row.open_total.map(|total| OpenFindingCounts {

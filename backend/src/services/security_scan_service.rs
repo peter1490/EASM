@@ -25,8 +25,8 @@ use crate::{
         Asset, AssetType, DetectedService, DnsIssue, DnsSecurityResult, FindingSeverity,
         MissingSecurityHeader, ProxyDetectionResult, RiskFactor, ScanConfig, ScanResultSummary,
         SecurityFinding, SecurityFindingCreate, SecurityHeadersResult, SecurityScan,
-        SecurityScanCreate, SecurityScanType, TlsCertificateDetails, TlsCertificateInfo,
-        VulnerabilityResult,
+        SecurityScanCreate, SecurityScanStatus, SecurityScanType, TlsCertificateDetails,
+        TlsCertificateInfo, VulnerabilityResult,
     },
     repositories::{AssetRepository, SecurityFindingRepository, SecurityScanRepository},
     services::{
@@ -302,14 +302,20 @@ impl SecurityScanService {
         let scan_id = scan.id;
         let asset_id = asset.id;
 
-        // Submit scan task
+        // Submit scan task.
+        //
+        // `scan_id` and `discovery_run_id` go in as strings because that is what
+        // `cancel_tasks_by_metadata` compares against: they are how a stop --
+        // of one scan, or of the whole run that queued it -- finds the task
+        // still executing this scan.
         let scan_service = self.clone();
         let task_metadata = json!({
-            "scan_id": scan_id,
-            "asset_id": asset_id,
+            "scan_id": scan_id.to_string(),
+            "asset_id": asset_id.to_string(),
             "asset_identifier": asset.identifier,
             "scan_type": scan.scan_type,
-            "company_id": company_id,
+            "company_id": company_id.to_string(),
+            "discovery_run_id": scan.discovery_run_id.map(|id| id.to_string()),
             "requested_by": requested_by.map(|id| id.to_string()),
         });
 
@@ -345,8 +351,6 @@ impl SecurityScanService {
 
     /// Cancel a running scan
     pub async fn cancel_scan(&self, id: &Uuid, company_id: Uuid) -> Result<(), ApiError> {
-        use crate::models::security::SecurityScanStatus;
-
         // Get the current scan status
         let scan = self
             .scan_repo
@@ -363,16 +367,115 @@ impl SecurityScanService {
             )));
         }
 
-        // Update scan status to cancelled
+        // Stop the task before writing the status, not after. `execute_scan`
+        // marks the scan `running` on its way in, so a task still live when the
+        // row is written can overwrite `cancelled` a moment later; taking the
+        // task down first means anything that slipped through is caught by the
+        // update rather than racing it.
+        //
+        // Task ids are minted by the task manager and are not scan ids, so this
+        // used to pass the scan id to `cancel_task` and silently match nothing
+        // -- the row read "cancelled" while the scan carried on probing.
+        let stopped = self
+            .task_manager
+            .cancel_tasks_by_metadata("scan_id", &id.to_string(), Some(TaskType::Scan))
+            .await;
+
         self.scan_repo
             .update_status(id, SecurityScanStatus::Cancelled, company_id)
             .await?;
 
-        // Cancel the task in the task manager
-        let _ = self.task_manager.cancel_task(*id).await;
-
-        tracing::info!("Cancelled security scan {}", id);
+        tracing::info!(
+            scan_id = %id,
+            tasks_stopped = stopped.len(),
+            "Cancelled security scan"
+        );
         Ok(())
+    }
+
+    /// Cancel every unfinished scan a discovery run queued.
+    ///
+    /// Called when a run is stopped: its auto-scans are its own work, and
+    /// leaving them running means "stop" stopped the enumeration but not the
+    /// probing it had already fanned out.
+    pub async fn cancel_scans_for_discovery_run(
+        &self,
+        discovery_run_id: &Uuid,
+        company_id: Uuid,
+    ) -> Result<usize, ApiError> {
+        // Tasks first, rows second -- see `cancel_scan`. Sweeping by run rather
+        // than per scan also catches a scan submitted a moment ago whose row the
+        // update below has not reached yet.
+        let stopped = self
+            .task_manager
+            .cancel_tasks_by_metadata(
+                "discovery_run_id",
+                &discovery_run_id.to_string(),
+                Some(TaskType::Scan),
+            )
+            .await;
+
+        let cancelled = self
+            .scan_repo
+            .cancel_active_by_discovery_run(
+                discovery_run_id,
+                company_id,
+                "Cancelled: discovery run stopped",
+            )
+            .await?;
+
+        if !cancelled.is_empty() || !stopped.is_empty() {
+            tracing::info!(
+                discovery_run_id = %discovery_run_id,
+                company_id = %company_id,
+                scans_cancelled = cancelled.len(),
+                tasks_stopped = stopped.len(),
+                "Cancelled scans queued by discovery run"
+            );
+        }
+
+        Ok(cancelled.len())
+    }
+
+    /// Cancel every unfinished scan against `asset_ids`.
+    ///
+    /// Used when assets are blacklisted: a scan already in flight against a
+    /// host the operator has just excluded has to stop, whatever queued it.
+    pub async fn cancel_scans_for_assets(
+        &self,
+        asset_ids: &[Uuid],
+        company_id: Uuid,
+        reason: &str,
+    ) -> Result<usize, ApiError> {
+        if asset_ids.is_empty() {
+            return Ok(0);
+        }
+
+        // Tasks first, rows second -- see `cancel_scan`. Swept by asset rather
+        // than by scan id, so a scan submitted against one of these assets a
+        // moment ago is caught even though the update below has not seen it.
+        for asset_id in asset_ids {
+            self.task_manager
+                .cancel_tasks_by_metadata("asset_id", &asset_id.to_string(), Some(TaskType::Scan))
+                .await;
+        }
+
+        let cancelled = self
+            .scan_repo
+            .cancel_active_for_assets(asset_ids, company_id, reason)
+            .await?;
+
+        if !cancelled.is_empty() {
+            tracing::info!(
+                company_id = %company_id,
+                scans_cancelled = cancelled.len(),
+                assets = asset_ids.len(),
+                "{}",
+                reason
+            );
+        }
+
+        Ok(cancelled.len())
     }
 
     /// Get scan with full details including asset and findings
@@ -448,6 +551,14 @@ impl SecurityScanService {
     ) -> Result<(), ApiError> {
         tracing::info!("Starting security scan {}", scan_id);
 
+        // A queued scan can be cancelled before it ever gets a concurrency
+        // permit -- stopping the discovery run that queued it does exactly
+        // that. Marking it running here would undo that, so check first.
+        if ctx.check_cancellation().await.is_err() {
+            tracing::info!("Security scan {} cancelled before it started", scan_id);
+            return Ok(());
+        }
+
         // Mark scan as running
         let scan_started_at = Utc::now();
         self.scan_repo.start(&scan_id, company_id).await?;
@@ -478,7 +589,14 @@ impl SecurityScanService {
             .execute_scan_internal(&ctx, scan_id, &asset, &scan_type, &config, company_id)
             .await;
 
-        // Finalize scan
+        // Finalize scan. A cancelled scan keeps the `cancelled` status the
+        // canceller wrote; completing or failing it here would report the stop
+        // as an outcome of the scan.
+        if ctx.check_cancellation().await.is_err() {
+            tracing::info!("Security scan {} cancelled; leaving status as is", scan_id);
+            return Ok(());
+        }
+
         match result {
             Ok(summary) => {
                 if let Err(e) = self
@@ -519,9 +637,15 @@ impl SecurityScanService {
                 }
             }
             Err(e) => {
-                self.scan_repo
-                    .fail(&scan_id, &e.to_string(), company_id)
-                    .await?;
+                let message = e.to_string();
+                if message.contains("cancelled") {
+                    self.scan_repo
+                        .update_status(&scan_id, SecurityScanStatus::Cancelled, company_id)
+                        .await?;
+                    tracing::info!("Security scan {} cancelled", scan_id);
+                    return Ok(());
+                }
+                self.scan_repo.fail(&scan_id, &message, company_id).await?;
                 tracing::error!("Security scan {} failed: {}", scan_id, e);
                 return Err(e);
             }

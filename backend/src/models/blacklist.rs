@@ -77,6 +77,12 @@ pub struct BlacklistUpdate {
 pub struct BlacklistResult {
     pub entry: BlacklistEntry,
     pub descendants_deleted: i64,
+    /// Queued discovery items the new entry removed from a run in progress.
+    #[serde(default)]
+    pub queue_items_removed: i64,
+    /// Security scans stopped because their target is now blacklisted.
+    #[serde(default)]
+    pub scans_cancelled: i64,
 }
 
 /// Check result for blacklist status

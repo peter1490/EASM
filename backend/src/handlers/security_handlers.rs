@@ -60,6 +60,7 @@ pub async fn create_security_scan(
         priority: None,
         note: payload.note,
         config: None,
+        discovery_run_id: None,
     };
 
     let scan = app_state
@@ -419,6 +420,7 @@ pub async fn trigger_asset_scan(
         priority: None,
         note,
         config: None,
+        discovery_run_id: None,
     };
 
     let scan = app_state

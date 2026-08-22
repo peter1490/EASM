@@ -1705,6 +1705,10 @@ export type BlacklistCreate = {
 export type BlacklistResult = {
   entry: BlacklistEntry;
   descendants_deleted: number;
+  /** Queued discovery items the entry removed from a run in progress. */
+  queue_items_removed?: number;
+  /** Security scans stopped because their target is now blacklisted. */
+  scans_cancelled?: number;
 };
 
 export type BlacklistListResponse = {

@@ -39,6 +39,17 @@ pub trait AssetRepository {
         identifier: &str,
     ) -> Result<Option<Asset>, ApiError>;
     async fn get_path(&self, company_id: Uuid, id: &Uuid) -> Result<Vec<Asset>, ApiError>;
+    /// Ids of the assets a blacklist entry covers.
+    ///
+    /// Matched in SQL rather than by listing and filtering: the list endpoint
+    /// is paginated, so a company past the page size would have had part of its
+    /// blacklisted estate silently missed.
+    async fn find_blacklisted_ids(
+        &self,
+        company_id: Uuid,
+        object_type: &crate::models::BlacklistObjectType,
+        object_value: &str,
+    ) -> Result<Vec<Uuid>, ApiError>;
     async fn update_confidence(
         &self,
         company_id: Uuid,
@@ -532,6 +543,85 @@ impl AssetRepository for SqlxAssetRepository {
         let assets: Vec<Asset> = rows.into_iter().map(Asset::from).collect();
 
         Ok(assets)
+    }
+
+    async fn find_blacklisted_ids(
+        &self,
+        company_id: Uuid,
+        object_type: &crate::models::BlacklistObjectType,
+        object_value: &str,
+    ) -> Result<Vec<Uuid>, ApiError> {
+        use crate::models::BlacklistObjectType;
+
+        let value = object_value.trim().to_lowercase();
+        if value.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // A domain entry covers the name and everything under it; a CIDR covers
+        // every address inside it. The rest are their own single asset.
+        let sql = match object_type {
+            BlacklistObjectType::Domain => {
+                r#"
+                SELECT id FROM assets
+                WHERE company_id = $1
+                  AND asset_type::text = 'domain'
+                  AND (LOWER(identifier) = $2 OR LOWER(identifier) LIKE '%.' || $2)
+                "#
+            }
+            BlacklistObjectType::Cidr => {
+                // The regex guards the cast: one malformed identifier would
+                // otherwise abort the query for the whole company.
+                r#"
+                SELECT id FROM assets
+                WHERE company_id = $1
+                  AND asset_type::text = 'ip'
+                  AND identifier ~ '^[0-9a-fA-F:.]+$'
+                  AND identifier::inet <<= $2::inet
+                "#
+            }
+            BlacklistObjectType::Ip => {
+                r#"
+                SELECT id FROM assets
+                WHERE company_id = $1
+                  AND asset_type::text = 'ip'
+                  AND LOWER(identifier) = $2
+                "#
+            }
+            BlacklistObjectType::Organization => {
+                r#"
+                SELECT id FROM assets
+                WHERE company_id = $1
+                  AND asset_type::text = 'organization'
+                  AND LOWER(identifier) = $2
+                "#
+            }
+            BlacklistObjectType::Asn => {
+                // `AS64496` and `64496` name the same autonomous system.
+                r#"
+                SELECT id FROM assets
+                WHERE company_id = $1
+                  AND asset_type::text = 'asn'
+                  AND LTRIM(LOWER(identifier), 'as') = LTRIM($2, 'as')
+                "#
+            }
+            BlacklistObjectType::Certificate => {
+                r#"
+                SELECT id FROM assets
+                WHERE company_id = $1
+                  AND asset_type::text = 'certificate'
+                  AND LOWER(identifier) = $2
+                "#
+            }
+        };
+
+        let ids = sqlx::query_scalar::<_, Uuid>(sql)
+            .bind(company_id)
+            .bind(&value)
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(ids)
     }
 
     async fn update_confidence(

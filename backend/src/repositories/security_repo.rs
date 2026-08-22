@@ -99,6 +99,27 @@ pub trait SecurityScanRepository: Send + Sync {
         &self,
         company_id: Uuid,
     ) -> Result<std::collections::HashMap<String, i64>, ApiError>;
+    /// Cancel every scan a discovery run queued that has not finished, and
+    /// return their ids so the caller can stop the tasks still executing them.
+    ///
+    /// Done in one statement: a stopped run can have hundreds of auto-scans
+    /// outstanding, and reading then updating them one by one would let scans
+    /// created between the two steps slip through.
+    async fn cancel_active_by_discovery_run(
+        &self,
+        discovery_run_id: &Uuid,
+        company_id: Uuid,
+        note: &str,
+    ) -> Result<Vec<Uuid>, ApiError>;
+    /// Cancel every unfinished scan targeting one of `asset_ids`, returning the
+    /// cancelled ids. Used when an asset is blacklisted while it is being
+    /// scanned.
+    async fn cancel_active_for_assets(
+        &self,
+        asset_ids: &[Uuid],
+        company_id: Uuid,
+        note: &str,
+    ) -> Result<Vec<Uuid>, ApiError>;
 }
 
 pub struct SqlxSecurityScanRepository {
@@ -136,8 +157,8 @@ impl SecurityScanRepository for SqlxSecurityScanRepository {
         let row = sqlx::query_as::<_, SecurityScan>(
             r#"
             INSERT INTO security_scans 
-                (id, asset_id, scan_type, status, trigger_type, priority, note, config, result_summary, created_at, updated_at, company_id)
-            VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, '{}', $8, $8, $9)
+                (id, asset_id, scan_type, status, trigger_type, priority, note, config, result_summary, created_at, updated_at, company_id, discovery_run_id)
+            VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, '{}', $8, $8, $9, $10)
             RETURNING *
             "#
         )
@@ -150,6 +171,7 @@ impl SecurityScanRepository for SqlxSecurityScanRepository {
         .bind(&config)
         .bind(now)
         .bind(company_id)
+        .bind(scan.discovery_run_id)
         .fetch_one(&self.pool)
         .await?;
 
@@ -251,7 +273,7 @@ impl SecurityScanRepository for SqlxSecurityScanRepository {
             SELECT
                 s.id, s.asset_id, s.scan_type, s.status, s.trigger_type, s.priority,
                 s.started_at, s.completed_at, s.note, s.config, s.company_id,
-                s.created_at, s.updated_at,
+                s.created_at, s.updated_at, s.discovery_run_id,
                 s.result_summary,
                 a.identifier AS asset_value,
                 a.asset_type::text AS asset_type,
@@ -412,6 +434,72 @@ impl SecurityScanRepository for SqlxSecurityScanRepository {
         .await?;
 
         Ok(rows.into_iter().collect())
+    }
+
+    async fn cancel_active_by_discovery_run(
+        &self,
+        discovery_run_id: &Uuid,
+        company_id: Uuid,
+        note: &str,
+    ) -> Result<Vec<Uuid>, ApiError> {
+        let now = Utc::now();
+
+        let ids = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            UPDATE security_scans
+            SET status = 'cancelled',
+                completed_at = $1,
+                updated_at = $1,
+                note = COALESCE(note || ' | ', '') || $4
+            WHERE discovery_run_id = $2
+              AND company_id = $3
+              AND status IN ('pending', 'running')
+            RETURNING id
+            "#,
+        )
+        .bind(now)
+        .bind(discovery_run_id)
+        .bind(company_id)
+        .bind(note)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(ids)
+    }
+
+    async fn cancel_active_for_assets(
+        &self,
+        asset_ids: &[Uuid],
+        company_id: Uuid,
+        note: &str,
+    ) -> Result<Vec<Uuid>, ApiError> {
+        if asset_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let now = Utc::now();
+
+        let ids = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            UPDATE security_scans
+            SET status = 'cancelled',
+                completed_at = $1,
+                updated_at = $1,
+                note = COALESCE(note || ' | ', '') || $4
+            WHERE asset_id = ANY($2::uuid[])
+              AND company_id = $3
+              AND status IN ('pending', 'running')
+            RETURNING id
+            "#,
+        )
+        .bind(now)
+        .bind(asset_ids)
+        .bind(company_id)
+        .bind(note)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(ids)
     }
 }
 

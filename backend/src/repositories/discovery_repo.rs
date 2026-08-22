@@ -8,7 +8,8 @@ use crate::{
     error::ApiError,
     models::{
         AssetRelationship, AssetRelationshipCreate, AssetSource, AssetSourceCreate,
-        DiscoveryQueueItem, DiscoveryQueueItemCreate, DiscoveryRun, DiscoveryRunCreate,
+        BlacklistObjectType, DiscoveryQueueItem, DiscoveryQueueItemCreate, DiscoveryRun,
+        DiscoveryRunCreate,
     },
 };
 
@@ -300,6 +301,23 @@ impl DiscoveryRunRepository for SqlxDiscoveryRunRepository {
                 .bind(&ids)
                 .execute(&self.pool)
                 .await?;
+
+            // So are the scans those runs queued. The task executing each one
+            // died with the process, so a scan left 'pending' or 'running' here
+            // is never going to finish or report -- and it counts against the
+            // scan queue for as long as it sits there.
+            sqlx::query(
+                r#"
+                UPDATE security_scans
+                SET status = 'cancelled', completed_at = $1, updated_at = $1
+                WHERE discovery_run_id = ANY($2)
+                  AND status IN ('pending', 'running')
+                "#,
+            )
+            .bind(now)
+            .bind(&ids)
+            .execute(&self.pool)
+            .await?;
         }
 
         Ok(ids)
@@ -330,6 +348,20 @@ pub trait DiscoveryQueueRepository: Send + Sync {
     async fn skip_item(&self, id: &Uuid) -> Result<(), ApiError>;
     async fn get_pending_count(&self, run_id: &Uuid) -> Result<i64, ApiError>;
     async fn clear_run(&self, run_id: &Uuid) -> Result<(), ApiError>;
+    /// Skip every queued item a blacklist entry now covers, across all of a
+    /// company's unfinished runs. Returns the number of items skipped.
+    ///
+    /// Discovery checks the blacklist as it dequeues, so a blacklist added
+    /// mid-run is honoured eventually -- but only when the item's turn comes,
+    /// which on a deep run can be minutes of visible "queue pending" against
+    /// something the operator has already excluded. Skipping them up front
+    /// makes the queue agree with the blacklist immediately.
+    async fn purge_blacklisted(
+        &self,
+        company_id: Uuid,
+        object_type: &BlacklistObjectType,
+        object_value: &str,
+    ) -> Result<i64, ApiError>;
 }
 
 pub struct SqlxDiscoveryQueueRepository {
@@ -487,6 +519,76 @@ impl DiscoveryQueueRepository for SqlxDiscoveryQueueRepository {
             .await?;
 
         Ok(())
+    }
+
+    async fn purge_blacklisted(
+        &self,
+        company_id: Uuid,
+        object_type: &BlacklistObjectType,
+        object_value: &str,
+    ) -> Result<i64, ApiError> {
+        let value = object_value.trim().to_lowercase();
+        if value.is_empty() {
+            return Ok(0);
+        }
+
+        // Which queued items a blacklist entry covers depends on its type, so
+        // each gets its own predicate rather than one clause that tries to be
+        // all of them. `$3` is the entry value in every branch.
+        //
+        // Only items that have not been handled yet are touched: a completed or
+        // failed row is a record of what the run did, not work still to do.
+        const PREFIX: &str = r#"
+            WITH skipped AS (
+                UPDATE discovery_queue q
+                SET status = 'skipped',
+                    error_message = 'Skipped: blacklisted during run',
+                    processed_at = NOW()
+                FROM discovery_runs r
+                WHERE q.discovery_run_id = r.id
+                  AND r.company_id = $1
+                  AND r.status IN ('pending', 'running')
+                  AND q.status IN ('pending', 'processing')
+                  AND "#;
+        const SUFFIX: &str = r#"
+                RETURNING q.id
+            )
+            SELECT COUNT(*) FROM skipped
+            "#;
+
+        // A domain entry covers the name and everything under it; an IP entry
+        // covers just that address; a CIDR covers every address inside it, plus
+        // an identical CIDR item. The rest match on their own value.
+        let predicate = match object_type {
+            BlacklistObjectType::Domain => {
+                "(q.item_type = 'domain' AND (LOWER(q.item_value) = $2 OR LOWER(q.item_value) LIKE '%.' || $2))"
+            }
+            BlacklistObjectType::Ip => "(q.item_type = 'ip' AND LOWER(q.item_value) = $2)",
+            BlacklistObjectType::Cidr => {
+                // `item_value ~ '...'` guards the cast: a malformed IP would
+                // otherwise abort the whole statement.
+                "((q.item_type = 'cidr' AND LOWER(q.item_value) = $2)
+                   OR (q.item_type = 'ip'
+                       AND q.item_value ~ '^[0-9a-fA-F:.]+$'
+                       AND q.item_value::inet <<= $2::inet))"
+            }
+            BlacklistObjectType::Organization => {
+                "(q.item_type = 'organization' AND LOWER(q.item_value) = $2)"
+            }
+            BlacklistObjectType::Asn => "(q.item_type = 'asn' AND LOWER(q.item_value) = $2)",
+            // Certificates are never queued as discovery items.
+            BlacklistObjectType::Certificate => return Ok(0),
+        };
+
+        let sql = format!("{PREFIX}{predicate}{SUFFIX}");
+
+        let count = sqlx::query_scalar::<_, i64>(&sql)
+            .bind(company_id)
+            .bind(&value)
+            .fetch_one(&self.pool)
+            .await?;
+
+        Ok(count)
     }
 }
 

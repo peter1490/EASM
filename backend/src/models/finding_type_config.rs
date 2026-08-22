@@ -54,28 +54,6 @@ pub struct FindingTypeConfigListResponse {
 pub const MULTIPLIER_MIN: f64 = 0.1;
 pub const MULTIPLIER_MAX: f64 = 10.0;
 
-/// Base score for each severity level.
-///
-/// This is the *only* place a finding's base score comes from. `finding_type_config`
-/// contributes a multiplier and nothing else, so two findings of the same type with
-/// different severities now score differently — which is the point.
-pub const SEVERITY_SCORES: &[(&str, f64)] = &[
-    ("critical", 40.0),
-    ("high", 20.0),
-    ("medium", 10.0),
-    ("low", 3.0),
-    ("info", 0.5),
-];
-
-/// Get severity score from severity name
-pub fn get_severity_score(severity: &str) -> f64 {
-    SEVERITY_SCORES
-        .iter()
-        .find(|(s, _)| *s == severity.to_lowercase())
-        .map(|(_, score)| *score)
-        .unwrap_or(1.0)
-}
-
 /// What `finding_type_config` contributes to a score: a multiplier, and whether the
 /// type counts at all.
 ///

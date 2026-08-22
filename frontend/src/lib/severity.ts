@@ -56,17 +56,65 @@ export function riskTone(level: string | null | undefined): Tone {
 }
 
 /**
+ * Top of the asset risk scale. 0–1000, not 0–100: under the old clamped scale 41%
+ * of a synthetic 4,000-asset population landed on exactly 100.0 and the worst 400
+ * assets shared one score, so the queue was unordered where it mattered most. The
+ * backend's `risk_model.rs` carries the same constant, and Qualys TruRisk, Tenable
+ * AES and Rapid7 Active Risk all use this range for the same reason.
+ */
+export const RISK_SCORE_MAX = 1000;
+
+/**
  * Risk level derived from a score, for assets the backend has not levelled yet.
- * The cut-offs are the ones `RiskService::calculate_asset_risk` applies, so a
- * score shown next to a level never contradicts the level the server stored.
+ * The cut-offs are the ones `risk_model::risk_level_for` applies, so a score shown
+ * next to a level never contradicts the level the server stored.
  */
 export function riskLevelFromScore(score: number | null | undefined): RiskLevel | null {
   if (score == null) return null;
-  if (score >= 80) return "critical";
-  if (score >= 60) return "high";
-  if (score >= 40) return "medium";
-  if (score >= 20) return "low";
+  if (score >= 800) return "critical";
+  if (score >= 600) return "high";
+  if (score >= 400) return "medium";
+  if (score >= 200) return "low";
   return "info";
+}
+
+/** A risk score as a 0–1 fraction of the scale, for bars and gauges. */
+export function riskFraction(score: number | null | undefined): number {
+  if (score == null) return 0;
+  return Math.min(Math.max(score, 0), RISK_SCORE_MAX) / RISK_SCORE_MAX;
+}
+
+/**
+ * A risk score as it should be displayed: a whole number.
+ *
+ * The generic `score()` formatter carries a decimal, which reads as precision the
+ * model does not claim — on a 0–1000 scale the tenth of a point is noise, and "166.4"
+ * next to "1000" is just harder to scan. Every risk score in the UI goes through here
+ * so the scale is stated once.
+ */
+export function formatRiskScore(score: number | null | undefined): string {
+  if (score == null || Number.isNaN(score)) return "—";
+  return Math.round(score).toString();
+}
+
+/** A signed risk-score change, for history entries. */
+export function formatRiskDelta(delta: number): string {
+  const rounded = Math.round(delta);
+  return rounded > 0 ? `+${rounded}` : rounded.toString();
+}
+
+/**
+ * The colour a bare risk score should be shown in, or `undefined` when the score is
+ * unremarkable and should stay in the default ink.
+ *
+ * Derived from the bands rather than restating them. The dashboard used to carry its
+ * own 85 / 65 / 40 cut-offs, which after the move to a 0–1000 scale painted a portfolio
+ * average of 166 — an informational score — in critical red.
+ */
+export function riskAccent(score: number | null | undefined): string | undefined {
+  const level = riskLevelFromScore(score);
+  if (level === "critical" || level === "high" || level === "medium") return riskTone(level).dot;
+  return undefined;
 }
 
 export const FINDING_STATUSES: Array<{ value: FindingStatus; label: string; dot: string }> = [

@@ -5,8 +5,8 @@ import { useMemo } from "react";
 import { Chip, EmptyState, Icon, RiskChip, SeverityChip, type IconName } from "@/components/kit";
 import { TrendChart, TrendLegend, type TrendPoint } from "@/components/charts/TrendChart";
 import { cn } from "@/lib/cn";
-import { ago, dateTime, duration, humanise, score as fmtScore } from "@/lib/format";
-import { SEVERITY_ORDER, riskTone } from "@/lib/severity";
+import { ago, dateTime, duration, humanise } from "@/lib/format";
+import { SEVERITY_ORDER, formatRiskDelta, formatRiskScore, riskTone } from "@/lib/severity";
 import type {
   AssetRiskHistoryEntry,
   AssetScanHistoryEntry,
@@ -301,13 +301,12 @@ function RiskRow({ event }: { event: RiskEvent }) {
     <div className="flex items-baseline gap-2 flex-wrap">
       <span className="text-[12.5px] font-medium text-ink">Risk recalculated</span>
       <span className="mono text-[12.5px] font-medium" style={{ color: tone.dot }}>
-        {fmtScore(event.scoreValue)}
+        {formatRiskScore(event.scoreValue)}
       </span>
       <RiskChip level={event.level} />
       {event.delta != null && event.delta !== 0 && (
         <span className={cn("mono text-[11.5px] font-medium", event.delta > 0 ? "text-crit" : "text-ok")}>
-          {event.delta > 0 ? "+" : ""}
-          {fmtScore(event.delta)}
+          {formatRiskDelta(event.delta)}
         </span>
       )}
       <EventTime at={event.at} />

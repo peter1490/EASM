@@ -2,7 +2,7 @@
 
 import { useId, useMemo, useState } from "react";
 import { cn } from "@/lib/cn";
-import { score as fmtScore } from "@/lib/format";
+import { RISK_SCORE_MAX, formatRiskScore } from "@/lib/severity";
 
 export interface TrendPoint {
   timestamp: string;
@@ -40,9 +40,13 @@ export function TrendChart({
     const risks = points.map((p) => p.risk_score).filter((v): v is number => v != null);
     const finds = points.map((p) => p.active_findings ?? 0);
 
-    // Pad the domains so the lines never touch the frame.
-    const riskMin = Math.max(0, Math.floor((Math.min(...risks, 0) - 5) / 10) * 10);
-    const riskMax = Math.min(100, Math.ceil((Math.max(...risks, 10) + 5) / 10) * 10);
+    // Pad the domains so the lines never touch the frame. Risk runs 0–1000, so the
+    // axis steps in fifties rather than tens.
+    const riskMin = Math.max(0, Math.floor((Math.min(...risks, 0) - 25) / 50) * 50);
+    const riskMax = Math.min(
+      RISK_SCORE_MAX,
+      Math.ceil((Math.max(...risks, 100) + 25) / 50) * 50,
+    );
     const findMin = Math.max(0, Math.floor((Math.min(...finds) - 2) / 5) * 5);
     const findMax = Math.max(findMin + 5, Math.ceil((Math.max(...finds) + 2) / 5) * 5);
 
@@ -158,7 +162,7 @@ export function TrendChart({
           </span>
           <span className="flex items-center gap-1.5">
             <span className="w-2.5 h-0.5 bg-accent rounded-sm" />
-            risk <span className="mono font-medium">{fmtScore(active.risk_score)}</span>
+            risk <span className="mono font-medium">{formatRiskScore(active.risk_score)}</span>
           </span>
           <span className="flex items-center gap-1.5">
             <span className="w-2.5 border-t-2 border-dashed border-ink-3" />

@@ -700,7 +700,11 @@ impl AssetRepository for SqlxAssetRepository {
     ) -> Result<Vec<crate::models::asset::AssetRiskHistoryEntry>, ApiError> {
         let rows = sqlx::query_as::<_, crate::models::asset::AssetRiskHistoryEntry>(
             r#"
-            SELECT h.risk_score, h.risk_level, h.factors, h.calculated_at
+            -- Rescaled onto the current 0-1000 range: rows written before the hazard
+            -- model were scored out of 100, and an asset's history has to be readable
+            -- as one series.
+            SELECT (h.risk_score * 1000.0 / h.scale_max) AS risk_score,
+                   h.risk_level, h.factors, h.calculated_at
             FROM asset_risk_history h
             INNER JOIN assets a ON a.id = h.asset_id
             WHERE h.asset_id = $1 AND a.company_id = $2

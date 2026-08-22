@@ -38,14 +38,28 @@ import { Field, Note, ResultBanner, errorMessage } from "./shared";
 const MULTIPLIER_MIN = 0.1;
 const MULTIPLIER_MAX = 10;
 
-/** Base score per severity. Mirrors `SEVERITY_SCORES` in the backend, which is the
- *  only place a finding's base score comes from — configuration cannot override it. */
-const SEVERITY_SCORES: Array<[string, number]> = [
-  ["critical", 40],
-  ["high", 20],
-  ["medium", 10],
-  ["low", 3],
-  ["info", 0.5],
+/** Impact per severity, as a percentage of the worst case. Mirrors `SEVERITY_IMPACT`
+ *  in the backend's `risk_model.rs`, which is the only place a finding's impact comes
+ *  from — configuration cannot override it. Used when a finding carries no CVSS; when
+ *  it does, the CVSS is the impact and these are not consulted. */
+const SEVERITY_IMPACT: Array<[string, number]> = [
+  ["critical", 90],
+  ["high", 72],
+  ["medium", 45],
+  ["low", 20],
+  ["info", 4],
+];
+
+/** Likelihood the model assigns from exploitation evidence, highest first. These are
+ *  read off the CISA KEV catalogue and the FIRST EPSS feed that every scan already
+ *  collects. */
+const LIKELIHOOD_LADDER: Array<[string, string]> = [
+  ["Exploited in the wild (CISA KEV)", "100%"],
+  ["High EPSS probability", "up to 100%"],
+  ["Public exploit code exists", "65%"],
+  ["Condition observed directly", "55%"],
+  ["CVE with no EPSS score", "50%"],
+  ["EPSS scored it near zero", "25%"],
 ];
 
 function multiplierValid(v: number) {
@@ -337,10 +351,10 @@ export function RiskScoringPane() {
       </Card>
 
       <Card>
-        <CardHeader title="How a risk score is built" hint="Base score per severity, fixed" />
+        <CardHeader title="How a risk score is built" hint="Impact per severity, fixed" />
         <div className="p-4 space-y-3">
           <div className="grid gap-2 sm:grid-cols-5">
-            {SEVERITY_SCORES.map(([severity, value]) => {
+            {SEVERITY_IMPACT.map(([severity, value]) => {
               const tone = severityTone(severity);
               return (
                 <div key={severity} className="rounded-md bg-surface-2 px-2.5 py-2">
@@ -350,24 +364,36 @@ export function RiskScoringPane() {
               );
             })}
           </div>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {LIKELIHOOD_LADDER.map(([label, value]) => (
+              <div key={label} className="rounded-md bg-surface-2 px-2.5 py-2">
+                <div className="lbl text-ink-2">{label}</div>
+                <div className="fig text-[15px] mt-0.5">{value}</div>
+              </div>
+            ))}
+          </div>
           <code className="block mono text-[11px] text-ink-2 bg-surface-2 rounded-md px-3 py-2.5 leading-relaxed break-words">
-            finding_score = (severity_score + cvss_bonus) × type_multiplier × 0.75^(rank within its type)
+            finding_score = impact × likelihood × age_factor × type_multiplier
             <br />
-            risk_score = (exposure_score + Σ finding_score) × importance_multiplier
+            hazard = Σ over root causes, repeats damped 0.75^rank, breadth damped 0.92^rank
+            <br />
+            risk_score = 1000 × H^1.3 / (H^1.3 + 1.05^1.3), where H = hazard × exposure × importance
           </code>
           <Note icon="chart">
-            Every finding is scored from its own severity, using the table above. A finding type only contributes a
-            multiplier, so two findings of the same type score differently when their severities differ. Disabled types
-            score nothing at all.
+            A finding&rsquo;s impact is its CVSS score when it has one, and the band above when it does not — never
+            both, since the severity is derived from the CVSS in the first place. Its likelihood comes from real
+            exploitation evidence: a critical bug nobody has ever exploited and a critical bug in active ransomware use
+            are the same number to CVSS, and roughly four times apart here.
           </Note>
           <Note icon="chart">
-            Repeated findings of one type count for less each time, ranked worst first — the second missing header on an
-            asset says much the same as the first. That caps any single type at four times its own worst finding.
-            Different types still add up in full.
+            Findings are grouped by what actually has to be fixed — the CVE when there is one, the finding type
+            otherwise. Repeats within a group count for less each time, so one CVE found on five ports stays one
+            problem while five different CVEs stay five. Distinct causes add up, with a shallow decay so a host with
+            thirty dormant CVEs never outranks one with three under active attack.
           </Note>
           <Note icon="chart">
-            The result is capped at 100 and mapped to a level: critical at 80 and above, high at 60, medium at 40, low
-            at 20, informational below that.
+            Scores run 0–1000 and the curve never reaches the top, so an asset that gets worse always scores higher.
+            Levels: critical at 800 and above, high at 600, medium at 400, low at 200, informational below that.
           </Note>
         </div>
       </Card>

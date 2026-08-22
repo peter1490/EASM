@@ -47,8 +47,15 @@ import {
 } from "@/components/kit";
 import { AssetDetail } from "@/components/asset/AssetDetail";
 import { Notice, confidenceColor, useCanWrite } from "@/components/asset/shared";
-import { ago, dateTime, humanise, num, pct, score as fmtScore } from "@/lib/format";
-import { RISK_ORDER, SEVERITY_ORDER, riskLevelFromScore, riskTone } from "@/lib/severity";
+import { ago, dateTime, humanise, num, pct } from "@/lib/format";
+import {
+  RISK_ORDER,
+  SEVERITY_ORDER,
+  formatRiskScore,
+  riskFraction,
+  riskLevelFromScore,
+  riskTone,
+} from "@/lib/severity";
 
 /**
  * The asset inventory.
@@ -982,10 +989,13 @@ function AssetRow({
           <span className="text-[12px] text-ink-3">—</span>
         ) : (
           <div className="flex items-center gap-2">
-            <span className="mono text-[12.5px] font-medium w-[34px]" style={{ color: tone.dot }}>
-              {fmtScore(asset.risk_score)}
+            <span
+              className="mono text-[12.5px] font-medium w-[34px] text-right tabular-nums"
+              style={{ color: tone.dot }}
+            >
+              {formatRiskScore(asset.risk_score)}
             </span>
-            <Bar value={asset.risk_score / 100} color={tone.dot} className="w-[44px]" />
+            <Bar value={riskFraction(asset.risk_score)} color={tone.dot} className="w-[44px]" />
             {level && <RiskChip level={level} />}
           </div>
         )}

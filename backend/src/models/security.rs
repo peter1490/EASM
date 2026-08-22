@@ -115,6 +115,12 @@ pub struct SecurityScan {
     pub scan_type: String,
     pub status: String,
     pub trigger_type: String,
+    /// Discovery run that queued this scan, for scans triggered by discovery.
+    /// `None` for manual and scheduled scans -- stopping a run only reaches the
+    /// scans that run started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
+    pub discovery_run_id: Option<Uuid>,
     pub priority: i32,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -134,6 +140,11 @@ pub struct SecurityScanCreate {
     pub priority: Option<i32>,
     pub note: Option<String>,
     pub config: Option<Value>,
+    /// Set by discovery on the scans it auto-triggers, so stopping the run --
+    /// or blacklisting one of its targets -- can find them again. Never read
+    /// from a request body: the HTTP handlers build this struct themselves.
+    #[serde(skip_deserializing)]
+    pub discovery_run_id: Option<Uuid>,
 }
 
 /// Envelope for the scan list: the rows plus the count needed to paginate.

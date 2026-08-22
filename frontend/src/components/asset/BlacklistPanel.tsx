@@ -139,6 +139,9 @@ export function BlacklistPanel({
             ) : (
               "No descendants were deleted."
             )}
+            {/* Only shown when a run was actually in flight — the counts are
+                zero otherwise, and a line saying so would be noise. */}
+            <InFlightEffect result={result} />
           </Notice>
         )}
 
@@ -195,5 +198,29 @@ export function BlacklistPanel({
         )}
       </div>
     </Section>
+  );
+}
+
+/**
+ * What blacklisting did to work already running.
+ *
+ * A discovery in progress holds a queue built before the entry existed, and may
+ * have scans in flight against the host just excluded; the backend clears both
+ * on the way in. Reporting it closes the loop for the operator who expected
+ * "blacklist" to mean "and stop what you are doing to it".
+ */
+function InFlightEffect({ result }: { result: BlacklistResult }) {
+  const queued = result.queue_items_removed ?? 0;
+  const scans = result.scans_cancelled ?? 0;
+  if (queued === 0 && scans === 0) return null;
+
+  const parts: string[] = [];
+  if (queued > 0) parts.push(`${queued} queued discovery item${queued === 1 ? "" : "s"} dropped`);
+  if (scans > 0) parts.push(`${scans} running scan${scans === 1 ? "" : "s"} cancelled`);
+
+  return (
+    <span className="block mt-1">
+      From the run in progress: {parts.join(", ")}.
+    </span>
   );
 }

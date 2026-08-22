@@ -339,6 +339,50 @@ impl TaskManager {
         Ok(())
     }
 
+    /// Cancel every active task whose metadata carries `key == value`.
+    ///
+    /// Task ids are minted inside `submit_task` and handed back to the caller,
+    /// but a scan or a discovery run is identified by its own row id, and only
+    /// the metadata ties the two together. Cancelling "the tasks belonging to
+    /// this run" therefore has to go through the metadata -- and it has to be a
+    /// sweep rather than a lookup, because one run owns many scan tasks.
+    ///
+    /// Returns the ids of the tasks that were actually cancelled.
+    pub async fn cancel_tasks_by_metadata(
+        &self,
+        key: &str,
+        value: &str,
+        task_type: Option<TaskType>,
+    ) -> Vec<Uuid> {
+        let matching: Vec<Uuid> = {
+            let tasks = self.tasks.read().await;
+            tasks
+                .values()
+                .filter(|task| {
+                    if !task.is_active() {
+                        return false;
+                    }
+                    if let Some(ref wanted) = task_type {
+                        if &task.task_type != wanted {
+                            return false;
+                        }
+                    }
+                    task.metadata.get(key).and_then(|v| v.as_str()) == Some(value)
+                })
+                .map(|task| task.id)
+                .collect()
+        };
+
+        let mut cancelled = Vec::with_capacity(matching.len());
+        for task_id in matching {
+            if self.cancel_task(task_id).await.is_ok() {
+                cancelled.push(task_id);
+            }
+        }
+
+        cancelled
+    }
+
     /// Cancel all active tasks
     pub async fn cancel_all_tasks(&self) -> Result<usize, ApiError> {
         let active_task_ids: Vec<Uuid> = {

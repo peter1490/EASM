@@ -107,9 +107,19 @@ pub async fn create_blacklist_entry(
         );
     }
 
+    // Apply the entry to work already in flight: a run in progress is holding a
+    // queue it built before this entry existed, and scans it started against
+    // hosts the entry now excludes.
+    let (queue_items_removed, scans_cancelled) = app_state
+        .discovery_service
+        .apply_blacklist_entry(company_id, &payload.object_type, &payload.object_value)
+        .await?;
+
     Ok(Json(BlacklistResult {
         entry,
         descendants_deleted,
+        queue_items_removed,
+        scans_cancelled: scans_cancelled as i64,
     }))
 }
 
@@ -215,6 +225,13 @@ pub async fn delete_blacklist_entry(
         .blacklist_repository
         .delete(company_id, &id)
         .await?;
+
+    // Discovery caches the blacklist between reads, so a removed entry has to
+    // be pushed out or it keeps excluding assets for the rest of the window.
+    app_state
+        .discovery_service
+        .invalidate_blacklist_cache(company_id)
+        .await;
 
     Ok(Json(json!({
         "message": "Blacklist entry deleted successfully"
@@ -377,18 +394,28 @@ pub async fn blacklist_from_asset(
         0
     };
 
+    let (queue_items_removed, scans_cancelled) = app_state
+        .discovery_service
+        .apply_blacklist_entry(company_id, &object_type, &asset.identifier)
+        .await?;
+
     tracing::info!(
-        "User {} blacklisted asset {} ({} '{}'), deleted {} descendants",
+        "User {} blacklisted asset {} ({} '{}'), deleted {} descendants, \
+         removed {} queued items, cancelled {} scans",
         user.email.as_deref().unwrap_or("unknown"),
         asset_id,
         object_type,
         asset.identifier,
-        descendants_deleted
+        descendants_deleted,
+        queue_items_removed,
+        scans_cancelled
     );
 
     Ok(Json(BlacklistResult {
         entry,
         descendants_deleted,
+        queue_items_removed,
+        scans_cancelled: scans_cancelled as i64,
     }))
 }
 

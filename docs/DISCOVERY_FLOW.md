@@ -16,6 +16,7 @@ This document provides a comprehensive overview of the EASM discovery system arc
 6. [Recursive Discovery](#recursive-discovery)
 7. [Data Flow Diagram](#data-flow-diagram)
 8. [Confidence Scoring](#confidence-scoring)
+9. [Status and Monitoring](#status-and-monitoring)
 
 ---
 
@@ -959,14 +960,26 @@ URLSCAN_API_KEY=         OTX_API_KEY=
 
 ### Discovery Status Object
 
+Held in memory, one per company, and only ever meaningful for the run happening
+now. Anything worth keeping past the end of a run is written to the
+`discovery_runs` row instead.
+
 ```rust
 pub struct DiscoveryStatus {
     pub is_running: bool,
+    pub run_id: Option<Uuid>,
+    pub task_id: Option<Uuid>,          // not serialised
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub current_phase: String,
+    pub seeds_total: usize,
     pub seeds_processed: usize,
     pub assets_discovered: usize,
+    pub assets_updated: usize,
+    pub queue_pending: usize,
+    pub scans_queued: usize,
     pub errors: Vec<String>,
+    pub auto_scan_threshold: f64,       // not serialised
 }
 ```
 
@@ -976,14 +989,57 @@ pub struct DiscoveryStatus {
 GET /api/discovery/status
 
 {
-  "is_running": true,
+  "running": true,
+  "run_id": "3f7c...",
   "started_at": "2024-11-20T10:00:00Z",
   "completed_at": null,
+  "current_phase": "Processing discovery queue",
+  "seeds_total": 8,
   "seeds_processed": 5,
   "assets_discovered": 234,
-  "errors": []
+  "assets_updated": 12,
+  "queue_pending": 47,
+  "scans_queued": 19,
+  "errors": [],
+  "error_count": 0
 }
 ```
+
+### Stopping a run
+
+`POST /api/discovery/stop` takes down everything the run owns, not just the
+discovery task:
+
+| What | Why it needs stopping explicitly |
+| --- | --- |
+| The discovery task | Cancelled through the task manager. |
+| Its auto-triggered scans | Each was submitted as its own task. `security_scans.discovery_run_id` is the link back to the run; scans still `pending` or `running` are marked `cancelled` and their tasks stopped. Manual and scheduled scans are untouched. |
+| Its queue | Pending rows are deleted — nothing will dequeue that run again. |
+| Its counters | Written to the `discovery_runs` row first (a stopped run would otherwise be filed as 0 seeds, 0 assets), then cleared, so the next run does not open showing the last one's numbers. |
+
+Both `stop_discovery` and the run's own finaliser can reach this; each step is
+idempotent, so whichever gets there second is a no-op.
+
+Runs left `pending` or `running` by a process that died are reconciled at
+start-up, along with their queue items and their scans.
+
+### Blacklist enforcement
+
+The blacklist is applied at three points, because a run in progress cannot be
+trusted to notice a change on its own:
+
+1. **On the way in.** Every asset discovery writes goes through one gate in
+   `create_or_update_asset_with_sources`, so no discovery path — resolution,
+   certificate SANs, reverse DNS, CIDR expansion, the Shodan pivots — can write
+   an excluded asset. The list is read once per company and cached for ten
+   seconds; adding or removing an entry drops the cache immediately.
+2. **On queueing.** Blacklisted seeds are never queued, and queue items are
+   re-checked at dequeue.
+3. **On change.** Adding an entry during a run skips the queued items it now
+   covers and cancels any scan in flight against a target it excludes — a
+   domain entry reaches its subdomains, a CIDR entry reaches the addresses
+   inside it. `POST /api/blacklist` and `POST /api/blacklist/from-asset/:id`
+   report both counts as `queue_items_removed` and `scans_cancelled`.
 
 ### Logging Levels
 
@@ -1032,6 +1088,6 @@ ERROR - Critical failures, task panics
 
 ---
 
-**Last Updated:** 2024-11-20  
-**Version:** 1.0  
+**Last Updated:** 2026-08-22  
+**Version:** 1.1  
 **Maintained by:** EASM Development Team

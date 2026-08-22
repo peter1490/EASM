@@ -229,7 +229,19 @@ function LiveRun({ status, onStopped }: { status: DiscoveryStatus | null; onStop
           </>
         }
         actions={
-          <Button variant="danger" icon="stop" onClick={() => void handleStop()} loading={stopping}>
+          <Button
+            variant="danger"
+            icon="stop"
+            onClick={() => void handleStop()}
+            loading={stopping}
+            title={
+              (status.scans_queued ?? 0) > 0
+                ? `Stops the run and cancels the ${status.scans_queued} scan${
+                    status.scans_queued === 1 ? "" : "s"
+                  } it queued`
+                : "Stop this discovery run"
+            }
+          >
             Stop
           </Button>
         }
@@ -271,7 +283,7 @@ function LiveRun({ status, onStopped }: { status: DiscoveryStatus | null; onStop
           )}
         </ol>
 
-        <div className="grid grid-cols-2 md:grid-cols-5 bg-surface-2 border border-rule rounded-lg divide-x divide-rule">
+        <div className="grid grid-cols-2 md:grid-cols-6 bg-surface-2 border border-rule rounded-lg divide-x divide-rule">
           {[
             {
               label: "Seeds",
@@ -285,6 +297,9 @@ function LiveRun({ status, onStopped }: { status: DiscoveryStatus | null; onStop
             { label: "Discovered", value: num(status.assets_discovered) },
             { label: "Updated", value: num(status.assets_updated ?? 0) },
             { label: "Queue pending", value: num(status.queue_pending ?? 0) },
+            // Auto-scans this run queued. They stop with the run, so it matters
+            // that the operator can see how much stopping it will take down.
+            { label: "Scans queued", value: num(status.scans_queued ?? 0) },
             {
               label: "Errors",
               value: <span className={status.error_count > 0 ? "text-crit" : undefined}>{num(status.error_count)}</span>,

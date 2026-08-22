@@ -66,6 +66,13 @@ pub trait BlacklistRepository: Send + Sync {
         offset: i64,
     ) -> Result<Vec<BlacklistEntry>, ApiError>;
 
+    /// Every entry for a company, unpaginated.
+    ///
+    /// Discovery evaluates the blacklist against each asset it is about to
+    /// write, which is thousands of checks per run. Reading the list once and
+    /// matching in memory turns that into one query per refresh.
+    async fn list_all(&self, company_id: Uuid) -> Result<Vec<BlacklistEntry>, ApiError>;
+
     /// List blacklist entries by type
     async fn list_by_type(
         &self,
@@ -321,6 +328,17 @@ impl BlacklistRepository for SqlxBlacklistRepository {
         )
         .bind(limit)
         .bind(offset)
+        .bind(company_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    async fn list_all(&self, company_id: Uuid) -> Result<Vec<BlacklistEntry>, ApiError> {
+        let rows = sqlx::query_as::<_, BlacklistEntry>(
+            "SELECT * FROM blacklist WHERE company_id = $1 ORDER BY created_at DESC",
+        )
         .bind(company_id)
         .fetch_all(&self.pool)
         .await?;

@@ -110,6 +110,7 @@ async fn run_scan(
                 note: Some("deep scan integration test".to_string()),
                 // Exercise the exhaustive path — that is what is under test.
                 config: Some(json!({ "deep": true })),
+                discovery_run_id: None,
             },
             company_id,
             None,

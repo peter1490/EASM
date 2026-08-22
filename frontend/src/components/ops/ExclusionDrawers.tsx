@@ -147,6 +147,31 @@ export function ExclusionCreateDrawer({
           ) : (
             <p className="text-[12.5px] text-ink-2">No descendant assets were deleted.</p>
           )}
+
+          {(result.queue_items_removed ?? 0) > 0 || (result.scans_cancelled ?? 0) > 0 ? (
+            <div className="flex items-start gap-3 p-3.5 rounded-lg border border-rule bg-surface-2">
+              <Icon name="stop" size={15} className="text-ink-2 mt-px" />
+              <div className="min-w-0">
+                <div className="text-[12.5px] font-semibold text-ink">Applied to the run in progress</div>
+                <p className="text-[12px] text-ink-2 mt-0.5">
+                  {(result.queue_items_removed ?? 0) > 0 && (
+                    <>
+                      <span className="mono text-ink">{num(result.queue_items_removed ?? 0)}</span> queued
+                      discovery item
+                      {(result.queue_items_removed ?? 0) === 1 ? " was" : "s were"} dropped
+                      {(result.scans_cancelled ?? 0) > 0 ? ", and " : "."}
+                    </>
+                  )}
+                  {(result.scans_cancelled ?? 0) > 0 && (
+                    <>
+                      <span className="mono text-ink">{num(result.scans_cancelled ?? 0)}</span> running scan
+                      {(result.scans_cancelled ?? 0) === 1 ? " was" : "s were"} cancelled.
+                    </>
+                  )}
+                </p>
+              </div>
+            </div>
+          ) : null}
         </div>
       ) : (
         <div className="flex flex-col gap-3.5">

@@ -76,10 +76,19 @@ export function SortableTH({
 }) {
   return (
     <TH className={className} aria-sort={active ? (direction === "asc" ? "ascending" : "descending") : "none"} {...props}>
+      {/*
+        `text-transform` is one of the properties the UA stylesheet hard-sets on
+        form controls, and Tailwind's preflight does not inherit it back, so a
+        header rendered through this button came out in sentence case while
+        every plain `TH` beside it was upper case. Inherit it explicitly.
+      */}
       <button
         type="button"
         onClick={onSort}
-        className={cn("inline-flex items-center gap-1 hover:text-ink transition-colors", active && "text-ink")}
+        className={cn(
+          "inline-flex items-center gap-1 [text-transform:inherit] hover:text-ink transition-colors",
+          active && "text-ink",
+        )}
       >
         {children}
         {active && <span aria-hidden="true">{direction === "asc" ? "↑" : "↓"}</span>}

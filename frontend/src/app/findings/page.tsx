@@ -599,15 +599,29 @@ function FindingsScreen() {
 
   /* ---------------- Render ---------------- */
 
+  // Every row carries the asset it was found on, so a scoped view can name the
+  // asset instead of showing eight characters of its id.
+  const assetLabel = assetParam ? (rows[0]?.asset_value ?? assetParam.slice(0, 8)) : null;
+
   const queryTokens = [
     ...activeTokens,
     ...(scanParam ? [`scan:${scanParam.slice(0, 8)}`] : []),
-    ...(assetParam ? [`asset:${assetParam.slice(0, 8)}`] : []),
+    ...(assetLabel ? [`asset:${assetLabel}`] : []),
   ];
 
+  /**
+   * `scan` and `asset` are scopes rather than facets — they are not in
+   * `FACET_GROUPS`, so `toggleFacet` used to drop the asset token on the floor
+   * and its ✕ did nothing. Both now clear their own parameter, which is what
+   * takes you back to the whole queue.
+   */
   function removeToken(token: string) {
     if (token.startsWith("scan:")) {
       setParams((params) => params.delete("scan"));
+      return;
+    }
+    if (token.startsWith("asset:")) {
+      setParams((params) => params.delete("asset"));
       return;
     }
     toggleFacet(token);
@@ -629,7 +643,9 @@ function FindingsScreen() {
             hint={
               scanParam
                 ? "Everything one scan turned up, and the triage queue for it."
-                : "Everything the scanners found, in one queue."
+                : assetParam
+                  ? `Everything open on ${assetLabel}. Clear the asset filter to see the whole queue.`
+                  : "Everything the scanners found, in one queue."
             }
             actions={
               <Button icon="refresh" onClick={() => load(false)} loading={busy}>
@@ -659,6 +675,7 @@ function FindingsScreen() {
               {visibleRows.length < total && <span className="text-ink-3"> of {num(total)}</span>}{" "}
               finding{visibleRows.length === 1 ? "" : "s"}
               {scanParam && <span className="text-ink-3"> from this scan</span>}
+              {!scanParam && assetParam && <span className="text-ink-3"> on this asset</span>}
             </span>
             {busy && <Spinner size={12} />}
             {resolvedHidden && (

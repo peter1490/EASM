@@ -933,6 +933,45 @@ function Surface() {
   );
 }
 
+/**
+ * How many severity chips one row shows before the rest are rolled into a
+ * "+n". Five chips do not fit the column, and letting them wrap grew the row
+ * to nearly three times its height with the chips pressed right up against the
+ * rules above and below it. Two chips plus the overflow token is what the
+ * column holds on one line, and it is what the dashboard queue already shows.
+ */
+const FINDING_CHIPS = 2;
+
+/** The open-finding mix for one asset, as a single line of severity chips. */
+function OpenFindings({ counts }: { counts: Asset["open_findings"] }) {
+  if (counts == null) {
+    return (
+      <span className="text-[12px] text-ink-3" title="This build of the API does not report per-asset findings">
+        —
+      </span>
+    );
+  }
+  if (counts.total === 0) return <span className="text-[12px] text-ink-3">none</span>;
+
+  const present = SEVERITY_ORDER.filter((severity) => (counts[severity] ?? 0) > 0);
+  const shown = present.slice(0, FINDING_CHIPS);
+  const hidden = present.slice(FINDING_CHIPS);
+  const hiddenTotal = hidden.reduce((sum, severity) => sum + (counts[severity] ?? 0), 0);
+  // The whole mix stays readable on hover, and in full in the drawer.
+  const breakdown = present.map((severity) => `${counts[severity]} ${severity}`).join(" · ");
+
+  return (
+    <div className="flex items-center gap-1" title={breakdown}>
+      {shown.map((severity) => (
+        <SeverityChip key={severity} severity={severity} short count={counts[severity]} className="shrink-0" />
+      ))}
+      {hidden.length > 0 && (
+        <span className="mono text-[11px] text-ink-3 shrink-0">+{hiddenTotal}</span>
+      )}
+    </div>
+  );
+}
+
 function AssetRow({
   asset,
   selected,
@@ -1002,19 +1041,7 @@ function AssetRow({
       </TD>
 
       <TD>
-        {open == null ? (
-          <span className="text-[12px] text-ink-3" title="This build of the API does not report per-asset findings">
-            —
-          </span>
-        ) : open.total === 0 ? (
-          <span className="text-[12px] text-ink-3">none</span>
-        ) : (
-          <div className="flex items-center gap-1 flex-wrap">
-            {SEVERITY_ORDER.filter((severity) => (open[severity] ?? 0) > 0).map((severity) => (
-              <SeverityChip key={severity} severity={severity} short count={open[severity]} />
-            ))}
-          </div>
-        )}
+        <OpenFindings counts={open} />
       </TD>
 
       <TD>

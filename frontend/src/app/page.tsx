@@ -242,7 +242,7 @@ export default function OverviewPage() {
           </Card>
         </div>
 
-        <div className="flex gap-4 items-start max-xl:flex-col">
+        <div className="flex gap-4 items-stretch max-xl:flex-col">
           <Card className="flex-1 min-w-0 overflow-hidden">
             <CardHeader
               title="Needs attention"
@@ -268,68 +268,79 @@ export default function OverviewPage() {
             {tab === "findings" ? <FindingQueue findings={findings} /> : <AssetQueue assets={assets} />}
           </Card>
 
-          <Card className="w-[400px] shrink-0 max-xl:w-full overflow-hidden">
-            <div className="px-4 py-3.5 border-b border-rule">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Dot color={discovery?.running ? "var(--accent)" : "var(--ink-3)"} />
-                  <h2 className="text-sm font-semibold tracking-[-0.012em]">
-                    {discovery?.running ? "Discovery running" : "Discovery idle"}
-                  </h2>
+          {/* The queue on the left is what sets the height of this row: the card
+              below is absolutely positioned inside a stretched wrapper, so its
+              own content never lengthens the row, and it comes out exactly as
+              tall as the queue beside it. Recent scans is the part that gives —
+              it takes whatever height is left and scrolls the overflow. Below
+              xl the two cards stack and this one goes back to its own height. */}
+          <div className="relative w-[400px] shrink-0 max-xl:w-full">
+            <Card className="absolute inset-0 flex flex-col overflow-hidden max-xl:relative max-xl:inset-auto">
+              <div className="px-4 py-3.5 border-b border-rule shrink-0">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Dot color={discovery?.running ? "var(--accent)" : "var(--ink-3)"} />
+                    <h2 className="text-sm font-semibold tracking-[-0.012em]">
+                      {discovery?.running ? "Discovery running" : "Discovery idle"}
+                    </h2>
+                  </div>
+                  <Link href="/ops" className="text-[11.5px] font-medium">
+                    Ops
+                  </Link>
                 </div>
-                <Link href="/ops" className="text-[11.5px] font-medium">
-                  Ops
+                {discovery?.running ? (
+                  <>
+                    <p className="text-[12px] text-ink-2 mt-1.5">
+                      {discovery.current_phase || "Starting"} · started {ago(discovery.started_at)}
+                    </p>
+                    <Bar value={progress ?? 0} className="mt-2.5" />
+                    <div className="flex gap-5 mt-2.5">
+                      <MiniStat value={`${discovery.seeds_processed}/${discovery.seeds_total ?? "?"}`} label="seeds" />
+                      <MiniStat value={num(discovery.assets_discovered)} label="new" tone="var(--ok)" />
+                      <MiniStat value={num(discovery.scans_queued ?? discovery.queue_pending ?? 0)} label="queued" />
+                      <MiniStat
+                        value={num(discovery.error_count)}
+                        label="errors"
+                        tone={discovery.error_count > 0 ? "var(--high)" : undefined}
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-[12px] text-ink-2 mt-1.5">
+                    Last completed run {ago(discovery?.completed_at)}.
+                  </p>
+                )}
+              </div>
+
+              <div className="px-4 pt-3 pb-2 flex items-center justify-between shrink-0">
+                <span className="lbl">Recent scans</span>
+                <Link href="/ops?tab=scans" className="text-[11.5px] font-medium">
+                  Scan queue
                 </Link>
               </div>
-              {discovery?.running ? (
-                <>
-                  <p className="text-[12px] text-ink-2 mt-1.5">
-                    {discovery.current_phase || "Starting"} · started {ago(discovery.started_at)}
-                  </p>
-                  <Bar value={progress ?? 0} className="mt-2.5" />
-                  <div className="flex gap-5 mt-2.5">
-                    <MiniStat value={`${discovery.seeds_processed}/${discovery.seeds_total ?? "?"}`} label="seeds" />
-                    <MiniStat value={num(discovery.assets_discovered)} label="new" tone="var(--ok)" />
-                    <MiniStat value={num(discovery.scans_queued ?? discovery.queue_pending ?? 0)} label="queued" />
-                    <MiniStat
-                      value={num(discovery.error_count)}
-                      label="errors"
-                      tone={discovery.error_count > 0 ? "var(--high)" : undefined}
-                    />
-                  </div>
-                </>
-              ) : (
-                <p className="text-[12px] text-ink-2 mt-1.5">
-                  Last completed run {ago(discovery?.completed_at)}.
-                </p>
-              )}
-            </div>
-
-            <div className="px-4 pt-3 pb-2 flex items-center justify-between">
-              <span className="lbl">Recent scans</span>
-              <Link href="/ops?tab=scans" className="text-[11.5px] font-medium">
-                Scan queue
-              </Link>
-            </div>
-            <div className="px-2 pb-2">
-              {scans.length === 0 ? (
-                <p className="px-2 py-6 text-center text-[12.5px] text-ink-3">No scans yet.</p>
-              ) : (
-                scans.map((scan) => (
-                  <Link
-                    key={scan.id}
-                    href={`/findings?scan=${scan.id}`}
-                    className="flex items-center gap-2.5 h-[38px] px-2 rounded-md no-underline text-ink hover:bg-surface-2"
-                  >
-                    <Dot color={scanTone(scan.status)} />
-                    <span className="mono text-[12px] flex-1 truncate">{scan.asset_value ?? scan.asset_id.slice(0, 8)}</span>
-                    <span className="text-[10.5px] text-ink-3">{scan.scan_type.replace(/_/g, " ")}</span>
-                    <span className="text-[11.5px] text-ink-3 w-[52px] text-right">{ago(scan.created_at)}</span>
-                  </Link>
-                ))
-              )}
-            </div>
-          </Card>
+              {/* Runs to the card's bottom edge, the way the queue's table does
+                  beside it. A bottom padding here would sit inside the scroll
+                  box and put a scrollbar on a list that otherwise fits. */}
+              <div className="px-2 flex-1 min-h-0 overflow-y-auto">
+                {scans.length === 0 ? (
+                  <p className="px-2 py-6 text-center text-[12.5px] text-ink-3">No scans yet.</p>
+                ) : (
+                  scans.map((scan) => (
+                    <Link
+                      key={scan.id}
+                      href={`/findings?scan=${scan.id}`}
+                      className="flex items-center gap-2.5 h-[38px] px-2 rounded-md no-underline text-ink hover:bg-surface-2"
+                    >
+                      <Dot color={scanTone(scan.status)} />
+                      <span className="mono text-[12px] flex-1 truncate">{scan.asset_value ?? scan.asset_id.slice(0, 8)}</span>
+                      <span className="text-[10.5px] text-ink-3">{scan.scan_type.replace(/_/g, " ")}</span>
+                      <span className="text-[11.5px] text-ink-3 w-[52px] text-right">{ago(scan.created_at)}</span>
+                    </Link>
+                  ))
+                )}
+              </div>
+            </Card>
+          </div>
         </div>
 
         {/* System — one line, not a grid of cards. */}

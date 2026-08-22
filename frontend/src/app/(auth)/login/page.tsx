@@ -64,25 +64,29 @@ function LoginForm() {
                 className="h-[38px]"
               />
             </div>
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="lbl">Password</span>
-                <button
-                  type="button"
-                  onClick={() => setReveal((v) => !v)}
-                  className="text-[11px] font-medium text-accent hover:text-accent-ink"
-                >
-                  {reveal ? "Hide" : "Show"}
-                </button>
-              </div>
+            {/*
+              The reveal toggle is laid out beside the label but comes after the
+              field in the DOM, so tabbing out of the email lands on the password
+              box rather than on "Show". A grid puts it back on the label line
+              without changing the focus order.
+            */}
+            <div className="grid grid-cols-[1fr_auto] items-center">
+              <span className="lbl mb-1.5">Password</span>
               <Input
                 type={reveal ? "text" : "password"}
                 autoComplete="current-password"
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="h-[38px]"
+                className="h-[38px] row-start-2 col-span-2"
               />
+              <button
+                type="button"
+                onClick={() => setReveal((v) => !v)}
+                className="row-start-1 col-start-2 mb-1.5 text-[11px] font-medium text-accent hover:text-accent-ink"
+              >
+                {reveal ? "Hide" : "Show"}
+              </button>
             </div>
             <Button type="submit" variant="primary" size="lg" loading={busy} className="justify-center mt-1">
               Sign in

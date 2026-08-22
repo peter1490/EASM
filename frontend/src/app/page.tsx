@@ -43,6 +43,14 @@ const RANGES = [
   { value: "90", label: "90d" },
 ] as const;
 
+/**
+ * Rows in the "Needs attention" queue. Both tabs draw the same number, so the
+ * card does not resize when you switch between them. Eight ran the queue off
+ * the bottom of a laptop screen; six keeps every row above the fold, and
+ * "View all" is right there in the header for the rest.
+ */
+const QUEUE_ROWS = 6;
+
 const TYPE_ORDER = ["domain", "ip", "port", "certificate", "organization", "asn"] as const;
 const TYPE_SHADES: Record<string, string> = {
   domain: "var(--accent)",
@@ -86,9 +94,9 @@ export default function OverviewPage() {
             status: OPEN_STATUSES,
             sort_by: "severity",
             sort_dir: "desc",
-            limit: 8,
+            limit: QUEUE_ROWS,
           }),
-          getHighRiskAssets(8),
+          getHighRiskAssets(QUEUE_ROWS),
           listScans({ limit: 6 }),
         ]);
       setOverview(overviewData);

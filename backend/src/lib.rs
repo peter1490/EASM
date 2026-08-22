@@ -3,7 +3,6 @@ use crate::{
     database::DatabasePool,
     repositories::{
         asset_repo::SqlxAssetRepository,
-        blacklist_repo::SqlxBlacklistRepository,
         company_repo::SqlxCompanyRepository,
         discovery_repo::{
             SqlxAssetRelationshipRepository, SqlxAssetSourceRepository,
@@ -11,6 +10,7 @@ use crate::{
         },
         discovery_schedule_repo::SqlxDiscoveryScheduleRepository,
         evidence_repo::SqlxEvidenceRepository,
+        exclusion_repo::SqlxExclusionRepository,
         finding_repo::SqlxFindingRepository,
         finding_type_config_repo::SqlxFindingTypeConfigRepository,
         scan_repo::SqlxScanRepository,
@@ -18,11 +18,11 @@ use crate::{
         seed_repo::SqlxSeedRepository,
         tag_repo::SqlxTagRepository,
         user_repo::SqlxUserRepository,
-        AssetRelationshipRepository, AssetRepository, AssetSourceRepository, BlacklistRepository,
-        CompanyRepository, DiscoveryQueueRepository, DiscoveryRunRepository,
-        DiscoveryScheduleRepository, EvidenceRepository, FindingRepository,
-        FindingTypeConfigRepository, ScanRepository, SecurityFindingRepository,
-        SecurityScanRepository, SeedRepository, TagRepository, UserRepository,
+        AssetRelationshipRepository, AssetRepository, AssetSourceRepository, CompanyRepository,
+        DiscoveryQueueRepository, DiscoveryRunRepository, DiscoveryScheduleRepository,
+        EvidenceRepository, ExclusionRepository, FindingRepository, FindingTypeConfigRepository,
+        ScanRepository, SecurityFindingRepository, SecurityScanRepository, SeedRepository,
+        TagRepository, UserRepository,
     },
     services::external::{DnsResolver, ExternalServicesManager, HttpAnalyzer},
     services::{
@@ -78,7 +78,7 @@ pub struct AppState {
     pub security_scan_repository: Arc<dyn SecurityScanRepository + Send + Sync>,
     pub security_finding_repository: Arc<dyn SecurityFindingRepository + Send + Sync>,
     pub tag_repository: Arc<dyn TagRepository + Send + Sync>,
-    pub blacklist_repository: Arc<dyn BlacklistRepository + Send + Sync>,
+    pub exclusion_repository: Arc<dyn ExclusionRepository + Send + Sync>,
     pub finding_type_config_repo: Arc<dyn FindingTypeConfigRepository + Send + Sync>,
     pub company_repository: Arc<dyn CompanyRepository + Send + Sync>,
     // Convenience accessors for handlers
@@ -152,9 +152,9 @@ impl AppState {
         let tag_repository: Arc<dyn TagRepository + Send + Sync> =
             Arc::new(SqlxTagRepository::new(db_pool.clone()));
 
-        // Create blacklist repository
-        let blacklist_repository: Arc<dyn BlacklistRepository + Send + Sync> =
-            Arc::new(SqlxBlacklistRepository::new(db_pool.clone()));
+        // Create exclusion repository
+        let exclusion_repository: Arc<dyn ExclusionRepository + Send + Sync> =
+            Arc::new(SqlxExclusionRepository::new(db_pool.clone()));
 
         // Create finding type config repository
         let finding_type_config_repo: Arc<dyn FindingTypeConfigRepository + Send + Sync> =
@@ -231,7 +231,7 @@ impl AppState {
                 discovery_queue_repository.clone(),
                 asset_source_repository.clone(),
                 asset_relationship_repository.clone(),
-                blacklist_repository.clone(),
+                exclusion_repository.clone(),
                 external_services.clone(),
                 dns_resolver.clone(),
                 http_analyzer.clone(),
@@ -320,7 +320,7 @@ impl AppState {
             security_scan_repository,
             security_finding_repository,
             tag_repository,
-            blacklist_repository,
+            exclusion_repository,
             finding_type_config_repo,
             company_repository,
             // Convenience accessors for handlers

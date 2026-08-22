@@ -357,29 +357,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/assets/:asset_id/tags/:tag_id",
             delete(handlers::tag_handlers::untag_asset),
         )
-        // Blacklist endpoints
+        // Exclusion endpoints
         .route(
-            "/api/blacklist",
-            get(handlers::blacklist_handlers::list_blacklist)
-                .post(handlers::blacklist_handlers::create_blacklist_entry),
+            "/api/exclusions",
+            get(handlers::exclusion_handlers::list_exclusions)
+                .post(handlers::exclusion_handlers::create_exclusion),
         )
         .route(
-            "/api/blacklist/stats",
-            get(handlers::blacklist_handlers::get_blacklist_stats),
+            "/api/exclusions/stats",
+            get(handlers::exclusion_handlers::get_exclusion_stats),
         )
         .route(
-            "/api/blacklist/check",
-            post(handlers::blacklist_handlers::check_blacklist),
+            "/api/exclusions/check",
+            post(handlers::exclusion_handlers::check_exclusion),
         )
         .route(
-            "/api/blacklist/from-asset/:id",
-            post(handlers::blacklist_handlers::blacklist_from_asset),
+            "/api/exclusions/from-asset/:id",
+            post(handlers::exclusion_handlers::exclude_asset),
         )
         .route(
-            "/api/blacklist/:id",
-            get(handlers::blacklist_handlers::get_blacklist_entry)
-                .patch(handlers::blacklist_handlers::update_blacklist_entry)
-                .delete(handlers::blacklist_handlers::delete_blacklist_entry),
+            "/api/exclusions/:id",
+            get(handlers::exclusion_handlers::get_exclusion)
+                .patch(handlers::exclusion_handlers::update_exclusion)
+                .delete(handlers::exclusion_handlers::delete_exclusion),
         )
         // Finding type config endpoints (risk scoring configuration)
         .route(

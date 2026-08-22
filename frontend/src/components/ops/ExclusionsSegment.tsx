@@ -2,11 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  getBlacklistStats,
-  listBlacklist,
-  updateBlacklistEntry,
-  type BlacklistEntry,
-  type BlacklistStats,
+  getExclusionStats,
+  listExclusions,
+  updateExclusion,
+  type ExclusionEntry,
+  type ExclusionStats,
 } from "@/app/api";
 import {
   Button,
@@ -29,19 +29,26 @@ import {
 } from "@/components/kit";
 import { ago, dateTime, num } from "@/lib/format";
 import { EXCLUSION_TYPES, exclusionType } from "./exclusionTypes";
-import { ExclusionCreateDrawer, ExclusionDeleteDrawer } from "./ExclusionDrawers";
+import {
+  ExclusionCreateDrawer,
+  ExclusionDeleteDrawer,
+  ExclusionPromoteDrawer,
+} from "./ExclusionDrawers";
 import { Pagination, useOpsRoles, usePoll, useSilentLoad } from "./shared";
 
 const PAGE = 25;
 const POLL_MS = 60_000;
+
+/** The hard entries read as a destructive state, not a neutral one. */
+const BLACKLIST_TONE = { text: "text-crit", wash: "bg-crit-wash" };
 
 export function ExclusionsSegment({ onCount }: { onCount?: (count: number) => void }) {
   const { isAnalyst } = useOpsRoles();
   const report = useRef(onCount);
   report.current = onCount;
 
-  const [entries, setEntries] = useState<BlacklistEntry[]>([]);
-  const [stats, setStats] = useState<BlacklistStats | null>(null);
+  const [entries, setEntries] = useState<ExclusionEntry[]>([]);
+  const [stats, setStats] = useState<ExclusionStats | null>(null);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [typeFilter, setTypeFilter] = useState("");
@@ -51,10 +58,12 @@ export function ExclusionsSegment({ onCount }: { onCount?: (count: number) => vo
   const { loading, begin, done } = useSilentLoad();
 
   const [creating, setCreating] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<BlacklistEntry | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ExclusionEntry | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [savingReason, setSavingReason] = useState(false);
+  const [promoteTarget, setPromoteTarget] = useState<ExclusionEntry | null>(null);
+  const [promoting, setPromoting] = useState<string | null>(null);
 
   // Typing filters the list, but not on every keystroke — and a new search
   // always starts from the first page.
@@ -70,8 +79,8 @@ export function ExclusionsSegment({ onCount }: { onCount?: (count: number) => vo
     begin();
     try {
       const [page, statsData] = await Promise.all([
-        listBlacklist(PAGE, offset, typeFilter || undefined, search || undefined),
-        getBlacklistStats().catch(() => null),
+        listExclusions(PAGE, offset, typeFilter || undefined, search || undefined),
+        getExclusionStats().catch(() => null),
       ]);
       setEntries(page.entries);
       setTotal(page.total_count);
@@ -95,11 +104,11 @@ export function ExclusionsSegment({ onCount }: { onCount?: (count: number) => vo
 
   usePoll(() => void load(), POLL_MS);
 
-  async function saveReason(entry: BlacklistEntry) {
+  async function saveReason(entry: ExclusionEntry) {
     setSavingReason(true);
     setError(null);
     try {
-      const updated = await updateBlacklistEntry(entry.id, draft.trim());
+      const { entry: updated } = await updateExclusion(entry.id, { reason: draft.trim() });
       setEntries((current) => current.map((row) => (row.id === entry.id ? updated : row)));
       setEditingId(null);
     } catch (err) {
@@ -109,14 +118,44 @@ export function ExclusionsSegment({ onCount }: { onCount?: (count: number) => vo
     }
   }
 
+  /**
+   * Promote an exclusion to a blacklist from the list.
+   *
+   * Only ever one way: the deletion a promotion causes cannot be undone, so
+   * offering a toggle back would promise something the data cannot keep. To
+   * stop the rule entirely, remove the entry.
+   */
+  async function blacklistEntry(entry: ExclusionEntry) {
+    setPromoting(entry.id);
+    setError(null);
+    try {
+      await updateExclusion(entry.id, { blacklisted: true });
+      await load();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setPromoting(null);
+      setPromoteTarget(null);
+    }
+  }
+
   const filtered = Boolean(search || typeFilter);
 
   return (
     <div className="flex flex-col gap-5">
-      <div className="grid gap-3 grid-cols-2 sm:grid-cols-4 lg:grid-cols-7">
+      <div className="grid gap-3 grid-cols-2 sm:grid-cols-4 lg:grid-cols-8">
         <Card className="px-3.5 py-3">
-          <div className="lbl">Excluded</div>
+          <div className="lbl">Entries</div>
           <div className="fig text-[24px] mt-1 leading-none">{num(stats?.total_entries ?? total)}</div>
+        </Card>
+        <Card className="px-3.5 py-3">
+          <div className="lbl flex items-center gap-1.5">
+            <Icon name="trash" size={11} />
+            Blacklisted
+          </div>
+          <div className="fig text-[24px] mt-1 leading-none text-crit">
+            {num(stats?.blacklisted_entries ?? 0)}
+          </div>
         </Card>
         {EXCLUSION_TYPES.map((type) => (
           <Card key={type.value} className="px-3.5 py-3">
@@ -134,7 +173,7 @@ export function ExclusionsSegment({ onCount }: { onCount?: (count: number) => vo
       <Card>
         <CardHeader
           title="Exclusions"
-          hint="Skipped by every discovery run, along with anything beneath them"
+          hint="Discovery finds nothing new through these; blacklisted ones are deleted outright"
           actions={
             <div className="flex items-center gap-2">
               <Button size="sm" icon="refresh" onClick={() => void load()}>
@@ -175,7 +214,7 @@ export function ExclusionsSegment({ onCount }: { onCount?: (count: number) => vo
             </Select>
           </div>
           <span className="text-[11.5px] text-ink-3 ml-auto">
-            Subdomains of an excluded domain and IPs inside an excluded CIDR are excluded too.
+            Subdomains of an excluded domain and IPs inside an excluded CIDR are covered too.
           </span>
         </div>
 
@@ -194,7 +233,7 @@ export function ExclusionsSegment({ onCount }: { onCount?: (count: number) => vo
             description={
               filtered
                 ? "No exclusion matches this search or type."
-                : "Exclude a CDN, a shared host or anything else that is not yours, and discovery will stop finding it."
+                : "Exclude a CDN, a shared host or anything else that is not yours, and discovery will stop finding more of it."
             }
             action={
               filtered ? (
@@ -222,10 +261,11 @@ export function ExclusionsSegment({ onCount }: { onCount?: (count: number) => vo
                 <TR>
                   <TH>Type</TH>
                   <TH>Value</TH>
+                  <TH>Mode</TH>
                   <TH>Reason</TH>
                   <TH>Added by</TH>
                   <TH>Added</TH>
-                  {isAnalyst && <TH className="w-[150px]" />}
+                  {isAnalyst && <TH className="w-[240px]" />}
                 </TR>
               </THead>
               <TBody>
@@ -242,6 +282,19 @@ export function ExclusionsSegment({ onCount }: { onCount?: (count: number) => vo
                       </TD>
                       <TD className="mono text-[12.5px] max-w-[260px] truncate" title={entry.object_value}>
                         {entry.object_value}
+                      </TD>
+                      <TD>
+                        {entry.blacklisted ? (
+                          <Chip tone={BLACKLIST_TONE} title="Deleted, and never stored again">
+                            <Icon name="trash" size={11} />
+                            Blacklisted
+                          </Chip>
+                        ) : (
+                          <Chip title="Kept and still scanned; discovery just stops expanding on it">
+                            <Icon name="ban" size={11} className="text-ink-3" />
+                            Excluded
+                          </Chip>
+                        )}
                       </TD>
                       <TD className="max-w-[320px]">
                         {editing ? (
@@ -300,6 +353,16 @@ export function ExclusionsSegment({ onCount }: { onCount?: (count: number) => vo
                               >
                                 Edit reason
                               </Button>
+                              {!entry.blacklisted && (
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  loading={promoting === entry.id}
+                                  onClick={() => setPromoteTarget(entry)}
+                                >
+                                  Blacklist
+                                </Button>
+                              )}
                               <Button
                                 size="sm"
                                 variant="ghost"
@@ -330,6 +393,12 @@ export function ExclusionsSegment({ onCount }: { onCount?: (count: number) => vo
 
       <ExclusionCreateDrawer open={creating} onClose={() => setCreating(false)} onCreated={load} />
       <ExclusionDeleteDrawer entry={deleteTarget} onClose={() => setDeleteTarget(null)} onDeleted={load} />
+      <ExclusionPromoteDrawer
+        entry={promoteTarget}
+        working={promoting != null}
+        onClose={() => setPromoteTarget(null)}
+        onConfirm={blacklistEntry}
+      />
     </div>
   );
 }

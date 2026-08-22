@@ -1,9 +1,9 @@
 pub mod asset_repo;
-pub mod blacklist_repo;
 pub mod company_repo;
 pub mod discovery_repo;
 pub mod discovery_schedule_repo;
 pub mod evidence_repo;
+pub mod exclusion_repo;
 pub mod finding_repo;
 pub mod finding_type_config_repo;
 pub mod scan_repo;
@@ -15,7 +15,6 @@ pub mod user_repo;
 
 // Re-export commonly used types
 pub use asset_repo::{AssetRepository, SqlxAssetRepository};
-pub use blacklist_repo::{BlacklistRepository, SqlxBlacklistRepository};
 pub use company_repo::{CompanyRepository, SqlxCompanyRepository};
 pub use discovery_repo::{
     AssetRelationshipRepository, AssetSourceRepository, DiscoveryQueueRepository,
@@ -24,6 +23,7 @@ pub use discovery_repo::{
 };
 pub use discovery_schedule_repo::{DiscoveryScheduleRepository, SqlxDiscoveryScheduleRepository};
 pub use evidence_repo::EvidenceRepository;
+pub use exclusion_repo::{ExclusionRepository, SqlxExclusionRepository};
 pub use finding_repo::FindingRepository;
 pub use finding_type_config_repo::{FindingTypeConfigRepository, SqlxFindingTypeConfigRepository};
 pub use scan_repo::ScanRepository;

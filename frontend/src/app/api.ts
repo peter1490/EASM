@@ -1679,83 +1679,94 @@ export async function runAutoTagAll(): Promise<AutoTagResult> {
 }
 
 // ============================================================================
-// BLACKLIST TYPES
+// EXCLUSION TYPES
 // ============================================================================
 
-export type BlacklistObjectType = "domain" | "ip" | "organization" | "asn" | "cidr" | "certificate";
+export type ExclusionObjectType = "domain" | "ip" | "organization" | "asn" | "cidr" | "certificate";
 
-export type BlacklistEntry = {
+export type ExclusionEntry = {
   id: string;
   object_type: string;
   object_value: string;
   company_id: string;
   reason: string | null;
   created_by: string | null;
+  /**
+   * The hard kind. An ordinary exclusion stops discovery finding more of this
+   * object but keeps what it already found; a blacklisted one is deleted and
+   * never stored again, so it reaches no score, no scan and no list.
+   */
+  blacklisted: boolean;
   created_at: string;
   updated_at: string;
 };
 
-export type BlacklistCreate = {
-  object_type: BlacklistObjectType;
+export type ExclusionCreate = {
+  object_type: ExclusionObjectType;
   object_value: string;
   reason?: string;
   delete_descendants?: boolean;
+  blacklisted?: boolean;
 };
 
-export type BlacklistResult = {
-  entry: BlacklistEntry;
+export type ExclusionResult = {
+  entry: ExclusionEntry;
   descendants_deleted: number;
+  /** Assets deleted outright because the entry blacklists them. */
+  assets_deleted?: number;
   /** Queued discovery items the entry removed from a run in progress. */
   queue_items_removed?: number;
   /** Security scans stopped because their target is now blacklisted. */
   scans_cancelled?: number;
 };
 
-export type BlacklistListResponse = {
-  entries: BlacklistEntry[];
+export type ExclusionListResponse = {
+  entries: ExclusionEntry[];
   total_count: number;
   limit: number;
   offset: number;
 };
 
-export type BlacklistCheckResult = {
+export type ExclusionCheckResult = {
+  is_excluded: boolean;
   is_blacklisted: boolean;
-  entry: BlacklistEntry | null;
-  parent_blacklisted: boolean;
-  parent_entry: BlacklistEntry | null;
+  entry: ExclusionEntry | null;
+  parent_excluded: boolean;
+  parent_entry: ExclusionEntry | null;
 };
 
-export type BlacklistStats = {
+export type ExclusionStats = {
   total_entries: number;
   by_type: Record<string, number>;
+  blacklisted_entries: number;
 };
 
 // ============================================================================
-// BLACKLIST API
+// EXCLUSION API
 // ============================================================================
 
-export async function listBlacklist(
+export async function listExclusions(
   limit = 50,
   offset = 0,
   objectType?: string,
   q?: string
-): Promise<BlacklistListResponse> {
+): Promise<ExclusionListResponse> {
   const params = new URLSearchParams();
   params.append("limit", limit.toString());
   params.append("offset", offset.toString());
   if (objectType) params.append("object_type", objectType);
   if (q) params.append("q", q);
 
-  const res = await apiFetch(`${API_BASE}/api/blacklist?${params.toString()}`, {
+  const res = await apiFetch(`${API_BASE}/api/exclusions?${params.toString()}`, {
     cache: "no-store",
     credentials: "include",
   });
-  if (!res.ok) throw new Error(`Failed to list blacklist: ${res.status}`);
+  if (!res.ok) throw new Error(`Failed to list exclusions: ${res.status}`);
   return res.json();
 }
 
-export async function createBlacklistEntry(entry: BlacklistCreate): Promise<BlacklistResult> {
-  const res = await apiFetch(`${API_BASE}/api/blacklist`, {
+export async function createExclusion(entry: ExclusionCreate): Promise<ExclusionResult> {
+  const res = await apiFetch(`${API_BASE}/api/exclusions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(entry),
@@ -1763,77 +1774,91 @@ export async function createBlacklistEntry(entry: BlacklistCreate): Promise<Blac
   });
   if (!res.ok) {
     const errorText = await res.text();
-    throw new Error(errorText || `Failed to create blacklist entry: ${res.status}`);
+    throw new Error(errorText || `Failed to create exclusion: ${res.status}`);
   }
   return res.json();
 }
 
-export async function getBlacklistEntry(id: string): Promise<BlacklistEntry> {
-  const res = await apiFetch(`${API_BASE}/api/blacklist/${id}`, {
+export async function getExclusion(id: string): Promise<ExclusionEntry> {
+  const res = await apiFetch(`${API_BASE}/api/exclusions/${id}`, {
     cache: "no-store",
     credentials: "include",
   });
-  if (!res.ok) throw new Error(`Failed to get blacklist entry: ${res.status}`);
+  if (!res.ok) throw new Error(`Failed to get exclusion: ${res.status}`);
   return res.json();
 }
 
-export async function updateBlacklistEntry(id: string, reason: string): Promise<BlacklistEntry> {
-  const res = await apiFetch(`${API_BASE}/api/blacklist/${id}`, {
+/**
+ * Patch one exclusion. Returns the same shape as a create, because promoting an
+ * exclusion to a blacklist does the same things: it deletes assets and stops
+ * the scans running against them.
+ */
+export async function updateExclusion(
+  id: string,
+  patch: { reason?: string; blacklisted?: boolean }
+): Promise<ExclusionResult> {
+  const res = await apiFetch(`${API_BASE}/api/exclusions/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ reason }),
+    body: JSON.stringify(patch),
     credentials: "include",
   });
-  if (!res.ok) throw new Error(`Failed to update blacklist entry: ${res.status}`);
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `Failed to update exclusion: ${res.status}`);
+  }
   return res.json();
 }
 
-export async function deleteBlacklistEntry(id: string): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/api/blacklist/${id}`, {
+export async function deleteExclusion(id: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/api/exclusions/${id}`, {
     method: "DELETE",
     credentials: "include",
   });
-  if (!res.ok) throw new Error(`Failed to delete blacklist entry: ${res.status}`);
+  if (!res.ok) throw new Error(`Failed to delete exclusion: ${res.status}`);
 }
 
-export async function checkBlacklist(
-  objectType: BlacklistObjectType,
+export async function checkExclusion(
+  objectType: ExclusionObjectType,
   objectValue: string
-): Promise<BlacklistCheckResult> {
-  const res = await apiFetch(`${API_BASE}/api/blacklist/check`, {
+): Promise<ExclusionCheckResult> {
+  const res = await apiFetch(`${API_BASE}/api/exclusions/check`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ object_type: objectType, object_value: objectValue }),
     credentials: "include",
   });
-  if (!res.ok) throw new Error(`Failed to check blacklist: ${res.status}`);
+  if (!res.ok) throw new Error(`Failed to check exclusion: ${res.status}`);
   return res.json();
 }
 
-export async function blacklistFromAsset(
+export async function excludeAsset(
   assetId: string,
-  reason?: string,
-  deleteDescendants = true
-): Promise<BlacklistResult> {
-  const res = await apiFetch(`${API_BASE}/api/blacklist/from-asset/${assetId}`, {
+  options: { reason?: string; deleteDescendants?: boolean; blacklisted?: boolean } = {}
+): Promise<ExclusionResult> {
+  const res = await apiFetch(`${API_BASE}/api/exclusions/from-asset/${assetId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ reason, delete_descendants: deleteDescendants }),
+    body: JSON.stringify({
+      reason: options.reason,
+      delete_descendants: options.deleteDescendants ?? true,
+      blacklisted: options.blacklisted ?? false,
+    }),
     credentials: "include",
   });
   if (!res.ok) {
     const errorText = await res.text();
-    throw new Error(errorText || `Failed to blacklist asset: ${res.status}`);
+    throw new Error(errorText || `Failed to exclude asset: ${res.status}`);
   }
   return res.json();
 }
 
-export async function getBlacklistStats(): Promise<BlacklistStats> {
-  const res = await apiFetch(`${API_BASE}/api/blacklist/stats`, {
+export async function getExclusionStats(): Promise<ExclusionStats> {
+  const res = await apiFetch(`${API_BASE}/api/exclusions/stats`, {
     cache: "no-store",
     credentials: "include",
   });
-  if (!res.ok) throw new Error(`Failed to get blacklist stats: ${res.status}`);
+  if (!res.ok) throw new Error(`Failed to get exclusion stats: ${res.status}`);
   return res.json();
 }
 

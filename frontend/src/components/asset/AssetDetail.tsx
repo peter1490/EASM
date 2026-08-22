@@ -17,11 +17,11 @@ import {
   untagAsset,
   updateAssetComment,
   updateAssetImportance,
-  checkBlacklist,
+  checkExclusion,
   type Asset,
   type AssetEvolutionResponse,
   type AssetTagDetail,
-  type BlacklistCheckResult,
+  type ExclusionCheckResult,
   type ScanListItem,
   type SecurityFinding,
   type SecurityScanType,
@@ -66,7 +66,7 @@ import {
 } from "@/lib/severity";
 import { AssetActivity } from "./AssetActivity";
 import { AssetDiscoveryGraph } from "./AssetDiscoveryGraph";
-import { BlacklistPanel } from "./BlacklistPanel";
+import { ExclusionPanel } from "./ExclusionPanel";
 import { CommentEditor } from "./CommentEditor";
 import { ImportancePicker } from "./ImportancePicker";
 import { RawMetadata } from "./RawMetadata";
@@ -77,7 +77,7 @@ import {
   Notice,
   Section,
   confidenceColor,
-  toBlacklistObjectType,
+  toExclusionObjectType,
   useCanWrite,
 } from "./shared";
 
@@ -243,8 +243,8 @@ export interface AssetDetailProps {
   initialAsset?: Asset | null;
   /** Fires whenever the asset changes, so a list can patch its row optimistically. */
   onAssetChange?: (asset: Asset) => void;
-  /** Fires after a successful blacklist, so a list can drop deleted descendants. */
-  onBlacklisted?: () => void;
+  /** Fires after a successful exclusion, so a list can drop deleted assets. */
+  onExcluded?: () => void;
   /** Extra buttons for the action bar — the drawer passes "Open full page". */
   extraActions?: ReactNode;
 }
@@ -254,7 +254,7 @@ export function AssetDetail({
   variant = "page",
   initialAsset = null,
   onAssetChange,
-  onBlacklisted,
+  onExcluded,
   extraActions,
 }: AssetDetailProps) {
   const router = useRouter();
@@ -266,7 +266,7 @@ export function AssetDetail({
   const [evolution, setEvolution] = useState<AssetEvolutionResponse | null>(null);
   const [tags, setTags] = useState<AssetTagDetail[]>([]);
   const [allTags, setAllTags] = useState<TagWithCount[]>([]);
-  const [blacklist, setBlacklist] = useState<BlacklistCheckResult | null>(null);
+  const [exclusionStatus, setExclusionStatus] = useState<ExclusionCheckResult | null>(null);
 
   const [loading, setLoading] = useState(!initialAsset);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -303,9 +303,9 @@ export function AssetDetail({
           listTags(100, 0).catch(() => ({ tags: [] as TagWithCount[], total_count: 0, limit: 0, offset: 0 })),
         ]);
 
-        const objectType = toBlacklistObjectType(assetData.asset_type);
-        const blacklistState = objectType
-          ? await checkBlacklist(objectType, assetData.value).catch(() => null)
+        const objectType = toExclusionObjectType(assetData.asset_type);
+        const exclusionState = objectType
+          ? await checkExclusion(objectType, assetData.value).catch(() => null)
           : null;
 
         applyAsset(assetData);
@@ -314,7 +314,7 @@ export function AssetDetail({
         setEvolution(evolutionData);
         setTags(assetTags);
         setAllTags(tagCatalogue.tags);
-        setBlacklist(blacklistState);
+        setExclusionStatus(exclusionState);
         setLoadError(null);
       } catch (err) {
         setLoadError((err as Error).message);
@@ -646,11 +646,11 @@ export function AssetDetail({
   );
 
   const exclusion = (
-    <BlacklistPanel
+    <ExclusionPanel
       asset={asset}
-      status={blacklist}
-      onBlacklisted={() => {
-        onBlacklisted?.();
+      status={exclusionStatus}
+      onExcluded={() => {
+        onExcluded?.();
         void load();
       }}
     />

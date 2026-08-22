@@ -8,8 +8,8 @@ use crate::{
     error::ApiError,
     models::{
         AssetRelationship, AssetRelationshipCreate, AssetSource, AssetSourceCreate,
-        BlacklistObjectType, DiscoveryQueueItem, DiscoveryQueueItemCreate, DiscoveryRun,
-        DiscoveryRunCreate,
+        DiscoveryQueueItem, DiscoveryQueueItemCreate, DiscoveryRun, DiscoveryRunCreate,
+        ExclusionObjectType,
     },
 };
 
@@ -348,18 +348,19 @@ pub trait DiscoveryQueueRepository: Send + Sync {
     async fn skip_item(&self, id: &Uuid) -> Result<(), ApiError>;
     async fn get_pending_count(&self, run_id: &Uuid) -> Result<i64, ApiError>;
     async fn clear_run(&self, run_id: &Uuid) -> Result<(), ApiError>;
-    /// Skip every queued item a blacklist entry now covers, across all of a
+    /// Skip every queued item an exclusion entry now covers, across all of a
     /// company's unfinished runs. Returns the number of items skipped.
     ///
-    /// Discovery checks the blacklist as it dequeues, so a blacklist added
+    /// Discovery checks the exclusion list as it dequeues, so an entry added
     /// mid-run is honoured eventually -- but only when the item's turn comes,
     /// which on a deep run can be minutes of visible "queue pending" against
     /// something the operator has already excluded. Skipping them up front
-    /// makes the queue agree with the blacklist immediately.
-    async fn purge_blacklisted(
+    /// makes the queue agree with the list immediately. Queued items are the
+    /// run's plans to find *more*, which either strength of entry cancels.
+    async fn purge_excluded(
         &self,
         company_id: Uuid,
-        object_type: &BlacklistObjectType,
+        object_type: &ExclusionObjectType,
         object_value: &str,
     ) -> Result<i64, ApiError>;
 }
@@ -521,10 +522,10 @@ impl DiscoveryQueueRepository for SqlxDiscoveryQueueRepository {
         Ok(())
     }
 
-    async fn purge_blacklisted(
+    async fn purge_excluded(
         &self,
         company_id: Uuid,
-        object_type: &BlacklistObjectType,
+        object_type: &ExclusionObjectType,
         object_value: &str,
     ) -> Result<i64, ApiError> {
         let value = object_value.trim().to_lowercase();
@@ -532,7 +533,7 @@ impl DiscoveryQueueRepository for SqlxDiscoveryQueueRepository {
             return Ok(0);
         }
 
-        // Which queued items a blacklist entry covers depends on its type, so
+        // Which queued items an exclusion entry covers depends on its type, so
         // each gets its own predicate rather than one clause that tries to be
         // all of them. `$3` is the entry value in every branch.
         //
@@ -542,7 +543,7 @@ impl DiscoveryQueueRepository for SqlxDiscoveryQueueRepository {
             WITH skipped AS (
                 UPDATE discovery_queue q
                 SET status = 'skipped',
-                    error_message = 'Skipped: blacklisted during run',
+                    error_message = 'Skipped: excluded during run',
                     processed_at = NOW()
                 FROM discovery_runs r
                 WHERE q.discovery_run_id = r.id
@@ -560,11 +561,11 @@ impl DiscoveryQueueRepository for SqlxDiscoveryQueueRepository {
         // covers just that address; a CIDR covers every address inside it, plus
         // an identical CIDR item. The rest match on their own value.
         let predicate = match object_type {
-            BlacklistObjectType::Domain => {
+            ExclusionObjectType::Domain => {
                 "(q.item_type = 'domain' AND (LOWER(q.item_value) = $2 OR LOWER(q.item_value) LIKE '%.' || $2))"
             }
-            BlacklistObjectType::Ip => "(q.item_type = 'ip' AND LOWER(q.item_value) = $2)",
-            BlacklistObjectType::Cidr => {
+            ExclusionObjectType::Ip => "(q.item_type = 'ip' AND LOWER(q.item_value) = $2)",
+            ExclusionObjectType::Cidr => {
                 // `item_value ~ '...'` guards the cast: a malformed IP would
                 // otherwise abort the whole statement.
                 "((q.item_type = 'cidr' AND LOWER(q.item_value) = $2)
@@ -572,12 +573,12 @@ impl DiscoveryQueueRepository for SqlxDiscoveryQueueRepository {
                        AND q.item_value ~ '^[0-9a-fA-F:.]+$'
                        AND q.item_value::inet <<= $2::inet))"
             }
-            BlacklistObjectType::Organization => {
+            ExclusionObjectType::Organization => {
                 "(q.item_type = 'organization' AND LOWER(q.item_value) = $2)"
             }
-            BlacklistObjectType::Asn => "(q.item_type = 'asn' AND LOWER(q.item_value) = $2)",
+            ExclusionObjectType::Asn => "(q.item_type = 'asn' AND LOWER(q.item_value) = $2)",
             // Certificates are never queued as discovery items.
-            BlacklistObjectType::Certificate => return Ok(0),
+            ExclusionObjectType::Certificate => return Ok(0),
         };
 
         let sql = format!("{PREFIX}{predicate}{SUFFIX}");

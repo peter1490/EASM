@@ -1023,23 +1023,50 @@ idempotent, so whichever gets there second is a no-op.
 Runs left `pending` or `running` by a process that died are reconciled at
 start-up, along with their queue items and their scans.
 
-### Blacklist enforcement
+### Exclusion enforcement
 
-The blacklist is applied at three points, because a run in progress cannot be
-trusted to notice a change on its own:
+Two strengths, one table. An **exclusion** stops discovery *growing* the estate
+at that object: nothing new is written for it or anything under it, but what was
+already found stays, keeps its findings, keeps counting towards the risk score,
+and is still auto-scanned by later runs. A **blacklist** — the `blacklisted`
+column, off unless asked for — is the hard one: the assets it names are deleted
+along with everything discovered through them, and never written again, so the
+object reaches no score, no scan and no list.
+
+The distinction is what each does to an asset that already exists. Neither lets
+discovery find *more*.
+
+The list is applied at three points, because a run in progress cannot be trusted
+to notice a change on its own:
 
 1. **On the way in.** Every asset discovery writes goes through one gate in
    `create_or_update_asset_with_sources`, so no discovery path — resolution,
    certificate SANs, reverse DNS, CIDR expansion, the Shodan pivots — can write
-   an excluded asset. The list is read once per company and cached for ten
-   seconds; adding or removing an entry drops the cache immediately.
-2. **On queueing.** Blacklisted seeds are never queued, and queue items are
-   re-checked at dequeue.
+   an excluded asset. An ordinary exclusion hands the asset already in the
+   inventory to the auto-scan threshold on its way past; a blacklisted one is
+   left alone, because it should not exist. The list is read once per company
+   and cached for ten seconds; adding, changing or removing an entry drops the
+   cache immediately.
+2. **On queueing.** Blacklisted seeds are never queued — the run has already
+   decided not to do that work, and queueing them would report pending work
+   against a progress bar that never moves. An excluded seed *is* queued: the
+   run will not expand on it, but it will auto-scan the asset the seed names.
+   Queue items are re-checked at dequeue.
 3. **On change.** Adding an entry during a run skips the queued items it now
-   covers and cancels any scan in flight against a target it excludes — a
-   domain entry reaches its subdomains, a CIDR entry reaches the addresses
-   inside it. `POST /api/blacklist` and `POST /api/blacklist/from-asset/:id`
-   report both counts as `queue_items_removed` and `scans_cancelled`.
+   covers — a domain entry reaches its subdomains, a CIDR entry reaches the
+   addresses inside it. Scans in flight are cancelled only for a blacklist: an
+   ordinary exclusion means "stop finding more of this", not "stop scanning
+   what I have", and killing a scan halfway through an asset the operator is
+   keeping would be the opposite of what they asked for.
+   `POST /api/exclusions` and `POST /api/exclusions/from-asset/:id` report the
+   counts as `assets_deleted`, `descendants_deleted`, `queue_items_removed` and
+   `scans_cancelled`.
+
+Blacklisting deletes the asset the entry *names* plus everything discovered
+through it. A sibling that merely matches the rule — another subdomain reached
+by some other path, never a descendant — is left where it is; the rule keeps
+discovery from writing it again, so it goes when it is next matched rather than
+being deleted out from under an operator who pointed at one asset.
 
 ### Logging Levels
 

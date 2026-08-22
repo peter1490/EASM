@@ -174,7 +174,7 @@ impl CompanyRepository for SqlxCompanyRepository {
             "assets",
             "seeds",
             "tags",
-            "blacklist",
+            "exclusions",
         ];
 
         let mut tx = self.pool.begin().await?;

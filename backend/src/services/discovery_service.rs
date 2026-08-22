@@ -26,14 +26,14 @@ use crate::{
     config::{Settings, SharedSettings},
     error::ApiError,
     models::{
-        Asset, AssetCreate, AssetRelationshipCreate, AssetSourceCreate, AssetType,
-        BlacklistObjectType, DiscoveryConfig, DiscoveryQueueItemCreate, DiscoveryResult,
-        DiscoveryRun, DiscoveryRunCreate, QueueItemType, RelationshipType, ScanTriggerType,
+        Asset, AssetCreate, AssetRelationshipCreate, AssetSourceCreate, AssetType, DiscoveryConfig,
+        DiscoveryQueueItemCreate, DiscoveryResult, DiscoveryRun, DiscoveryRunCreate,
+        ExclusionEntry, ExclusionObjectType, QueueItemType, RelationshipType, ScanTriggerType,
         SecurityScanCreate, SecurityScanType, Seed, SeedCreate, SeedType, SourceType, TriggerType,
     },
     repositories::{
-        AssetRelationshipRepository, AssetRepository, AssetSourceRepository, BlacklistRepository,
-        DiscoveryQueueRepository, DiscoveryRunRepository, SeedRepository,
+        AssetRelationshipRepository, AssetRepository, AssetSourceRepository,
+        DiscoveryQueueRepository, DiscoveryRunRepository, ExclusionRepository, SeedRepository,
     },
     services::{
         confidence::ConfidenceScorer,
@@ -160,80 +160,85 @@ static DISCOVERY_SOURCE_PRIORITY: &[SourceType] = &[
     SourceType::TxtVerification,
 ];
 
-/// How long a company's blacklist is reused before it is read again.
+/// How long a company's exclusion list is reused before it is read again.
 ///
-/// Every asset discovery is about to write is checked against the blacklist, so
+/// Every asset discovery is about to write is checked against the list, so
 /// a query per check would be thousands of round-trips per run. Ten seconds is
-/// short enough that an operator blacklisting something mid-run sees it take
+/// short enough that an operator excluding something mid-run sees it take
 /// effect immediately in practice -- and the write paths invalidate the entry
 /// outright, so the window only ever covers changes made outside this process.
-const BLACKLIST_CACHE_TTL: Duration = Duration::from_secs(10);
+const EXCLUSION_CACHE_TTL: Duration = Duration::from_secs(10);
 
-/// One company's blacklist, resolved once and matched in memory.
+/// What the exclusion list has to say about one object.
 ///
-/// The matching mirrors `BlacklistRepository`: a domain entry covers the name
+/// The two strengths are not interchangeable and the call sites treat them
+/// differently, so the check returns which one applies rather than a bool that
+/// each caller would have to qualify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExclusionLevel {
+    /// Nothing covers it.
+    None,
+    /// An ordinary exclusion: discovery writes nothing new here, but whatever
+    /// was already found stays, and is still auto-scanned.
+    Excluded,
+    /// A blacklist: the object must not exist at all.
+    Blacklisted,
+}
+
+impl ExclusionLevel {
+    fn is_excluded(self) -> bool {
+        !matches!(self, ExclusionLevel::None)
+    }
+
+    fn is_blacklisted(self) -> bool {
+        matches!(self, ExclusionLevel::Blacklisted)
+    }
+}
+
+/// The values one strength of exclusion covers, indexed for in-memory matching.
+///
+/// The matching mirrors `ExclusionRepository`: a domain entry covers the name
 /// and anything under it, an IP entry covers that address, a CIDR entry covers
 /// every address inside it, and the rest match their own value exactly.
-#[derive(Debug)]
-struct BlacklistSnapshot {
+#[derive(Debug, Default)]
+struct ExclusionSets {
     domains: HashSet<String>,
     ips: HashSet<String>,
     cidrs: Vec<IpNet>,
     organizations: HashSet<String>,
     asns: HashSet<String>,
     certificates: HashSet<String>,
-    loaded_at: Instant,
 }
 
-impl BlacklistSnapshot {
-    fn from_entries(entries: Vec<crate::models::BlacklistEntry>) -> Self {
-        let mut snapshot = Self {
-            domains: HashSet::new(),
-            ips: HashSet::new(),
-            cidrs: Vec::new(),
-            organizations: HashSet::new(),
-            asns: HashSet::new(),
-            certificates: HashSet::new(),
-            loaded_at: Instant::now(),
-        };
-
-        for entry in entries {
-            let value = entry.object_value.trim().to_lowercase();
-            if value.is_empty() {
-                continue;
+impl ExclusionSets {
+    fn insert(&mut self, object_type: ExclusionObjectType, value: String) {
+        match object_type {
+            ExclusionObjectType::Domain => {
+                self.domains.insert(value);
             }
-            match BlacklistObjectType::from(entry.object_type.as_str()) {
-                BlacklistObjectType::Domain => {
-                    snapshot.domains.insert(value);
-                }
-                BlacklistObjectType::Ip => {
-                    snapshot.ips.insert(value);
-                }
-                BlacklistObjectType::Cidr => {
-                    // A CIDR that will not parse can never match an address, so
-                    // it is dropped rather than carried as dead weight.
-                    match value.parse::<IpNet>() {
-                        Ok(net) => snapshot.cidrs.push(net),
-                        Err(e) => tracing::warn!(
-                            "Ignoring unparseable blacklisted CIDR '{}': {}",
-                            value,
-                            e
-                        ),
+            ExclusionObjectType::Ip => {
+                self.ips.insert(value);
+            }
+            ExclusionObjectType::Cidr => {
+                // A CIDR that will not parse can never match an address, so
+                // it is dropped rather than carried as dead weight.
+                match value.parse::<IpNet>() {
+                    Ok(net) => self.cidrs.push(net),
+                    Err(e) => {
+                        tracing::warn!("Ignoring unparseable excluded CIDR '{}': {}", value, e)
                     }
                 }
-                BlacklistObjectType::Organization => {
-                    snapshot.organizations.insert(value);
-                }
-                BlacklistObjectType::Asn => {
-                    snapshot.asns.insert(Self::normalize_asn(&value));
-                }
-                BlacklistObjectType::Certificate => {
-                    snapshot.certificates.insert(value);
-                }
+            }
+            ExclusionObjectType::Organization => {
+                self.organizations.insert(value);
+            }
+            ExclusionObjectType::Asn => {
+                self.asns.insert(Self::normalize_asn(&value));
+            }
+            ExclusionObjectType::Certificate => {
+                self.certificates.insert(value);
             }
         }
-
-        snapshot
     }
 
     /// `AS64496`, `as64496` and `64496` are the same autonomous system.
@@ -246,10 +251,6 @@ impl BlacklistSnapshot {
             .to_lowercase()
     }
 
-    fn is_expired(&self) -> bool {
-        self.loaded_at.elapsed() >= BLACKLIST_CACHE_TTL
-    }
-
     fn is_empty(&self) -> bool {
         self.domains.is_empty()
             && self.ips.is_empty()
@@ -257,6 +258,18 @@ impl BlacklistSnapshot {
             && self.organizations.is_empty()
             && self.asns.is_empty()
             && self.certificates.is_empty()
+    }
+
+    fn covers(&self, item_type: &str, item_value: &str) -> bool {
+        match item_type {
+            "domain" => self.covers_domain(item_value),
+            "ip" => self.covers_ip(item_value),
+            "organization" => self.covers_organization(item_value),
+            "asn" => self.covers_asn(item_value),
+            "cidr" => self.covers_cidr(item_value),
+            "certificate" => self.covers_certificate(item_value),
+            _ => false,
+        }
     }
 
     fn covers_domain(&self, domain: &str) -> bool {
@@ -322,6 +335,63 @@ impl BlacklistSnapshot {
     }
 }
 
+/// One company's exclusion list, resolved once and matched in memory.
+///
+/// Held as two sets rather than one set of entries: the blacklisted rows are a
+/// subset of the excluded ones, and every check asks both questions in that
+/// order, so keeping them separate makes the strong answer a second lookup
+/// rather than a scan.
+#[derive(Debug)]
+struct ExclusionSnapshot {
+    all: ExclusionSets,
+    blacklisted: ExclusionSets,
+    loaded_at: Instant,
+}
+
+impl ExclusionSnapshot {
+    fn from_entries(entries: Vec<ExclusionEntry>) -> Self {
+        let mut snapshot = Self {
+            all: ExclusionSets::default(),
+            blacklisted: ExclusionSets::default(),
+            loaded_at: Instant::now(),
+        };
+
+        for entry in entries {
+            let value = entry.object_value.trim().to_lowercase();
+            if value.is_empty() {
+                continue;
+            }
+            let object_type = ExclusionObjectType::from(entry.object_type.as_str());
+            if entry.blacklisted {
+                snapshot
+                    .blacklisted
+                    .insert(object_type.clone(), value.clone());
+            }
+            snapshot.all.insert(object_type, value);
+        }
+
+        snapshot
+    }
+
+    fn is_expired(&self) -> bool {
+        self.loaded_at.elapsed() >= EXCLUSION_CACHE_TTL
+    }
+
+    fn is_empty(&self) -> bool {
+        self.all.is_empty()
+    }
+
+    fn level(&self, item_type: &str, item_value: &str) -> ExclusionLevel {
+        if self.blacklisted.covers(item_type, item_value) {
+            ExclusionLevel::Blacklisted
+        } else if self.all.covers(item_type, item_value) {
+            ExclusionLevel::Excluded
+        } else {
+            ExclusionLevel::None
+        }
+    }
+}
+
 /// Discovery run status tracking (in-memory for real-time updates)
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryStatus {
@@ -353,7 +423,7 @@ pub struct DiscoveryService {
     discovery_queue_repo: Arc<dyn DiscoveryQueueRepository + Send + Sync>,
     asset_source_repo: Arc<dyn AssetSourceRepository + Send + Sync>,
     asset_relationship_repo: Arc<dyn AssetRelationshipRepository + Send + Sync>,
-    blacklist_repo: Arc<dyn BlacklistRepository + Send + Sync>,
+    exclusion_repo: Arc<dyn ExclusionRepository + Send + Sync>,
 
     // Services
     security_scan_service: Option<Arc<SecurityScanService>>,
@@ -380,9 +450,9 @@ pub struct DiscoveryService {
     /// Every resolved address in a zone tends to sit in the same handful of
     /// prefixes; without this the same /24 would be swept once per hostname.
     swept_prefixes: Arc<Mutex<HashSet<(Uuid, String)>>>,
-    /// Per-company blacklist, refreshed on a short TTL and dropped outright
+    /// Per-company exclusion list, refreshed on a short TTL and dropped outright
     /// whenever an entry is added or removed.
-    blacklist_cache: Arc<Mutex<HashMap<Uuid, Arc<BlacklistSnapshot>>>>,
+    exclusion_cache: Arc<Mutex<HashMap<Uuid, Arc<ExclusionSnapshot>>>>,
 }
 
 impl DiscoveryService {
@@ -393,7 +463,7 @@ impl DiscoveryService {
         discovery_queue_repo: Arc<dyn DiscoveryQueueRepository + Send + Sync>,
         asset_source_repo: Arc<dyn AssetSourceRepository + Send + Sync>,
         asset_relationship_repo: Arc<dyn AssetRelationshipRepository + Send + Sync>,
-        blacklist_repo: Arc<dyn BlacklistRepository + Send + Sync>,
+        exclusion_repo: Arc<dyn ExclusionRepository + Send + Sync>,
         external_services: Arc<ExternalServicesManager>,
         dns_resolver: Arc<DnsResolver>,
         http_analyzer: Arc<HttpAnalyzer>,
@@ -408,7 +478,7 @@ impl DiscoveryService {
             discovery_queue_repo,
             asset_source_repo,
             asset_relationship_repo,
-            blacklist_repo,
+            exclusion_repo,
             security_scan_service: None,
             risk_service,
             external_services,
@@ -430,7 +500,7 @@ impl DiscoveryService {
             status: Arc::new(Mutex::new(HashMap::new())),
             ip_cloud_provider_cache: Arc::new(Mutex::new(HashMap::new())),
             swept_prefixes: Arc::new(Mutex::new(HashSet::new())),
-            blacklist_cache: Arc::new(Mutex::new(HashMap::new())),
+            exclusion_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -782,7 +852,7 @@ impl DiscoveryService {
             );
 
             // Nothing will dequeue this run again, so its pending rows are
-            // dead weight; clearing them also means a blacklist added later
+            // dead weight; clearing them also means an exclusion added later
             // has no stale queue to disagree with.
             if let Err(e) = self.discovery_queue_repo.clear_run(&id).await {
                 tracing::warn!("Failed to clear queue for discovery run {}: {}", id, e);
@@ -833,28 +903,34 @@ impl DiscoveryService {
         swept.retain(|(swept_run, _)| swept_run != run_id);
     }
 
-    /// Make a new blacklist entry take effect on work already in flight.
+    /// Make a new exclusion entry take effect on work already in flight.
     ///
-    /// Discovery checks the blacklist on the way in, so an entry added between
-    /// runs needs nothing. An entry added *during* one does: the run has a queue
-    /// full of items it decided to visit before the entry existed, and scans
-    /// already probing hosts the entry now excludes. Neither notices on its own
-    /// -- the queue item would only be dropped when its turn finally came, and
-    /// the scan not at all.
+    /// Discovery checks the list on the way in, so an entry added between runs
+    /// needs nothing. An entry added *during* one does: the run has a queue full
+    /// of items it decided to visit before the entry existed, and — if the entry
+    /// blacklists them — scans already probing hosts that are about to be
+    /// deleted. Neither notices on its own; the queue item would only be dropped
+    /// when its turn finally came, and the scan not at all.
+    ///
+    /// Scans are only cancelled for a blacklist. An ordinary exclusion is the
+    /// operator saying "stop finding more of this", not "stop scanning what I
+    /// have", and killing a scan already halfway through the asset they are
+    /// keeping would be the opposite of what they asked for.
     ///
     /// Returns `(queue items skipped, scans cancelled)`.
-    pub async fn apply_blacklist_entry(
+    pub async fn apply_exclusion_entry(
         &self,
         company_id: Uuid,
-        object_type: &BlacklistObjectType,
+        object_type: &ExclusionObjectType,
         object_value: &str,
+        blacklisted: bool,
     ) -> Result<(i64, usize), ApiError> {
         // First, so nothing below reads a stale snapshot.
-        self.invalidate_blacklist_cache(company_id).await;
+        self.invalidate_exclusion_cache(company_id).await;
 
         let queue_items_skipped = self
             .discovery_queue_repo
-            .purge_blacklisted(company_id, object_type, object_value)
+            .purge_excluded(company_id, object_type, object_value)
             .await?;
 
         // The queue shrank, so the reported depth has to shrink with it --
@@ -877,29 +953,33 @@ impl DiscoveryService {
             }
         }
 
-        let scans_cancelled = self
-            .cancel_scans_for_blacklisted(company_id, object_type, object_value)
-            .await?;
+        let scans_cancelled = if blacklisted {
+            self.cancel_scans_for_blacklisted(company_id, object_type, object_value)
+                .await?
+        } else {
+            0
+        };
 
         if queue_items_skipped > 0 || scans_cancelled > 0 {
             tracing::info!(
                 company_id = %company_id,
                 object_type = %object_type,
                 object_value = %object_value,
+                blacklisted,
                 queue_items_skipped,
                 scans_cancelled,
-                "Applied blacklist entry to in-flight discovery"
+                "Applied exclusion entry to in-flight discovery"
             );
         }
 
         Ok((queue_items_skipped, scans_cancelled))
     }
 
-    /// Stop any scan still running against an asset the entry now excludes.
+    /// Stop any scan still running against an asset the entry blacklists.
     async fn cancel_scans_for_blacklisted(
         &self,
         company_id: Uuid,
-        object_type: &BlacklistObjectType,
+        object_type: &ExclusionObjectType,
         object_value: &str,
     ) -> Result<usize, ApiError> {
         let Some(scan_service) = &self.security_scan_service else {
@@ -911,7 +991,7 @@ impl DiscoveryService {
         // it -- each of which can have a scan of its own in flight.
         let asset_ids = self
             .asset_repo
-            .find_blacklisted_ids(company_id, object_type, object_value)
+            .find_excluded_ids(company_id, object_type, object_value)
             .await?;
 
         scan_service
@@ -1162,9 +1242,14 @@ impl DiscoveryService {
             // dequeue anyway, but queueing it first reports pending work the
             // run has already decided not to do, and counts against the seed
             // total the UI shows progress against.
+            //
+            // A merely excluded one is queued: the run will not expand on it,
+            // but it will auto-scan the asset the seed names, and that is work
+            // the progress bar should account for.
             if self
-                .is_item_blacklisted(company_id, &item_type.to_string(), &item_value)
+                .exclusion_level(company_id, &item_type.to_string(), &item_value)
                 .await?
+                .is_blacklisted()
             {
                 blacklisted_seeds += 1;
                 tracing::info!(
@@ -1452,17 +1537,34 @@ impl DiscoveryService {
             max_depth
         );
 
-        // Check if the item is blacklisted before processing
-        if self
-            .is_item_blacklisted(company_id, item_type, item_value)
+        // An excluded item is not expanded on. What that means depends on the
+        // strength of the entry: a blacklisted one must not be touched at all,
+        // while an ordinary exclusion still leaves an asset the operator owns
+        // and expects to see scan results for, so the run scans what is already
+        // there and stops short of looking for more of it.
+        match self
+            .exclusion_level(company_id, item_type, item_value)
             .await?
         {
-            tracing::info!(
-                "Skipping blacklisted {} '{}' during discovery",
-                item_type,
-                item_value
-            );
-            return Ok(DiscoveryResult::default());
+            ExclusionLevel::None => {}
+            ExclusionLevel::Blacklisted => {
+                tracing::info!(
+                    "Skipping blacklisted {} '{}' during discovery",
+                    item_type,
+                    item_value
+                );
+                return Ok(DiscoveryResult::default());
+            }
+            ExclusionLevel::Excluded => {
+                tracing::info!(
+                    "Not expanding excluded {} '{}'; auto-scanning it if it is already known",
+                    item_type,
+                    item_value
+                );
+                self.auto_scan_known_asset(run_id, company_id, item_type, item_value)
+                    .await;
+                return Ok(DiscoveryResult::default());
+            }
         }
 
         match item_type {
@@ -1533,13 +1635,13 @@ impl DiscoveryService {
         }
     }
 
-    /// The company's blacklist, from cache when it is still fresh.
-    async fn blacklist_snapshot(
+    /// The company's exclusion list, from cache when it is still fresh.
+    async fn exclusion_snapshot(
         &self,
         company_id: Uuid,
-    ) -> Result<Arc<BlacklistSnapshot>, ApiError> {
+    ) -> Result<Arc<ExclusionSnapshot>, ApiError> {
         {
-            let cache = self.blacklist_cache.lock().await;
+            let cache = self.exclusion_cache.lock().await;
             if let Some(snapshot) = cache.get(&company_id) {
                 if !snapshot.is_expired() {
                     return Ok(Arc::clone(snapshot));
@@ -1551,73 +1653,181 @@ impl DiscoveryService {
         // every concurrent discovery on one database round-trip. Two callers
         // refreshing at once both get a correct snapshot and the later write
         // wins, which is the same result as one refreshing.
-        let entries = self.blacklist_repo.list_all(company_id).await?;
-        let snapshot = Arc::new(BlacklistSnapshot::from_entries(entries));
+        let entries = self.exclusion_repo.list_all(company_id).await?;
+        let snapshot = Arc::new(ExclusionSnapshot::from_entries(entries));
 
-        let mut cache = self.blacklist_cache.lock().await;
+        let mut cache = self.exclusion_cache.lock().await;
         cache.insert(company_id, Arc::clone(&snapshot));
         Ok(snapshot)
     }
 
-    /// Drop a company's cached blacklist so the next check reads it again.
+    /// Drop a company's cached exclusion list so the next check reads it again.
     ///
-    /// Called whenever the blacklist changes, so an entry added during a run
-    /// takes effect on the next asset discovery considers rather than at the
-    /// end of the cache window.
-    pub async fn invalidate_blacklist_cache(&self, company_id: Uuid) {
-        let mut cache = self.blacklist_cache.lock().await;
+    /// Called whenever the list changes, so an entry added during a run takes
+    /// effect on the next asset discovery considers rather than at the end of
+    /// the cache window.
+    pub async fn invalidate_exclusion_cache(&self, company_id: Uuid) {
+        let mut cache = self.exclusion_cache.lock().await;
         cache.remove(&company_id);
     }
 
-    /// Check if an item is blacklisted based on its type
-    async fn is_item_blacklisted(
+    /// How strongly, if at all, the exclusion list covers an item.
+    async fn exclusion_level(
         &self,
         company_id: Uuid,
         item_type: &str,
         item_value: &str,
-    ) -> Result<bool, ApiError> {
-        let blacklist = self.blacklist_snapshot(company_id).await?;
-        if blacklist.is_empty() {
-            return Ok(false);
+    ) -> Result<ExclusionLevel, ApiError> {
+        let exclusions = self.exclusion_snapshot(company_id).await?;
+        if exclusions.is_empty() {
+            return Ok(ExclusionLevel::None);
         }
 
-        Ok(match item_type {
-            "domain" => blacklist.covers_domain(item_value),
-            "ip" => blacklist.covers_ip(item_value),
-            "organization" => blacklist.covers_organization(item_value),
-            "asn" => blacklist.covers_asn(item_value),
-            "cidr" => blacklist.covers_cidr(item_value),
-            "certificate" => blacklist.covers_certificate(item_value),
-            _ => false,
-        })
+        Ok(exclusions.level(item_type, item_value))
     }
 
-    /// Whether an asset about to be written is excluded by the blacklist.
+    /// How the exclusion list covers an asset about to be written.
     ///
     /// This is the gate every discovery path goes through. The per-technique
     /// checks it backs up covered the queue and the subdomain enumerators, but
     /// not resolution, certificate SANs, reverse DNS, CIDR expansion or the
-    /// Shodan pivots -- so a blacklisted host stayed out of the queue and was
+    /// Shodan pivots -- so an excluded host stayed out of the queue and was
     /// written anyway the moment another path turned it up.
-    async fn is_asset_blacklisted(
+    async fn asset_exclusion_level(
         &self,
         company_id: Uuid,
         asset_type: &AssetType,
         identifier: &str,
-    ) -> Result<bool, ApiError> {
+    ) -> Result<ExclusionLevel, ApiError> {
         let item_type = match asset_type {
             AssetType::Domain => "domain",
             AssetType::Ip => "ip",
             AssetType::Organization => "organization",
             AssetType::Asn => "asn",
             AssetType::Certificate => "certificate",
-            // Ports are not blacklistable in their own right; the host they
+            // Ports are not excludable in their own right; the host they
             // belong to is what gets excluded.
-            AssetType::Port => return Ok(false),
+            AssetType::Port => return Ok(ExclusionLevel::None),
         };
 
-        self.is_item_blacklisted(company_id, item_type, identifier)
+        self.exclusion_level(company_id, item_type, identifier)
             .await
+    }
+
+    /// Auto-scan an asset the run has decided not to expand on.
+    ///
+    /// An excluded object still belongs to the operator — excluding is about
+    /// not growing the estate here, not about looking away from it — so the
+    /// asset already in the inventory goes through the same auto-scan path a
+    /// freshly discovered one would take. Nothing is written and nothing is
+    /// enqueued: if the asset is not already known, there is nothing to scan,
+    /// and finding out would be the discovery the exclusion just declined.
+    async fn auto_scan_known_asset(
+        &self,
+        run_id: Uuid,
+        company_id: Uuid,
+        item_type: &str,
+        item_value: &str,
+    ) {
+        // Cheapest check first. With auto-scan off there is nothing this can
+        // do, and the write gate reaches it once per encounter -- which for a
+        // CDN name every host CNAMEs to is a great many encounters.
+        if self.auto_scan_threshold(company_id).await <= 0.0 {
+            return;
+        }
+
+        let asset_type = match item_type {
+            "domain" => AssetType::Domain,
+            "ip" => AssetType::Ip,
+            "certificate" => AssetType::Certificate,
+            // Organisations, ASNs and CIDRs are not scan targets. The hosts
+            // under them are, and each is checked on its own way in.
+            _ => return,
+        };
+
+        let identifier = if matches!(asset_type, AssetType::Domain) {
+            Self::normalize_discovery_hostname(item_value)
+                .unwrap_or_else(|| item_value.trim().trim_end_matches('.').to_lowercase())
+        } else {
+            item_value.trim().to_string()
+        };
+
+        let known = match self
+            .asset_repo
+            .get_by_identifier(company_id, asset_type.clone(), &identifier)
+            .await
+        {
+            Ok(Some(asset)) => asset,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to look up excluded asset '{}' for auto-scan: {}",
+                    identifier,
+                    e
+                );
+                return;
+            }
+        };
+
+        self.consider_auto_scan(
+            run_id,
+            company_id,
+            known.id,
+            &identifier,
+            &asset_type,
+            known.confidence,
+        )
+        .await;
+    }
+
+    /// The running run's auto-scan threshold, or 0.0 when nothing is running.
+    ///
+    /// It lives on the live status rather than on the run row, so it is read
+    /// here rather than threaded through every caller.
+    async fn auto_scan_threshold(&self, company_id: Uuid) -> f64 {
+        let statuses = self.status.lock().await;
+        statuses
+            .get(&company_id)
+            .map(|status| status.auto_scan_threshold)
+            .unwrap_or(0.0)
+    }
+
+    /// Offer an asset to the auto-scan threshold, and count it if it clears.
+    async fn consider_auto_scan(
+        &self,
+        run_id: Uuid,
+        company_id: Uuid,
+        asset_id: Uuid,
+        identifier: &str,
+        asset_type: &AssetType,
+        confidence: f64,
+    ) {
+        let threshold = self.auto_scan_threshold(company_id).await;
+        if threshold <= 0.0 {
+            return;
+        }
+
+        if let Err(e) = self
+            .maybe_trigger_auto_scan(
+                run_id,
+                company_id,
+                asset_id,
+                identifier,
+                asset_type,
+                confidence,
+                Some(threshold),
+            )
+            .await
+        {
+            tracing::warn!("Failed to trigger auto-scan for {}: {}", identifier, e);
+        } else if confidence >= threshold {
+            // Upper-bound counter; real dedup happens inside maybe_trigger_auto_scan.
+            let mut statuses = self.status.lock().await;
+            let status = statuses
+                .entry(company_id)
+                .or_insert_with(DiscoveryStatus::default);
+            status.scans_queued += 1;
+        }
     }
 
     // ========================================================================
@@ -1677,12 +1887,12 @@ impl DiscoveryService {
             )
             .await?;
 
-        // Blacklisted between the queue check and here, or reached by a path
+        // Excluded between the queue check and here, or reached by a path
         // that never went through the queue: there is no branch to walk.
         let Some(domain_asset) = domain_asset else {
             result
                 .warnings
-                .push(format!("Skipped {} (blacklisted)", canonical_domain));
+                .push(format!("Skipped {} (excluded)", canonical_domain));
             return Ok(result);
         };
 
@@ -1742,12 +1952,13 @@ impl DiscoveryService {
                     }
 
                     // Checked before the name joins `passive_hostnames`: that
-                    // list is what the active stage permutes and resolves, so a
-                    // blacklisted host left in it would still be probed even
+                    // list is what the active stage permutes and resolves, so an
+                    // excluded host left in it would still be probed even
                     // though no asset is written for it.
                     if self
-                        .is_item_blacklisted(company_id, "domain", subdomain)
+                        .exclusion_level(company_id, "domain", subdomain)
                         .await?
+                        .is_excluded()
                     {
                         continue;
                     }
@@ -1938,7 +2149,7 @@ impl DiscoveryService {
             .await
         {
             Ok(cert_result) => {
-                // Labelled so a blacklisted certificate can abandon just this
+                // Labelled so an excluded certificate can abandon just this
                 // step. Everything under it -- the SAN names and the
                 // organisation pivot -- hangs off the certificate asset, but
                 // the steps after it do not.
@@ -1971,7 +2182,7 @@ impl DiscoveryService {
                         )
                         .await?;
 
-                    // A blacklisted certificate takes its SANs with it: they
+                    // An excluded certificate takes its SANs with it: they
                     // are only reachable through the certificate that lists
                     // them, and the block below hangs every one off it.
                     let Some(cert_asset) = cert_asset else {
@@ -2282,7 +2493,7 @@ impl DiscoveryService {
 
     /// Persist a batch of hostnames discovered by one technique.
     ///
-    /// Shared by every non-pivot discovery path so scoping, blacklisting,
+    /// Shared by every non-pivot discovery path so scoping, exclusion,
     /// relationship recording and recursion behave identically no matter which
     /// technique produced the name.
     #[allow(clippy::too_many_arguments)]
@@ -2327,7 +2538,7 @@ impl DiscoveryService {
                 )
                 .await?;
 
-            // Blacklisted: no asset, no relationship, and nothing queued off it.
+            // Excluded: no asset, no relationship, and nothing queued off it.
             let Some(asset) = asset else {
                 continue;
             };
@@ -2619,7 +2830,7 @@ impl DiscoveryService {
             )
             .await?;
 
-        // A blacklisted AS is not attributed, and its prefix is not swept: the
+        // An excluded AS is not attributed, and its prefix is not swept: the
         // sweep exists to enumerate that AS's address space.
         let Some(asn_asset) = asn_asset else {
             return Ok(result);
@@ -2733,7 +2944,7 @@ impl DiscoveryService {
                 )
                 .await?;
 
-            // Blacklisted address: its PTR names are not recorded either, since
+            // Excluded address: its PTR names are not recorded either, since
             // they are only evidence about this address.
             let Some(ip_asset) = ip_asset else {
                 continue;
@@ -3076,7 +3287,7 @@ impl DiscoveryService {
 
     /// Persist a batch of lateral-pivot-discovered hostnames as low-confidence
     /// domain assets linked to the seed via the given relationship. Filters
-    /// blank / malformed / self-matching / blacklisted infrastructure hostnames.
+    /// blank / malformed / self-matching / excluded infrastructure hostnames.
     /// Does NOT enqueue results for recursive discovery.
     #[allow(clippy::too_many_arguments)]
     async fn persist_lateral_pivot_hosts(
@@ -3191,7 +3402,7 @@ impl DiscoveryService {
         let Some(org_asset) = org_asset else {
             result
                 .warnings
-                .push(format!("Skipped organization {} (blacklisted)", org));
+                .push(format!("Skipped organization {} (excluded)", org));
             return Ok(result);
         };
 
@@ -3410,7 +3621,7 @@ impl DiscoveryService {
         let Some(asn_asset) = asn_asset else {
             result
                 .warnings
-                .push(format!("Skipped ASN {} (blacklisted)", asn));
+                .push(format!("Skipped ASN {} (excluded)", asn));
             return Ok(result);
         };
 
@@ -3599,7 +3810,7 @@ impl DiscoveryService {
                 )
                 .await?;
 
-            // A blacklisted address inside an otherwise in-scope range: skip
+            // An excluded address inside an otherwise in-scope range: skip
             // this one, keep expanding the rest.
             let Some(asset) = asset else {
                 continue;
@@ -3639,8 +3850,12 @@ impl DiscoveryService {
     ) -> Result<DiscoveryResult, ApiError> {
         let mut result = DiscoveryResult::default();
 
-        if self.is_item_blacklisted(company_id, "ip", ip).await? {
-            tracing::info!("Skipping blacklisted IP '{}' during discovery", ip);
+        if self
+            .exclusion_level(company_id, "ip", ip)
+            .await?
+            .is_excluded()
+        {
+            tracing::info!("Skipping excluded IP '{}' during discovery", ip);
             return Ok(result);
         }
 
@@ -3662,7 +3877,7 @@ impl DiscoveryService {
         let Some(ip_asset) = ip_asset else {
             result
                 .warnings
-                .push(format!("Skipped IP {} (blacklisted)", ip));
+                .push(format!("Skipped IP {} (excluded)", ip));
             return Ok(result);
         };
 
@@ -3749,7 +3964,7 @@ impl DiscoveryService {
 
     /// Create or update an asset and record its source.
     ///
-    /// `Ok(None)` means the asset is blacklisted and was not written; callers
+    /// `Ok(None)` means the asset is excluded and was not written; callers
     /// skip whatever they were going to hang off it.
     #[allow(clippy::too_many_arguments)]
     async fn create_or_update_asset(
@@ -3791,7 +4006,7 @@ impl DiscoveryService {
         parent_id: Option<Uuid>,
         metadata: Option<serde_json::Value>,
     ) -> Result<Option<(Uuid, bool)>, ApiError> {
-        // Returns Some((asset_id, was_created)), or None if blacklisted.
+        // Returns Some((asset_id, was_created)), or None if excluded.
         let normalized_identifier = if matches!(asset_type, AssetType::Domain) {
             Self::normalize_discovery_hostname(identifier)
                 .ok_or_else(|| ApiError::Validation("Invalid domain format".to_string()))?
@@ -3800,17 +4015,39 @@ impl DiscoveryService {
         };
 
         // The single point every discovery path writes through, so the
-        // blacklist is enforced here rather than trusted to each caller.
-        if self
-            .is_asset_blacklisted(company_id, &asset_type, &normalized_identifier)
+        // exclusion list is enforced here rather than trusted to each caller.
+        // Either strength ends the write -- the difference is what happens to
+        // the asset that is already there. A blacklisted one should not exist,
+        // so it is left alone to be deleted; an excluded one is the operator's
+        // and is offered to auto-scan on the way past.
+        match self
+            .asset_exclusion_level(company_id, &asset_type, &normalized_identifier)
             .await?
         {
-            tracing::debug!(
-                "Skipping blacklisted {} '{}' during discovery",
-                asset_type,
-                normalized_identifier
-            );
-            return Ok(None);
+            ExclusionLevel::None => {}
+            ExclusionLevel::Blacklisted => {
+                tracing::debug!(
+                    "Skipping blacklisted {} '{}' during discovery",
+                    asset_type,
+                    normalized_identifier
+                );
+                return Ok(None);
+            }
+            ExclusionLevel::Excluded => {
+                tracing::debug!(
+                    "Not storing excluded {} '{}' during discovery",
+                    asset_type,
+                    normalized_identifier
+                );
+                self.auto_scan_known_asset(
+                    run_id,
+                    company_id,
+                    &asset_type.to_string(),
+                    &normalized_identifier,
+                )
+                .await;
+                return Ok(None);
+            }
         }
 
         let mut ordered_sources = Self::order_source_types(source_types);
@@ -3864,41 +4101,15 @@ impl DiscoveryService {
         // `confidence` parameter, and we run on every touch — not just on first create — so
         // that subdomains whose confidence rises through re-discovery still get scanned.
         // The 24h dedup inside maybe_trigger_auto_scan prevents repeated scans.
-        let auto_scan_threshold = {
-            let statuses = self.status.lock().await;
-            statuses
-                .get(&company_id)
-                .map(|status| status.auto_scan_threshold)
-                .unwrap_or(0.0)
-        };
-
-        if auto_scan_threshold > 0.0 {
-            if let Err(e) = self
-                .maybe_trigger_auto_scan(
-                    run_id,
-                    company_id,
-                    asset.id,
-                    &normalized_identifier,
-                    &asset_type,
-                    asset.confidence,
-                    Some(auto_scan_threshold),
-                )
-                .await
-            {
-                tracing::warn!(
-                    "Failed to trigger auto-scan for {}: {}",
-                    normalized_identifier,
-                    e
-                );
-            } else if asset.confidence >= auto_scan_threshold {
-                // Upper-bound counter; real dedup happens inside maybe_trigger_auto_scan.
-                let mut statuses = self.status.lock().await;
-                let status = statuses
-                    .entry(company_id)
-                    .or_insert_with(DiscoveryStatus::default);
-                status.scans_queued += 1;
-            }
-        }
+        self.consider_auto_scan(
+            run_id,
+            company_id,
+            asset.id,
+            &normalized_identifier,
+            &asset_type,
+            asset.confidence,
+        )
+        .await;
 
         Ok(Some((asset.id, was_created)))
     }
@@ -4309,7 +4520,7 @@ impl Clone for DiscoveryService {
             discovery_queue_repo: Arc::clone(&self.discovery_queue_repo),
             asset_source_repo: Arc::clone(&self.asset_source_repo),
             asset_relationship_repo: Arc::clone(&self.asset_relationship_repo),
-            blacklist_repo: Arc::clone(&self.blacklist_repo),
+            exclusion_repo: Arc::clone(&self.exclusion_repo),
             security_scan_service: self.security_scan_service.clone(),
             risk_service: Arc::clone(&self.risk_service),
             external_services: Arc::clone(&self.external_services),
@@ -4322,7 +4533,7 @@ impl Clone for DiscoveryService {
             status: Arc::clone(&self.status),
             ip_cloud_provider_cache: Arc::clone(&self.ip_cloud_provider_cache),
             swept_prefixes: Arc::clone(&self.swept_prefixes),
-            blacklist_cache: Arc::clone(&self.blacklist_cache),
+            exclusion_cache: Arc::clone(&self.exclusion_cache),
         }
     }
 }
@@ -4556,126 +4767,207 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Blacklist snapshot
+    // Exclusion snapshot
     // ------------------------------------------------------------------
 
-    fn blacklist_entry(object_type: &str, object_value: &str) -> crate::models::BlacklistEntry {
-        crate::models::BlacklistEntry {
+    fn entry(object_type: &str, object_value: &str, blacklisted: bool) -> ExclusionEntry {
+        ExclusionEntry {
             id: Uuid::new_v4(),
             object_type: object_type.to_string(),
             object_value: object_value.to_string(),
             company_id: Uuid::new_v4(),
             reason: None,
             created_by: None,
+            blacklisted,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
     }
 
-    #[test]
-    fn blacklisted_domain_covers_itself_and_its_subdomains() {
-        let snapshot =
-            BlacklistSnapshot::from_entries(vec![blacklist_entry("domain", "Example.COM")]);
+    fn excluded(object_type: &str, object_value: &str) -> ExclusionEntry {
+        entry(object_type, object_value, false)
+    }
 
-        assert!(snapshot.covers_domain("example.com"));
-        assert!(snapshot.covers_domain("api.example.com"));
-        assert!(snapshot.covers_domain("a.b.example.com"));
+    fn blacklisted(object_type: &str, object_value: &str) -> ExclusionEntry {
+        entry(object_type, object_value, true)
+    }
+
+    #[test]
+    fn an_excluded_domain_covers_itself_and_its_subdomains() {
+        let snapshot = ExclusionSnapshot::from_entries(vec![excluded("domain", "Example.COM")]);
+        let covers = |name: &str| snapshot.level("domain", name).is_excluded();
+
+        assert!(covers("example.com"));
+        assert!(covers("api.example.com"));
+        assert!(covers("a.b.example.com"));
         // Trailing dots and casing are normalisation, not different names.
-        assert!(snapshot.covers_domain("API.Example.com."));
+        assert!(covers("API.Example.com."));
 
         // A suffix that is not a label boundary is a different domain.
-        assert!(!snapshot.covers_domain("notexample.com"));
-        assert!(!snapshot.covers_domain("example.com.evil.net"));
-        assert!(!snapshot.covers_domain("example.org"));
+        assert!(!covers("notexample.com"));
+        assert!(!covers("example.com.evil.net"));
+        assert!(!covers("example.org"));
     }
 
     #[test]
     fn a_bare_tld_entry_does_not_swallow_every_domain() {
         // Mirrors the repository, which only ever compares parents of two
         // labels or more.
-        let snapshot = BlacklistSnapshot::from_entries(vec![blacklist_entry("domain", "com")]);
+        let snapshot = ExclusionSnapshot::from_entries(vec![excluded("domain", "com")]);
 
-        assert!(snapshot.covers_domain("com"));
-        assert!(!snapshot.covers_domain("example.com"));
+        assert!(snapshot.level("domain", "com").is_excluded());
+        assert!(!snapshot.level("domain", "example.com").is_excluded());
     }
 
     #[test]
-    fn blacklisted_cidr_covers_the_addresses_inside_it() {
-        let snapshot = BlacklistSnapshot::from_entries(vec![
-            blacklist_entry("cidr", "10.0.0.0/24"),
-            blacklist_entry("ip", "192.0.2.7"),
+    fn an_excluded_cidr_covers_the_addresses_inside_it() {
+        let snapshot = ExclusionSnapshot::from_entries(vec![
+            excluded("cidr", "10.0.0.0/24"),
+            excluded("ip", "192.0.2.7"),
         ]);
+        let covers = |ip: &str| snapshot.level("ip", ip).is_excluded();
 
-        assert!(snapshot.covers_ip("10.0.0.1"));
-        assert!(snapshot.covers_ip("10.0.0.255"));
-        assert!(!snapshot.covers_ip("10.0.1.1"));
+        assert!(covers("10.0.0.1"));
+        assert!(covers("10.0.0.255"));
+        assert!(!covers("10.0.1.1"));
 
-        assert!(snapshot.covers_ip("192.0.2.7"));
-        assert!(!snapshot.covers_ip("192.0.2.8"));
+        assert!(covers("192.0.2.7"));
+        assert!(!covers("192.0.2.8"));
 
         // A hostname reaching the IP matcher must not be treated as an address.
-        assert!(!snapshot.covers_ip("example.com"));
+        assert!(!covers("example.com"));
     }
 
     #[test]
-    fn blacklisted_cidr_covers_a_range_inside_it() {
-        let snapshot =
-            BlacklistSnapshot::from_entries(vec![blacklist_entry("cidr", "10.0.0.0/16")]);
+    fn an_excluded_cidr_covers_a_range_inside_it() {
+        let snapshot = ExclusionSnapshot::from_entries(vec![excluded("cidr", "10.0.0.0/16")]);
+        let covers = |cidr: &str| snapshot.level("cidr", cidr).is_excluded();
 
-        assert!(snapshot.covers_cidr("10.0.0.0/16"));
-        assert!(snapshot.covers_cidr("10.0.5.0/24"));
-        assert!(!snapshot.covers_cidr("10.1.0.0/24"));
-        // A range that contains the blacklisted one is not itself excluded.
-        assert!(!snapshot.covers_cidr("10.0.0.0/8"));
+        assert!(covers("10.0.0.0/16"));
+        assert!(covers("10.0.5.0/24"));
+        assert!(!covers("10.1.0.0/24"));
+        // A range that contains the excluded one is not itself excluded.
+        assert!(!covers("10.0.0.0/8"));
     }
 
     #[test]
     fn asn_matching_ignores_the_as_prefix() {
-        let snapshot = BlacklistSnapshot::from_entries(vec![blacklist_entry("asn", "AS64496")]);
+        let snapshot = ExclusionSnapshot::from_entries(vec![excluded("asn", "AS64496")]);
+        let covers = |asn: &str| snapshot.level("asn", asn).is_excluded();
 
-        assert!(snapshot.covers_asn("AS64496"));
-        assert!(snapshot.covers_asn("as64496"));
-        assert!(snapshot.covers_asn("64496"));
-        assert!(!snapshot.covers_asn("64497"));
+        assert!(covers("AS64496"));
+        assert!(covers("as64496"));
+        assert!(covers("64496"));
+        assert!(!covers("64497"));
     }
 
     #[test]
     fn an_unparseable_cidr_entry_is_dropped_rather_than_matching_everything() {
-        let snapshot = BlacklistSnapshot::from_entries(vec![blacklist_entry("cidr", "not-a-cidr")]);
+        let snapshot = ExclusionSnapshot::from_entries(vec![excluded("cidr", "not-a-cidr")]);
 
         assert!(snapshot.is_empty());
-        assert!(!snapshot.covers_ip("10.0.0.1"));
+        assert!(!snapshot.level("ip", "10.0.0.1").is_excluded());
     }
 
     #[test]
-    fn an_empty_blacklist_matches_nothing() {
-        let snapshot = BlacklistSnapshot::from_entries(vec![]);
+    fn an_empty_exclusion_list_matches_nothing() {
+        let snapshot = ExclusionSnapshot::from_entries(vec![]);
 
         assert!(snapshot.is_empty());
-        assert!(!snapshot.covers_domain("example.com"));
-        assert!(!snapshot.covers_ip("10.0.0.1"));
-        assert!(!snapshot.covers_organization("acme"));
-        assert!(!snapshot.covers_certificate("CN=acme"));
+        assert!(!snapshot.level("domain", "example.com").is_excluded());
+        assert!(!snapshot.level("ip", "10.0.0.1").is_excluded());
+        assert!(!snapshot.level("organization", "acme").is_excluded());
+        assert!(!snapshot.level("certificate", "CN=acme").is_excluded());
     }
 
     #[test]
     fn organization_and_certificate_entries_match_their_own_value() {
-        let snapshot = BlacklistSnapshot::from_entries(vec![
-            blacklist_entry("organization", "Acme Corp"),
-            blacklist_entry("certificate", "CN=acme.example.com"),
+        let snapshot = ExclusionSnapshot::from_entries(vec![
+            excluded("organization", "Acme Corp"),
+            excluded("certificate", "CN=acme.example.com"),
         ]);
 
-        assert!(snapshot.covers_organization("acme corp"));
-        assert!(snapshot.covers_organization("  ACME Corp  "));
-        assert!(!snapshot.covers_organization("acme"));
+        assert!(snapshot.level("organization", "acme corp").is_excluded());
+        assert!(snapshot
+            .level("organization", "  ACME Corp  ")
+            .is_excluded());
+        assert!(!snapshot.level("organization", "acme").is_excluded());
 
-        assert!(snapshot.covers_certificate("CN=acme.example.com"));
-        assert!(!snapshot.covers_certificate("CN=other.example.com"));
+        assert!(snapshot
+            .level("certificate", "CN=acme.example.com")
+            .is_excluded());
+        assert!(!snapshot
+            .level("certificate", "CN=other.example.com")
+            .is_excluded());
     }
 
     #[test]
     fn a_fresh_snapshot_is_not_expired() {
-        let snapshot = BlacklistSnapshot::from_entries(vec![]);
+        let snapshot = ExclusionSnapshot::from_entries(vec![]);
         assert!(!snapshot.is_expired());
+    }
+
+    // ------------------------------------------------------------------
+    // Exclusion strength
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn an_ordinary_exclusion_is_excluded_but_not_blacklisted() {
+        let snapshot = ExclusionSnapshot::from_entries(vec![excluded("domain", "cdn.example")]);
+
+        let level = snapshot.level("domain", "assets.cdn.example");
+        assert_eq!(level, ExclusionLevel::Excluded);
+        assert!(level.is_excluded());
+        // The whole point of the distinction: discovery leaves this one's
+        // assets alone rather than deleting them.
+        assert!(!level.is_blacklisted());
+    }
+
+    #[test]
+    fn a_blacklist_reaches_everything_an_exclusion_would() {
+        let snapshot = ExclusionSnapshot::from_entries(vec![
+            blacklisted("domain", "not-ours.example"),
+            blacklisted("cidr", "198.51.100.0/24"),
+        ]);
+
+        assert_eq!(
+            snapshot.level("domain", "www.not-ours.example"),
+            ExclusionLevel::Blacklisted
+        );
+        assert_eq!(
+            snapshot.level("ip", "198.51.100.9"),
+            ExclusionLevel::Blacklisted
+        );
+        assert_eq!(
+            snapshot.level("domain", "ours.example"),
+            ExclusionLevel::None
+        );
+    }
+
+    #[test]
+    fn the_stronger_entry_wins_when_both_cover_the_same_name() {
+        // A domain excluded outright and a subdomain of it blacklisted: the
+        // subdomain has to come back blacklisted, or it would be kept.
+        let snapshot = ExclusionSnapshot::from_entries(vec![
+            excluded("domain", "example.com"),
+            blacklisted("domain", "dead.example.com"),
+        ]);
+
+        assert_eq!(
+            snapshot.level("domain", "example.com"),
+            ExclusionLevel::Excluded
+        );
+        assert_eq!(
+            snapshot.level("domain", "api.example.com"),
+            ExclusionLevel::Excluded
+        );
+        assert_eq!(
+            snapshot.level("domain", "dead.example.com"),
+            ExclusionLevel::Blacklisted
+        );
+        assert_eq!(
+            snapshot.level("domain", "www.dead.example.com"),
+            ExclusionLevel::Blacklisted
+        );
     }
 }

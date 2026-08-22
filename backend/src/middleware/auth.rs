@@ -17,7 +17,7 @@ use axum_extra::extract::cookie::PrivateCookieJar;
 /// day access is granted per company in `user_companies`, which nothing
 /// outside `require_company_admin` ever read. The result was that every
 /// `has_role(Role::Analyst | Operator | Admin)` gate in the codebase —
-/// finding triage, asset importance and comments, tagging, the blacklist,
+/// finding triage, asset importance and comments, tagging, exclusions,
 /// risk recalculation, search reindex — answered 403 for everyone except a
 /// global admin, however the company had been set up.
 ///

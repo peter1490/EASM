@@ -1,16 +1,17 @@
-//! What stopping a discovery run, and blacklisting during one, are supposed to
+//! What stopping a discovery run, and excluding during one, are supposed to
 //! reach.
 //!
-//! These three behaviours all cross a service boundary that unit tests cannot
-//! see over — the discovery service owns the run, the scan service owns the
-//! scans it queued, and the blacklist owns neither — so they are exercised
+//! These behaviours all cross a service boundary that unit tests cannot see
+//! over — the discovery service owns the run, the scan service owns the scans
+//! it queued, and the exclusion list owns neither — so they are exercised
 //! against a real database through the real services.
 //!
 //! Requires `DATABASE_URL`. Skipped, loudly, when it is not set.
 
 use rust_backend::models::{
-    BlacklistCreate, BlacklistObjectType, DiscoveryQueueItemCreate, DiscoveryRunCreate,
-    QueueItemType, ScanTriggerType, SecurityScanCreate, SecurityScanType, TriggerType,
+    DiscoveryQueueItemCreate, DiscoveryRunCreate, ExclusionCreate, ExclusionObjectType,
+    ExclusionUpdate, QueueItemType, ScanTriggerType, SecurityScanCreate, SecurityScanType,
+    TriggerType,
 };
 use rust_backend::{config, AppState};
 use uuid::Uuid;
@@ -36,12 +37,12 @@ async fn app_state() -> AppState {
         .expect("app state")
 }
 
-/// A company of its own per test, so runs and blacklists cannot collide.
+/// A company of its own per test, so runs and exclusions cannot collide.
 async fn company(state: &AppState) -> Uuid {
     let company_id = Uuid::new_v4();
     sqlx::query("INSERT INTO companies (id, name) VALUES ($1, $2)")
         .bind(company_id)
-        .bind(format!("stop-blacklist-test-{}", company_id))
+        .bind(format!("stop-exclusion-test-{}", company_id))
         .execute(&state.db_pool)
         .await
         .expect("insert company");
@@ -62,6 +63,39 @@ async fn asset(state: &AppState, company_id: Uuid, asset_type: &str, identifier:
     .await
     .expect("insert asset");
     asset_id
+}
+
+/// An asset discovered *through* another one, which is what the blacklist
+/// purge follows when it deletes descendants.
+async fn child_asset(
+    state: &AppState,
+    company_id: Uuid,
+    asset_type: &str,
+    identifier: &str,
+    parent_id: Uuid,
+) -> Uuid {
+    let asset_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO assets (id, asset_type, identifier, confidence, company_id, metadata, parent_id)
+         VALUES ($1, $2::asset_type, $3, 1.0, $4, '{}'::jsonb, $5)",
+    )
+    .bind(asset_id)
+    .bind(asset_type)
+    .bind(identifier)
+    .bind(company_id)
+    .bind(parent_id)
+    .execute(&state.db_pool)
+    .await
+    .expect("insert child asset");
+    asset_id
+}
+
+async fn asset_exists(state: &AppState, asset_id: Uuid) -> bool {
+    sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM assets WHERE id = $1)")
+        .bind(asset_id)
+        .fetch_one(&state.db_pool)
+        .await
+        .expect("read asset existence")
 }
 
 async fn scan_status(state: &AppState, scan_id: Uuid) -> String {
@@ -247,25 +281,31 @@ async fn blacklisting_mid_run_clears_the_queue_and_stops_the_scans() {
     let kept_scan = pending_scan(&state, company_id, kept_asset, Some(run.id)).await;
 
     state
-        .blacklist_repository
+        .exclusion_repository
         .create(
-            &BlacklistCreate {
-                object_type: BlacklistObjectType::Domain,
+            &ExclusionCreate {
+                object_type: ExclusionObjectType::Domain,
                 object_value: "blocked.test".to_string(),
                 reason: None,
                 delete_descendants: false,
+                blacklisted: true,
             },
             None,
             company_id,
         )
         .await
-        .expect("create blacklist entry");
+        .expect("create exclusion entry");
 
     let (queue_removed, scans_cancelled) = state
         .discovery_service
-        .apply_blacklist_entry(company_id, &BlacklistObjectType::Domain, "blocked.test")
+        .apply_exclusion_entry(
+            company_id,
+            &ExclusionObjectType::Domain,
+            "blocked.test",
+            true,
+        )
         .await
-        .expect("apply blacklist entry");
+        .expect("apply exclusion entry");
 
     assert_eq!(queue_removed, 2, "the domain and its subdomain are dropped");
     assert_eq!(
@@ -300,6 +340,285 @@ async fn blacklisting_mid_run_clears_the_queue_and_stops_the_scans() {
 }
 
 #[tokio::test]
+async fn excluding_mid_run_clears_the_queue_but_leaves_the_scans_alone() {
+    let Some(_) = database_url() else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    let state = app_state().await;
+    let company_id = company(&state).await;
+
+    let run = state
+        .discovery_run_repository
+        .create(&DiscoveryRunCreate::default(), company_id)
+        .await
+        .expect("create run");
+    state
+        .discovery_run_repository
+        .start(company_id, &run.id)
+        .await
+        .expect("start run");
+
+    enqueue(&state, run.id, QueueItemType::Domain, "soft.test").await;
+    enqueue(&state, run.id, QueueItemType::Domain, "api.soft.test").await;
+
+    let kept = asset(&state, company_id, "domain", "api.soft.test").await;
+    let scan = pending_scan(&state, company_id, kept, Some(run.id)).await;
+
+    state
+        .exclusion_repository
+        .create(
+            &ExclusionCreate {
+                object_type: ExclusionObjectType::Domain,
+                object_value: "soft.test".to_string(),
+                reason: None,
+                delete_descendants: false,
+                blacklisted: false,
+            },
+            None,
+            company_id,
+        )
+        .await
+        .expect("create exclusion entry");
+
+    let (queue_removed, scans_cancelled) = state
+        .discovery_service
+        .apply_exclusion_entry(company_id, &ExclusionObjectType::Domain, "soft.test", false)
+        .await
+        .expect("apply exclusion entry");
+
+    // Queued items are plans to find *more* of this, which the exclusion ends.
+    assert_eq!(queue_removed, 2);
+    assert_eq!(
+        queue_status(&state, run.id, "api.soft.test")
+            .await
+            .as_deref(),
+        Some("skipped")
+    );
+
+    // The asset itself is the operator's and stays scannable: an ordinary
+    // exclusion means "stop finding more", not "stop looking at what I have".
+    assert_eq!(scans_cancelled, 0);
+    assert_eq!(scan_status(&state, scan).await, "pending");
+    assert!(asset_exists(&state, kept).await);
+}
+
+#[tokio::test]
+async fn blacklisting_deletes_the_named_asset_and_its_descendants() {
+    let Some(_) = database_url() else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    let state = app_state().await;
+    let company_id = company(&state).await;
+
+    let root = asset(&state, company_id, "domain", "gone.test").await;
+    let child = child_asset(&state, company_id, "domain", "api.gone.test", root).await;
+    let grandchild = child_asset(&state, company_id, "ip", "203.0.113.5", child).await;
+    // Matches the rule but was never discovered through the root, so it is not
+    // a descendant: the purge leaves it for the rule to keep out later.
+    let sibling = asset(&state, company_id, "domain", "orphan.gone.test").await;
+    let unrelated = asset(&state, company_id, "domain", "keep.test").await;
+
+    let deleted = state
+        .exclusion_repository
+        .purge_entry_assets(company_id, &ExclusionObjectType::Domain, "gone.test")
+        .await
+        .expect("purge entry assets");
+
+    assert_eq!(deleted, 3, "the named asset and both of its descendants");
+    assert!(!asset_exists(&state, root).await);
+    assert!(!asset_exists(&state, child).await);
+    assert!(!asset_exists(&state, grandchild).await);
+    assert!(asset_exists(&state, sibling).await);
+    assert!(asset_exists(&state, unrelated).await);
+}
+
+#[tokio::test]
+async fn blacklisting_takes_the_findings_and_scans_with_the_asset() {
+    let Some(_) = database_url() else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    let state = app_state().await;
+    let company_id = company(&state).await;
+
+    let target = asset(&state, company_id, "domain", "scored.test").await;
+    let scan = pending_scan(&state, company_id, target, None).await;
+    sqlx::query(
+        "INSERT INTO security_findings
+             (id, asset_id, company_id, security_scan_id, finding_type, title, severity, status)
+         VALUES (gen_random_uuid(), $1, $2, $3, 'test', 'test finding', 'high', 'open')",
+    )
+    .bind(target)
+    .bind(company_id)
+    .bind(scan)
+    .execute(&state.db_pool)
+    .await
+    .expect("insert finding");
+
+    state
+        .exclusion_repository
+        .purge_entry_assets(company_id, &ExclusionObjectType::Domain, "scored.test")
+        .await
+        .expect("purge entry assets");
+
+    // "Removed from any score" is this: the findings the score reads are gone
+    // with the asset, because every one of those tables cascades from it.
+    let findings =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM security_findings WHERE asset_id = $1")
+            .bind(target)
+            .fetch_one(&state.db_pool)
+            .await
+            .expect("count findings");
+    let scans =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM security_scans WHERE asset_id = $1")
+            .bind(target)
+            .fetch_one(&state.db_pool)
+            .await
+            .expect("count scans");
+
+    assert_eq!(findings, 0);
+    assert_eq!(scans, 0);
+}
+
+#[tokio::test]
+async fn excluding_something_already_excluded_promotes_it_instead_of_failing() {
+    let Some(_) = database_url() else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    let state = app_state().await;
+    let company_id = company(&state).await;
+
+    let soft = state
+        .exclusion_repository
+        .create(
+            &ExclusionCreate {
+                object_type: ExclusionObjectType::Domain,
+                object_value: "promote.test".to_string(),
+                reason: Some("cdn".to_string()),
+                delete_descendants: false,
+                blacklisted: false,
+            },
+            None,
+            company_id,
+        )
+        .await
+        .expect("create exclusion entry");
+    assert!(!soft.blacklisted);
+
+    // The natural way to blacklist something is to blacklist a thing you have
+    // already excluded; a unique violation would be a poor answer to that.
+    let hard = state
+        .exclusion_repository
+        .create(
+            &ExclusionCreate {
+                object_type: ExclusionObjectType::Domain,
+                object_value: "promote.test".to_string(),
+                reason: None,
+                delete_descendants: false,
+                blacklisted: true,
+            },
+            None,
+            company_id,
+        )
+        .await
+        .expect("promote exclusion entry");
+
+    assert_eq!(hard.id, soft.id, "the same row, made stronger");
+    assert!(hard.blacklisted);
+    assert_eq!(
+        hard.reason.as_deref(),
+        Some("cdn"),
+        "a promotion with no reason keeps the one already recorded"
+    );
+
+    // And it does not swing back on a plain re-exclude.
+    let again = state
+        .exclusion_repository
+        .create(
+            &ExclusionCreate {
+                object_type: ExclusionObjectType::Domain,
+                object_value: "promote.test".to_string(),
+                reason: None,
+                delete_descendants: false,
+                blacklisted: false,
+            },
+            None,
+            company_id,
+        )
+        .await
+        .expect("re-exclude");
+    assert!(again.blacklisted);
+}
+
+#[tokio::test]
+async fn editing_a_reason_leaves_the_strength_alone() {
+    let Some(_) = database_url() else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    let state = app_state().await;
+    let company_id = company(&state).await;
+
+    let entry = state
+        .exclusion_repository
+        .create(
+            &ExclusionCreate {
+                object_type: ExclusionObjectType::Domain,
+                object_value: "edit.test".to_string(),
+                reason: None,
+                delete_descendants: false,
+                blacklisted: true,
+            },
+            None,
+            company_id,
+        )
+        .await
+        .expect("create exclusion entry");
+
+    // The common edit: a reason, and nothing else. Leaving `blacklisted` unset
+    // must not quietly demote the entry.
+    let renamed = state
+        .exclusion_repository
+        .update(
+            company_id,
+            &entry.id,
+            &ExclusionUpdate {
+                reason: Some("shared host".to_string()),
+                blacklisted: None,
+            },
+        )
+        .await
+        .expect("update reason");
+
+    assert_eq!(renamed.reason.as_deref(), Some("shared host"));
+    assert!(renamed.blacklisted, "an unset field is not a demotion");
+
+    // And an explicit demotion still works.
+    let demoted = state
+        .exclusion_repository
+        .update(
+            company_id,
+            &entry.id,
+            &ExclusionUpdate {
+                reason: None,
+                blacklisted: Some(false),
+            },
+        )
+        .await
+        .expect("demote entry");
+
+    assert!(!demoted.blacklisted);
+    assert_eq!(
+        demoted.reason.as_deref(),
+        Some("shared host"),
+        "an unset reason is not a deletion either"
+    );
+}
+
+#[tokio::test]
 async fn blacklisting_a_cidr_reaches_the_addresses_inside_it() {
     let Some(_) = database_url() else {
         eprintln!("DATABASE_URL not set — skipping");
@@ -330,25 +649,26 @@ async fn blacklisting_a_cidr_reaches_the_addresses_inside_it() {
     let outside_scan = pending_scan(&state, company_id, outside, Some(run.id)).await;
 
     state
-        .blacklist_repository
+        .exclusion_repository
         .create(
-            &BlacklistCreate {
-                object_type: BlacklistObjectType::Cidr,
+            &ExclusionCreate {
+                object_type: ExclusionObjectType::Cidr,
                 object_value: "10.10.0.0/16".to_string(),
                 reason: None,
                 delete_descendants: false,
+                blacklisted: true,
             },
             None,
             company_id,
         )
         .await
-        .expect("create blacklist entry");
+        .expect("create exclusion entry");
 
     let (queue_removed, scans_cancelled) = state
         .discovery_service
-        .apply_blacklist_entry(company_id, &BlacklistObjectType::Cidr, "10.10.0.0/16")
+        .apply_exclusion_entry(company_id, &ExclusionObjectType::Cidr, "10.10.0.0/16", true)
         .await
-        .expect("apply blacklist entry");
+        .expect("apply exclusion entry");
 
     assert_eq!(queue_removed, 1);
     assert_eq!(
@@ -401,12 +721,12 @@ async fn a_blacklist_added_after_a_run_stops_still_reaches_its_leftovers() {
 
     let (queue_removed, _) = state
         .discovery_service
-        .apply_blacklist_entry(company_id, &BlacklistObjectType::Domain, "late.test")
+        .apply_exclusion_entry(company_id, &ExclusionObjectType::Domain, "late.test", true)
         .await
-        .expect("apply blacklist entry");
+        .expect("apply exclusion entry");
 
     // Nothing is dequeuing a cancelled run, so its leftovers are not the
-    // blacklist's problem -- they are cleared with the run itself.
+    // exclusion list's problem -- they are cleared with the run itself.
     assert_eq!(queue_removed, 0);
 
     state
@@ -427,30 +747,31 @@ async fn a_blacklisted_asset_is_not_written_by_discovery() {
     let company_id = company(&state).await;
 
     state
-        .blacklist_repository
+        .exclusion_repository
         .create(
-            &BlacklistCreate {
-                object_type: BlacklistObjectType::Domain,
+            &ExclusionCreate {
+                object_type: ExclusionObjectType::Domain,
                 object_value: "excluded.test".to_string(),
                 reason: None,
                 delete_descendants: false,
+                blacklisted: true,
             },
             None,
             company_id,
         )
         .await
-        .expect("create blacklist entry");
+        .expect("create exclusion entry");
 
     // Written before the entry existed, so it is what a mid-run blacklist
-    // leaves behind and what `find_blacklisted_ids` has to find again.
+    // leaves behind and what `find_excluded_ids` has to find again.
     let sub = asset(&state, company_id, "domain", "api.excluded.test").await;
     let unrelated = asset(&state, company_id, "domain", "other.test").await;
 
     let found = state
         .asset_repository
-        .find_blacklisted_ids(company_id, &BlacklistObjectType::Domain, "excluded.test")
+        .find_excluded_ids(company_id, &ExclusionObjectType::Domain, "excluded.test")
         .await
-        .expect("find blacklisted ids");
+        .expect("find excluded ids");
 
     assert!(
         found.contains(&sub),

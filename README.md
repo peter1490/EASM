@@ -328,6 +328,25 @@ Key variables:
 - `POST /api/discovery/run` - Start discovery process
 - `GET /api/discovery/status` - Get discovery status
 
+### Exclusions
+- `GET /api/exclusions` - List exclusion entries
+- `POST /api/exclusions` - Exclude an object
+  `{ object_type, object_value, reason?, delete_descendants?, blacklisted? }`
+- `POST /api/exclusions/from-asset/:id` - Exclude one asset by id
+- `PATCH /api/exclusions/:id` - Edit the reason, or promote to a blacklist
+- `DELETE /api/exclusions/:id` - Put the object back in scope
+- `POST /api/exclusions/check` - Is this object excluded?
+- `GET /api/exclusions/stats` - Counts by type
+
+An **exclusion** stops discovery finding anything *new* through an object —
+a CDN, a shared host, a provider netblock — while keeping what it already found:
+those assets stay in the inventory, keep their findings, keep counting towards
+the risk score, and are still auto-scanned by later runs. Set `blacklisted` and
+it becomes the hard version instead: the asset named and everything discovered
+through it are deleted, findings and scans included, and discovery never stores
+them again. It is off by default, because excluding can be undone and deleting
+cannot.
+
 ### Evidence
 - `POST /api/scans/:scan_id/evidence` - Upload evidence
 - `GET /api/scans/:scan_id/evidence` - List evidence by scan

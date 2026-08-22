@@ -1,10 +1,10 @@
-import type { BlacklistObjectType } from "@/app/api";
+import type { ExclusionObjectType } from "@/app/api";
 import type { IconName } from "@/components/kit";
 import { humanise } from "@/lib/format";
 
 /** The object kinds an exclusion can cover, with the example each one needs. */
 export const EXCLUSION_TYPES: Array<{
-  value: BlacklistObjectType;
+  value: ExclusionObjectType;
   label: string;
   icon: IconName;
   placeholder: string;

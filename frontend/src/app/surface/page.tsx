@@ -879,7 +879,7 @@ function Surface() {
             variant="drawer"
             initialAsset={drawerAsset?.id === openId ? drawerAsset : null}
             onAssetChange={patchAsset}
-            onBlacklisted={() => void fetchPage()}
+            onExcluded={() => void fetchPage()}
             extraActions={
               <Button size="sm" icon="external" onClick={() => router.push(`/surface/${openId}`)}>
                 Open full page

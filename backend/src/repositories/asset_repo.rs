@@ -39,15 +39,15 @@ pub trait AssetRepository {
         identifier: &str,
     ) -> Result<Option<Asset>, ApiError>;
     async fn get_path(&self, company_id: Uuid, id: &Uuid) -> Result<Vec<Asset>, ApiError>;
-    /// Ids of the assets a blacklist entry covers.
+    /// Ids of the assets an exclusion entry covers.
     ///
     /// Matched in SQL rather than by listing and filtering: the list endpoint
     /// is paginated, so a company past the page size would have had part of its
-    /// blacklisted estate silently missed.
-    async fn find_blacklisted_ids(
+    /// excluded estate silently missed.
+    async fn find_excluded_ids(
         &self,
         company_id: Uuid,
-        object_type: &crate::models::BlacklistObjectType,
+        object_type: &crate::models::ExclusionObjectType,
         object_value: &str,
     ) -> Result<Vec<Uuid>, ApiError>;
     async fn update_confidence(
@@ -545,13 +545,13 @@ impl AssetRepository for SqlxAssetRepository {
         Ok(assets)
     }
 
-    async fn find_blacklisted_ids(
+    async fn find_excluded_ids(
         &self,
         company_id: Uuid,
-        object_type: &crate::models::BlacklistObjectType,
+        object_type: &crate::models::ExclusionObjectType,
         object_value: &str,
     ) -> Result<Vec<Uuid>, ApiError> {
-        use crate::models::BlacklistObjectType;
+        use crate::models::ExclusionObjectType;
 
         let value = object_value.trim().to_lowercase();
         if value.is_empty() {
@@ -561,7 +561,7 @@ impl AssetRepository for SqlxAssetRepository {
         // A domain entry covers the name and everything under it; a CIDR covers
         // every address inside it. The rest are their own single asset.
         let sql = match object_type {
-            BlacklistObjectType::Domain => {
+            ExclusionObjectType::Domain => {
                 r#"
                 SELECT id FROM assets
                 WHERE company_id = $1
@@ -569,7 +569,7 @@ impl AssetRepository for SqlxAssetRepository {
                   AND (LOWER(identifier) = $2 OR LOWER(identifier) LIKE '%.' || $2)
                 "#
             }
-            BlacklistObjectType::Cidr => {
+            ExclusionObjectType::Cidr => {
                 // The regex guards the cast: one malformed identifier would
                 // otherwise abort the query for the whole company.
                 r#"
@@ -580,7 +580,7 @@ impl AssetRepository for SqlxAssetRepository {
                   AND identifier::inet <<= $2::inet
                 "#
             }
-            BlacklistObjectType::Ip => {
+            ExclusionObjectType::Ip => {
                 r#"
                 SELECT id FROM assets
                 WHERE company_id = $1
@@ -588,7 +588,7 @@ impl AssetRepository for SqlxAssetRepository {
                   AND LOWER(identifier) = $2
                 "#
             }
-            BlacklistObjectType::Organization => {
+            ExclusionObjectType::Organization => {
                 r#"
                 SELECT id FROM assets
                 WHERE company_id = $1
@@ -596,7 +596,7 @@ impl AssetRepository for SqlxAssetRepository {
                   AND LOWER(identifier) = $2
                 "#
             }
-            BlacklistObjectType::Asn => {
+            ExclusionObjectType::Asn => {
                 // `AS64496` and `64496` name the same autonomous system.
                 r#"
                 SELECT id FROM assets
@@ -605,7 +605,7 @@ impl AssetRepository for SqlxAssetRepository {
                   AND LTRIM(LOWER(identifier), 'as') = LTRIM($2, 'as')
                 "#
             }
-            BlacklistObjectType::Certificate => {
+            ExclusionObjectType::Certificate => {
                 r#"
                 SELECT id FROM assets
                 WHERE company_id = $1

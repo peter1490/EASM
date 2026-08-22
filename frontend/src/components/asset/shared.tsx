@@ -5,13 +5,13 @@ import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import { Icon } from "@/components/kit";
 import { useAuth } from "@/context/AuthContext";
-import type { Asset, BlacklistObjectType } from "@/app/api";
+import type { Asset, ExclusionObjectType } from "@/app/api";
 
 /**
  * Whether this user may change anything on an asset.
  *
- * The write endpoints behind these controls — importance, comment, tags, the
- * blacklist — all gate on Analyst or higher, counting the active company's
+ * The write endpoints behind these controls — importance, comment, tags,
+ * exclusions — all gate on Analyst or higher, counting the active company's
  * role, so `viewer` is the one role that is genuinely read-only.
  *
  * Deliberately permissive beyond that: an unknown or missing role still gets
@@ -44,8 +44,8 @@ export function confidenceColor(value: number | null | undefined): string {
   return "var(--crit)";
 }
 
-/** Blacklist entries are typed by object, and ports cannot be blacklisted. */
-export function toBlacklistObjectType(assetType: Asset["asset_type"]): BlacklistObjectType | null {
+/** Exclusion entries are typed by object, and ports cannot be excluded. */
+export function toExclusionObjectType(assetType: Asset["asset_type"]): ExclusionObjectType | null {
   switch (assetType) {
     case "domain":
       return "domain";

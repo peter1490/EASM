@@ -34,7 +34,7 @@ import {
   riskTone,
   severityTone,
 } from "@/lib/severity";
-import { ago, elapsed, num, pct, plural, score } from "@/lib/format";
+import { ago, dateTime, elapsed, num, pct, plural, score } from "@/lib/format";
 import { useAuth } from "@/context/AuthContext";
 
 const RANGES = [
@@ -561,7 +561,17 @@ function AssetQueue({ assets }: { assets: Asset[] }) {
                 </div>
               </TD>
               <TD className="mono text-[12px] text-ink-2">{asset.ownership_confidence.toFixed(2)}</TD>
-              <TD className="text-[12px] text-ink-3">{ago(asset.last_scanned_at)}</TD>
+              {/* Same column, same rule as Surface: a stopped scan says so
+                  rather than reading as a host nobody looked at. */}
+              <TD className="text-[12px] text-ink-3">
+                {asset.last_scanned_at ? (
+                  ago(asset.last_scanned_at)
+                ) : asset.last_cancelled_scan_at ? (
+                  <span title={dateTime(asset.last_cancelled_scan_at)}>cancelled</span>
+                ) : (
+                  "never"
+                )}
+              </TD>
             </TR>
           );
         })}

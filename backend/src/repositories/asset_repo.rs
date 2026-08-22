@@ -309,7 +309,7 @@ impl AssetRepository for SqlxAssetRepository {
                         a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
                         a.first_seen_at, a.last_seen_at, a.last_discovery_run_id, a.status, a.discovery_method,
                         a.importance, a.risk_score, a.risk_level, a.last_risk_run,
-                        a.last_scan_id, a.last_scan_status, a.last_scanned_at,
+                        a.last_scan_id, a.last_scan_status, a.last_scanned_at, a.last_cancelled_scan_at,
                         a.open_critical, a.open_high, a.open_medium, a.open_low, a.open_info, a.open_total
                     FROM assets_enriched a
                     WHERE a.company_id = $3 AND a.confidence >= $1
@@ -332,7 +332,7 @@ impl AssetRepository for SqlxAssetRepository {
                         a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
                         a.first_seen_at, a.last_seen_at, a.last_discovery_run_id, a.status, a.discovery_method,
                         a.importance, a.risk_score, a.risk_level, a.last_risk_run,
-                        a.last_scan_id, a.last_scan_status, a.last_scanned_at,
+                        a.last_scan_id, a.last_scan_status, a.last_scanned_at, a.last_cancelled_scan_at,
                         a.open_critical, a.open_high, a.open_medium, a.open_low, a.open_info, a.open_total
                     FROM assets_enriched a
                     WHERE a.company_id = $3
@@ -395,7 +395,7 @@ impl AssetRepository for SqlxAssetRepository {
                         a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
                         a.first_seen_at, a.last_seen_at, a.last_discovery_run_id, a.status, a.discovery_method,
                         a.importance, a.risk_score, a.risk_level, a.last_risk_run,
-                        a.last_scan_id, a.last_scan_status, a.last_scanned_at,
+                        a.last_scan_id, a.last_scan_status, a.last_scanned_at, a.last_cancelled_scan_at,
                         a.open_critical, a.open_high, a.open_medium, a.open_low, a.open_info, a.open_total
             FROM assets_enriched a
             WHERE a.id = $1 AND a.company_id = $2
@@ -425,7 +425,7 @@ impl AssetRepository for SqlxAssetRepository {
                         a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
                         a.first_seen_at, a.last_seen_at, a.last_discovery_run_id, a.status, a.discovery_method,
                         a.importance, a.risk_score, a.risk_level, a.last_risk_run,
-                        a.last_scan_id, a.last_scan_status, a.last_scanned_at,
+                        a.last_scan_id, a.last_scan_status, a.last_scanned_at, a.last_cancelled_scan_at,
                         a.open_critical, a.open_high, a.open_medium, a.open_low, a.open_info, a.open_total
                     FROM assets_enriched a
                     WHERE a.asset_type = $1 AND a.confidence >= $2 AND a.company_id = $3
@@ -446,7 +446,7 @@ impl AssetRepository for SqlxAssetRepository {
                         a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
                         a.first_seen_at, a.last_seen_at, a.last_discovery_run_id, a.status, a.discovery_method,
                         a.importance, a.risk_score, a.risk_level, a.last_risk_run,
-                        a.last_scan_id, a.last_scan_status, a.last_scanned_at,
+                        a.last_scan_id, a.last_scan_status, a.last_scanned_at, a.last_cancelled_scan_at,
                         a.open_critical, a.open_high, a.open_medium, a.open_low, a.open_info, a.open_total
                     FROM assets_enriched a
                     WHERE a.asset_type = $1 AND a.company_id = $2
@@ -476,7 +476,7 @@ impl AssetRepository for SqlxAssetRepository {
                         a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
                         a.first_seen_at, a.last_seen_at, a.last_discovery_run_id, a.status, a.discovery_method,
                         a.importance, a.risk_score, a.risk_level, a.last_risk_run,
-                        a.last_scan_id, a.last_scan_status, a.last_scanned_at,
+                        a.last_scan_id, a.last_scan_status, a.last_scanned_at, a.last_cancelled_scan_at,
                         a.open_critical, a.open_high, a.open_medium, a.open_low, a.open_info, a.open_total
             FROM assets_enriched a
             WHERE a.asset_type = $1 AND a.identifier = $2 AND a.company_id = $3
@@ -526,7 +526,7 @@ impl AssetRepository for SqlxAssetRepository {
                 ae.created_at, ae.updated_at, ae.seed_id, ae.parent_id, ae.company_id,
                 ae.first_seen_at, ae.last_seen_at, ae.last_discovery_run_id, ae.status, ae.discovery_method,
                 ae.importance, ae.risk_score, ae.risk_level, ae.last_risk_run,
-                ae.last_scan_id, ae.last_scan_status, ae.last_scanned_at,
+                ae.last_scan_id, ae.last_scan_status, ae.last_scanned_at, ae.last_cancelled_scan_at,
                 ae.open_critical, ae.open_high, ae.open_medium, ae.open_low, ae.open_info, ae.open_total
             FROM asset_path ap
             JOIN assets_enriched ae ON ae.id = ap.id
@@ -855,7 +855,7 @@ impl AssetRepository for SqlxAssetRepository {
                 a.created_at, a.updated_at, a.seed_id, a.parent_id, a.company_id,
                 a.first_seen_at, a.last_seen_at, a.last_discovery_run_id, a.status, a.discovery_method,
                 a.importance, a.risk_score, a.risk_level, a.last_risk_run,
-                a.last_scan_id, a.last_scan_status, a.last_scanned_at,
+                a.last_scan_id, a.last_scan_status, a.last_scanned_at, a.last_cancelled_scan_at,
                 a.open_critical, a.open_high, a.open_medium, a.open_low, a.open_info, a.open_total
             FROM assets_enriched a
             WHERE 
